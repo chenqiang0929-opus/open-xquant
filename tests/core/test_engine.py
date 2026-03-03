@@ -200,6 +200,61 @@ def test_apply_fill_buy() -> None:
     assert portfolio.positions["AAPL"].avg_cost == 150.0
 
 
+def test_engine_rebalance_rules() -> None:
+    """Engine should execute rebalance_rules and generate trades."""
+    from oxq.indicators.ratio import Ratio
+    from oxq.indicators.sma import SMA
+    from oxq.rules.rebalance import RebalanceRule
+    from oxq.signals.top_n_ranking import TopNRanking
+
+    n = 60
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    data: dict[str, pd.DataFrame] = {}
+    for sym, base, trend in [("A", 100, 1.5), ("B", 80, 0.8), ("C", 120, -0.5)]:
+        closes = [base + trend * i for i in range(n)]
+        data[sym] = pd.DataFrame(
+            {
+                "open": closes,
+                "high": [c + 1 for c in closes],
+                "low": [c - 1 for c in closes],
+                "close": closes,
+                "volume": [1_000_000] * n,
+            },
+            index=dates,
+        )
+
+    strategy = Strategy(
+        name="rotation_test",
+        hypothesis="Risk-adjusted momentum rotation",
+        universe=StaticUniverse(("A", "B", "C")),
+        indicators={
+            "sma_fast": (SMA(), {"column": "close", "period": 5}),
+            "sma_slow": (SMA(), {"column": "close", "period": 20}),
+            "ram": (Ratio(), {"col_a": "sma_fast", "col_b": "sma_slow"}),
+        },
+        signals={
+            "tw": (TopNRanking(), {"score": "ram", "n": 2, "max_weight": 0.9}),
+        },
+        entry_rules=[],
+        exit_rules=[],
+        rebalance_rules=[RebalanceRule(weight_col="tw", frequency=10)],
+    )
+
+    broker = SimBroker()
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        router=broker,
+        receiver=broker,
+        start="2024-01-01",
+        end="2024-12-31",
+    )
+
+    assert len(result.trades) > 0
+    assert len(result.equity_curve) == n
+    assert "tw" in result.mktdata["A"].columns
+
+
 def test_apply_fill_sell() -> None:
     portfolio = Portfolio(
         cash=50_000.0,

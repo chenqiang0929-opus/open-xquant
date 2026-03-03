@@ -108,7 +108,15 @@ class Engine:
         equity_curve: list[tuple[object, float]] = []
 
         for date in dates:
-            # Exit rules first (higher priority)
+            # Rebalance rules (priority 3)
+            for rule in strategy.rebalance_rules:
+                for symbol in universe.symbols:
+                    row = mktdata[symbol].loc[date]
+                    order = rule.evaluate(symbol, row, portfolio)
+                    if order:
+                        router.submit_order(order)
+
+            # Exit rules (priority 4)
             for rule in strategy.exit_rules:
                 for symbol in universe.symbols:
                     row = mktdata[symbol].loc[date]
