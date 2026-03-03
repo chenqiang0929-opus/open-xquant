@@ -94,7 +94,17 @@ strategy_add_indicator(strategy="sma_crossover", name="sma_10", type="SMA", para
 strategy_add_indicator(strategy="sma_crossover", name="sma_50", type="SMA", params={"column": "close", "period": 50})
 ```
 
-可用指标类型：`SMA`, `LogReturn`, `NdayReturn`, `RollingVolatility`, `Momentum`, `RollingMDD`, `Ratio`
+可用指标类型：
+
+**趋势:** `SMA`, `EMA`, `WMA`, `DEMA`, `TEMA`
+**动量:** `RSI`, `MACDLine`, `MACDSignal`(depends_on: macd), `MACDHistogram`(depends_on: macd, macd_signal), `ROC`, `PPO`, `CCI`, `Momentum`
+**波动:** `BollingerUpper`, `BollingerLower`, `ATR`, `RollingVolatility`
+**成交量:** `OBV`, `VWAP`, `MFI`
+**趋势强度:** `ADX`, `AROON`
+**随机振荡:** `StochK`
+**其他:** `LogReturn`, `NdayReturn`, `RollingMDD`, `Ratio`
+
+> 注意：MACD 系列需按顺序注册：先 `MACDLine`（命名为 "macd"），再 `MACDSignal`（命名为 "macd_signal"），最后 `MACDHistogram`。
 
 ### 4.3 添加信号（Signal 层）
 ```

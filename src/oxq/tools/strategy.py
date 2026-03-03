@@ -5,6 +5,28 @@ from __future__ import annotations
 from typing import Any
 
 from oxq.core.strategy import Strategy
+from oxq.indicators.builtin import (
+    ADX,
+    AROON,
+    ATR,
+    CCI,
+    DEMA,
+    EMA,
+    MFI,
+    OBV,
+    PPO,
+    ROC,
+    RSI,
+    TEMA,
+    VWAP,
+    WMA,
+    BollingerLower,
+    BollingerUpper,
+    MACDHistogram,
+    MACDLine,
+    MACDSignal,
+    StochK,
+)
 from oxq.indicators.log_return import LogReturn
 from oxq.indicators.momentum import Momentum
 from oxq.indicators.nday_return import NdayReturn
@@ -26,13 +48,33 @@ from oxq.universe.static import StaticUniverse
 # ---------------------------------------------------------------------------
 
 INDICATOR_TYPES: dict[str, type] = {
+    "ADX": ADX,
+    "AROON": AROON,
+    "ATR": ATR,
+    "BollingerLower": BollingerLower,
+    "BollingerUpper": BollingerUpper,
+    "CCI": CCI,
+    "DEMA": DEMA,
+    "EMA": EMA,
     "LogReturn": LogReturn,
+    "MACDHistogram": MACDHistogram,
+    "MACDLine": MACDLine,
+    "MACDSignal": MACDSignal,
+    "MFI": MFI,
     "Momentum": Momentum,
     "NdayReturn": NdayReturn,
+    "OBV": OBV,
+    "PPO": PPO,
+    "ROC": ROC,
+    "RSI": RSI,
     "Ratio": Ratio,
     "RollingMDD": RollingMDD,
     "RollingVolatility": RollingVolatility,
     "SMA": SMA,
+    "StochK": StochK,
+    "TEMA": TEMA,
+    "VWAP": VWAP,
+    "WMA": WMA,
 }
 SIGNAL_TYPES: dict[str, type] = {"Crossover": Crossover, "TopNRanking": TopNRanking}
 RULE_TYPES: dict[str, type] = {

@@ -7,6 +7,7 @@ and live trading.  The difference is which providers you plug in.
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 import pandas as pd
@@ -15,6 +16,8 @@ from oxq.core.strategy import Strategy
 from oxq.core.types import Fill, FillReceiver, OrderRouter, Portfolio, Position
 from oxq.data.providers import MarketDataProvider
 from oxq.portfolio.analytics import RunResult
+
+logger = logging.getLogger(__name__)
 
 
 class Engine:
@@ -80,6 +83,15 @@ class Engine:
         # ── Phase 1: Indicator (vectorized, per symbol) ────────────────
         for symbol in universe.symbols:
             for ind_name, (indicator, params) in strategy.indicators.items():
+                for dep_col in getattr(indicator, "depends_on", ()):
+                    if dep_col not in mktdata[symbol].columns:
+                        logger.warning(
+                            "Indicator '%s' depends on column '%s' which does "
+                            "not yet exist in mktdata. Ensure the producing "
+                            "indicator is registered first.",
+                            ind_name,
+                            dep_col,
+                        )
                 mktdata[symbol][ind_name] = indicator.compute(
                     mktdata[symbol], **params,
                 )

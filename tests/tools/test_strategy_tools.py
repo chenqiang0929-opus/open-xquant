@@ -75,9 +75,9 @@ def test_strategy_add_indicator() -> None:
 
 def test_strategy_add_indicator_unknown_type() -> None:
     strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
-    result = strategy_add_indicator(strategy="s1", name="x", type="EMA")
+    result = strategy_add_indicator(strategy="s1", name="x", type="FooBar")
     assert "error" in result
-    assert "EMA" in result["error"]
+    assert "FooBar" in result["error"]
 
 
 def test_strategy_add_indicator_not_found() -> None:
