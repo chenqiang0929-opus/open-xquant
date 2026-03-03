@@ -5,10 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from oxq.core.strategy import Strategy
+from oxq.indicators.ratio import Ratio
 from oxq.indicators.sma import SMA
 from oxq.rules.entry import EntryRule, FullPositionEntryRule, TargetValueEntryRule
 from oxq.rules.exit import ExitRule
+from oxq.rules.rebalance import RebalanceRule
 from oxq.signals.crossover import Crossover
+from oxq.signals.top_n_ranking import TopNRanking
 from oxq.tools import session
 from oxq.tools.registry import registry
 from oxq.universe.static import StaticUniverse
@@ -17,13 +20,14 @@ from oxq.universe.static import StaticUniverse
 # Type registries (string → class mapping)
 # ---------------------------------------------------------------------------
 
-INDICATOR_TYPES: dict[str, type] = {"SMA": SMA}
-SIGNAL_TYPES: dict[str, type] = {"Crossover": Crossover}
+INDICATOR_TYPES: dict[str, type] = {"Ratio": Ratio, "SMA": SMA}
+SIGNAL_TYPES: dict[str, type] = {"Crossover": Crossover, "TopNRanking": TopNRanking}
 RULE_TYPES: dict[str, type] = {
     "EntryRule": EntryRule,
     "TargetValueEntryRule": TargetValueEntryRule,
     "FullPositionEntryRule": FullPositionEntryRule,
     "ExitRule": ExitRule,
+    "RebalanceRule": RebalanceRule,
 }
 
 
@@ -158,6 +162,8 @@ def strategy_add_rule(
         strat.entry_rules.append(rule)
     elif type == "ExitRule":
         strat.exit_rules.append(rule)
+    elif type == "RebalanceRule":
+        strat.rebalance_rules.append(rule)
 
     session._save()
     return {
@@ -199,5 +205,9 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
         "exit_rules": [
             {"type": r.__class__.__name__, "name": r.name}
             for r in strat.exit_rules
+        ],
+        "rebalance_rules": [
+            {"type": r.__class__.__name__, "name": r.name}
+            for r in strat.rebalance_rules
         ],
     }
