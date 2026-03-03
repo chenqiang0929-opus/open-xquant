@@ -205,8 +205,6 @@ symbol_A:                         symbol_B:
 
 > **Universe 与宽表的关系**：mktdata 中包含哪些 symbol 的宽表，由 Universe 在每个时间截面上动态决定。Universe 变化时（如指数成分股调整），mktdata 随之增减 symbol 键，确保后续各阶段计算不会引入 survivorship bias。
 
-> **与 Binding 系统的关系**：`@ind:sma_fast` 等引用语法是 SDK 层的声明式抽象，编译后解析为对 mktdata 列名的直接引用。宽表是底层运行时模型，Binding 是上层定义时模型。
-
 ### 4.3 执行模型
 
 #### 逐层推进，全 symbol 执行

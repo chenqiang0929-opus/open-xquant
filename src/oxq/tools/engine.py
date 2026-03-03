@@ -102,8 +102,12 @@ def engine_results(run_id: str) -> dict[str, Any]:
 
     metrics = {
         "total_return": float(result.total_return()),
-        "sharpe_ratio": float(result.sharpe_ratio()),
+        "annualized_return": float(result.annualized_return()),
+        "annualized_volatility": float(result.annualized_volatility()),
         "max_drawdown": float(result.max_drawdown()),
+        "sharpe_ratio": float(result.sharpe_ratio()),
+        "calmar_ratio": float(result.calmar_ratio()),
+        "sortino_ratio": float(result.sortino_ratio()),
     }
 
     # Check objectives from the strategy that produced this result

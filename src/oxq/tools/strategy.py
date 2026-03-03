@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any
 
 from oxq.core.strategy import Strategy
+from oxq.indicators.log_return import LogReturn
+from oxq.indicators.momentum import Momentum
+from oxq.indicators.nday_return import NdayReturn
 from oxq.indicators.ratio import Ratio
+from oxq.indicators.rolling_mdd import RollingMDD
+from oxq.indicators.rolling_volatility import RollingVolatility
 from oxq.indicators.sma import SMA
 from oxq.rules.entry import EntryRule, FullPositionEntryRule, TargetValueEntryRule
 from oxq.rules.exit import ExitRule
@@ -20,7 +25,15 @@ from oxq.universe.static import StaticUniverse
 # Type registries (string → class mapping)
 # ---------------------------------------------------------------------------
 
-INDICATOR_TYPES: dict[str, type] = {"Ratio": Ratio, "SMA": SMA}
+INDICATOR_TYPES: dict[str, type] = {
+    "LogReturn": LogReturn,
+    "Momentum": Momentum,
+    "NdayReturn": NdayReturn,
+    "Ratio": Ratio,
+    "RollingMDD": RollingMDD,
+    "RollingVolatility": RollingVolatility,
+    "SMA": SMA,
+}
 SIGNAL_TYPES: dict[str, type] = {"Crossover": Crossover, "TopNRanking": TopNRanking}
 RULE_TYPES: dict[str, type] = {
     "EntryRule": EntryRule,

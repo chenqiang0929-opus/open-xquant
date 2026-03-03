@@ -33,14 +33,21 @@ class TopNRanking:
         if not symbols:
             return {}
 
-        dates = mktdata[symbols[0]].index
+        # Each symbol keeps its own index; iterate the union of all dates
+        all_dates = mktdata[symbols[0]].index
+        for s in symbols[1:]:
+            all_dates = all_dates.union(mktdata[s].index)
+
         result: dict[str, pd.Series] = {
-            s: pd.Series(0.0, index=dates, dtype=float) for s in symbols
+            s: pd.Series(0.0, index=mktdata[s].index, dtype=float)
+            for s in symbols
         }
 
-        for date in dates:
+        for date in all_dates:
             scores: dict[str, float] = {}
             for s in symbols:
+                if date not in mktdata[s].index:
+                    continue
                 val = mktdata[s].at[date, score]
                 if pd.isna(val):
                     continue

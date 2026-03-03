@@ -32,7 +32,11 @@ tools_required: [strategy_create, strategy_add_indicator, strategy_add_signal, s
 | 指标 | 说明 | 示例 |
 |------|------|------|
 | total_return | 总收益率 | `{"min": 0.05}` — 至少 5% |
+| annualized_return | 年化收益率 | `{"min": 0.10}` — 至少 10% |
+| annualized_volatility | 年化波动率 | `{"max": 0.20}` — 不超过 20% |
 | sharpe_ratio | 夏普比率 | `{"min": 1.0}` — 至少 1.0 |
+| calmar_ratio | 卡玛比率 | `{"min": 1.5}` — 至少 1.5 |
+| sortino_ratio | 索提诺比率 | `{"min": 1.5}` — 至少 1.5 |
 | max_drawdown | 最大回撤（负值） | `{"max": -0.15}` — 不超过 -15% |
 
 **提问示例：** "你期望这个策略达到什么样的收益和风险目标？"
@@ -90,7 +94,7 @@ strategy_add_indicator(strategy="sma_crossover", name="sma_10", type="SMA", para
 strategy_add_indicator(strategy="sma_crossover", name="sma_50", type="SMA", params={"column": "close", "period": 50})
 ```
 
-可用指标类型：`SMA`, `Ratio`
+可用指标类型：`SMA`, `LogReturn`, `NdayReturn`, `RollingVolatility`, `Momentum`, `RollingMDD`, `Ratio`
 
 ### 4.3 添加信号（Signal 层）
 ```
@@ -135,10 +139,11 @@ engine_run 返回 `run_id`、组合概况和交易数，但**不包含绩效指�
 ```
 engine_results(run_id="...")
 ```
-**必须用 engine_run 返回的 run_id 调用 engine_results**，才能获取绩效指标和目标达标检查。engine_results 返回 total_return、sharpe_ratio、max_drawdown 以及每项目标的 pass/fail。
+**必须用 engine_run 返回的 run_id 调用 engine_results**，才能获取绩效指标和目标达标检查。engine_results 返回 total_return、annualized_return、annualized_volatility、max_drawdown、sharpe_ratio、calmar_ratio、sortino_ratio 以及每项目标的 pass/fail。
 
 向用户报告：
-- 总收益率、夏普比率、最大回撤
+- 总收益率、年化收益率、年化波动率、最大回撤
+- 夏普比率、卡玛比率、索提诺比率
 - 各项目标的达标情况（pass/fail）
 
 ### 5.3 查看交易明细（必须调用）

@@ -103,7 +103,11 @@ class Engine:
             )
 
         # ── Phase 3: Rule (bar-by-bar state machine) ───────────────────
+        # Use union of all dates so no symbol's bars are skipped
         dates = mktdata[universe.symbols[0]].index
+        for sym in universe.symbols[1:]:
+            dates = dates.union(mktdata[sym].index)
+
         trades: list[Fill] = []
         equity_curve: list[tuple[object, float]] = []
 
@@ -111,6 +115,8 @@ class Engine:
             # Rebalance rules (priority 3)
             for rule in strategy.rebalance_rules:
                 for symbol in universe.symbols:
+                    if date not in mktdata[symbol].index:
+                        continue
                     row = mktdata[symbol].loc[date]
                     order = rule.evaluate(symbol, row, portfolio)
                     if order:
@@ -119,14 +125,18 @@ class Engine:
             # Exit rules (priority 4)
             for rule in strategy.exit_rules:
                 for symbol in universe.symbols:
+                    if date not in mktdata[symbol].index:
+                        continue
                     row = mktdata[symbol].loc[date]
                     order = rule.evaluate(symbol, row, portfolio)
                     if order:
                         router.submit_order(order)
 
-            # Entry rules second (lower priority)
+            # Entry rules (priority 5)
             for rule in strategy.entry_rules:
                 for symbol in universe.symbols:
+                    if date not in mktdata[symbol].index:
+                        continue
                     row = mktdata[symbol].loc[date]
                     order = rule.evaluate(symbol, row, portfolio)
                     if order:
@@ -141,11 +151,13 @@ class Engine:
                 _apply_fill(portfolio, fill)
                 trades.append(fill)
 
-            # Record equity curve
-            prices = {
-                s: float(mktdata[s].loc[date, "close"])
-                for s in universe.symbols
-            }
+            # Record equity curve — use last known close for missing dates
+            prices = {}
+            for s in universe.symbols:
+                if date in mktdata[s].index:
+                    prices[s] = float(mktdata[s].loc[date, "close"])
+                elif s in portfolio.positions:
+                    prices[s] = portfolio.positions[s].avg_cost
             equity_curve.append((date, portfolio.total_value(prices)))
 
         return RunResult(
