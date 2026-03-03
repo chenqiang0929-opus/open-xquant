@@ -56,15 +56,35 @@ def engine_run(
 
     run_id = f"{strategy}_{int(time.time())}"
     session._run_results[run_id] = result
+    session._save()
+
+    # Get last market prices from mktdata for position valuation
+    last_prices: dict[str, float] = {}
+    for sym in result.mktdata:
+        df = result.mktdata[sym]
+        if not df.empty and "close" in df.columns:
+            last_prices[sym] = float(df["close"].iloc[-1])
 
     positions = {
-        sym: {"shares": pos.shares, "avg_cost": pos.avg_cost}
+        sym: {
+            "shares": int(pos.shares),
+            "avg_cost": float(pos.avg_cost),
+            "market_price": last_prices.get(sym, float(pos.avg_cost)),
+        }
         for sym, pos in result.portfolio.positions.items()
     }
 
+    total_value = float(
+        result.equity_curve[-1][1] if result.equity_curve else result.portfolio.cash,
+    )
+
     return {
         "run_id": run_id,
-        "portfolio": {"cash": result.portfolio.cash, "positions": positions},
+        "portfolio": {
+            "cash": float(result.portfolio.cash),
+            "positions": positions,
+            "total_value": total_value,
+        },
         "total_trades": len(result.trades),
         "equity_curve_length": len(result.equity_curve),
     }
@@ -81,9 +101,9 @@ def engine_results(run_id: str) -> dict[str, Any]:
         return {"error": f"Run '{run_id}' not found"}
 
     metrics = {
-        "total_return": result.total_return(),
-        "sharpe_ratio": result.sharpe_ratio(),
-        "max_drawdown": result.max_drawdown(),
+        "total_return": float(result.total_return()),
+        "sharpe_ratio": float(result.sharpe_ratio()),
+        "max_drawdown": float(result.max_drawdown()),
     }
 
     # Check objectives from the strategy that produced this result
@@ -131,8 +151,8 @@ def engine_trade_list(run_id: str) -> dict[str, Any]:
         {
             "symbol": fill.order.symbol,
             "side": fill.order.side,
-            "shares": fill.order.shares,
-            "price": fill.filled_price,
+            "shares": int(fill.order.shares),
+            "price": float(fill.filled_price),
             "date": fill.filled_at,
         }
         for fill in result.trades

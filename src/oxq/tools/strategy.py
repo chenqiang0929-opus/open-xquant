@@ -6,7 +6,7 @@ from typing import Any
 
 from oxq.core.strategy import Strategy
 from oxq.indicators.sma import SMA
-from oxq.rules.entry import EntryRule
+from oxq.rules.entry import EntryRule, FullPositionEntryRule, TargetValueEntryRule
 from oxq.rules.exit import ExitRule
 from oxq.signals.crossover import Crossover
 from oxq.tools import session
@@ -19,7 +19,12 @@ from oxq.universe.static import StaticUniverse
 
 INDICATOR_TYPES: dict[str, type] = {"SMA": SMA}
 SIGNAL_TYPES: dict[str, type] = {"Crossover": Crossover}
-RULE_TYPES: dict[str, type] = {"EntryRule": EntryRule, "ExitRule": ExitRule}
+RULE_TYPES: dict[str, type] = {
+    "EntryRule": EntryRule,
+    "TargetValueEntryRule": TargetValueEntryRule,
+    "FullPositionEntryRule": FullPositionEntryRule,
+    "ExitRule": ExitRule,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +60,7 @@ def strategy_create(
         exit_rules=[],
     )
     session._strategies[name] = strategy
+    session._save()
     return {
         "name": name,
         "hypothesis": hypothesis,
@@ -83,6 +89,7 @@ def strategy_add_indicator(
         return {"error": f"Unknown indicator type '{type}'. Available: {sorted(INDICATOR_TYPES)}"}
 
     strat.indicators[name] = (cls(), params or {})
+    session._save()
     return {
         "strategy": strategy,
         "indicator": name,
@@ -113,6 +120,7 @@ def strategy_add_signal(
 
     merged = {**(params or {}), **(inputs or {})}
     strat.signals[name] = (cls(), merged)
+    session._save()
     return {
         "strategy": strategy,
         "signal": name,
@@ -146,11 +154,12 @@ def strategy_add_rule(
     except TypeError as e:
         return {"error": f"Invalid params for {type}: {e}"}
 
-    if type == "EntryRule":
+    if type in ("EntryRule", "TargetValueEntryRule", "FullPositionEntryRule"):
         strat.entry_rules.append(rule)
     elif type == "ExitRule":
         strat.exit_rules.append(rule)
 
+    session._save()
     return {
         "strategy": strategy,
         "rule": name,

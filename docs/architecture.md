@@ -91,44 +91,43 @@ open-xquant/
 
 **SDK 方式定义策略**：
 
+Strategy 是纯声明式 dataclass，通过构造器传入所有组件。Indicator/Signal 存储为 `(instance, params)` 元组，引擎执行时按名称追加为宽表列。信号和规则通过字符串列名引用指标输出（如 `"sma_fast"`），无需额外绑定语法。
+
 ```python
-strategy = Strategy("momentum_rotation",
-    hypothesis="短期均线上穿长期均线的股票在后续持有期内有正超额收益",
+from oxq.core import Engine, Strategy
+from oxq.indicators import SMA
+from oxq.signals import Crossover
+from oxq.rules import EntryRule, ExitRule
+from oxq.universe import StaticUniverse
+
+strategy = Strategy(
+    name="sma_crossover",
+    hypothesis="短期均线上穿长期均线的标的在后续持有期内有正超额收益",
     objectives={
+        "total_return": {"min": 0.05},
         "sharpe_ratio": {"min": 0.5, "target": 1.5},
         "max_drawdown": {"max": -0.25, "target": -0.15},
     },
-    benchmarks=["000300.SS"],
+    benchmarks=["SPY"],
+    universe=StaticUniverse(("AAPL",)),
+    indicators={
+        "sma_fast": (SMA(), {"column": "close", "period": 10}),
+        "sma_slow": (SMA(), {"column": "close", "period": 50}),
+    },
+    signals={
+        "golden_cross": (Crossover(), {"fast": "sma_fast", "slow": "sma_slow"}),
+    },
+    entry_rules=[EntryRule(signal="golden_cross", shares=100)],
+    exit_rules=[ExitRule(fast="sma_fast", slow="sma_slow")],
 )
-
-# 0. Universe：确定参与计算的标的池
-strategy.set_universe(IndexUniverse("000300.SS"))  # 沪深300成分股（Point-in-Time）
-
-# 1. 指标层：路径无关的纯计算
-strategy.add_indicator("sma_fast", SMA, params={"period": 10})
-strategy.add_indicator("sma_slow", SMA, params={"period": 50})
-strategy.add_indicator("rsi", RSI, params={"period": 14})
-
-# 2. 信号层：基于指标生成逻辑信号
-strategy.add_signal("golden_cross", Crossover,
-    inputs={"fast": "@ind:sma_fast", "slow": "@ind:sma_slow"},
-    params={"direction": "up"})
-strategy.add_signal("rsi_oversold", Threshold,
-    inputs={"value": "@ind:rsi"},
-    params={"threshold": 30, "relationship": "lt"})
-
-# 3. 规则层：路径相关，生成订单
-strategy.add_rule("enter_long", EntryRule,
-    inputs={"signal": "@sig:golden_cross"},
-    params={"order_type": "market", "size_method": "equal_weight"})
-strategy.add_rule("exit_stop", ExitRule,
-    inputs={"signal": "@sig:rsi_oversold"},
-    params={"stop_loss_pct": 0.05, "trailing": True})
 
 # 运行（Provider 决定模式：回测 / 模拟 / 实盘）
 engine = Engine()
-result = engine.run(strategy, market=market, router=broker, receiver=broker,
-                    start="2020-01-01", end="2024-12-31")
+result = engine.run(strategy,
+    market=LocalMarketDataProvider(),
+    router=sim_broker,
+    receiver=sim_broker,
+    start="2023-01-01", end="2024-12-31")
 ```
 
 **等价的 Tool 调用（AI Agent 方式）**：
@@ -136,18 +135,22 @@ result = engine.run(strategy, market=market, router=broker, receiver=broker,
 Tool 定义在 `oxq.tools` 中，协议无关——Coding Agent 直接 `import` 调用，MCP 客户端通过 MCP 协议调用，平台方也可通过 REST/gRPC 等任意方式触发。
 
 ```
-→ strategy_create(name="momentum_rotation",
-    hypothesis="短期均线上穿长期均线的股票在后续持有期内有正超额收益",
-    objectives={"sharpe_ratio": {"min": 0.5, "target": 1.5}, "max_drawdown": {"max": -0.25, "target": -0.15}},
-    benchmarks=["000300.SS"])
-→ universe_set(strategy="momentum_rotation", type="index", code="000300.SS")  # 沪深300成分股
-→ strategy_add_indicator(strategy="momentum_rotation", name="sma_fast", type="SMA", params={"period": 10})
-→ strategy_add_indicator(strategy="momentum_rotation", name="sma_slow", type="SMA", params={"period": 50})
-→ strategy_add_signal(strategy="momentum_rotation", name="golden_cross", type="Crossover",
-    inputs={"fast": "@ind:sma_fast", "slow": "@ind:sma_slow"})
-→ strategy_add_rule(strategy="momentum_rotation", name="enter_long", type="EntryRule",
-    inputs={"signal": "@sig:golden_cross"}, params={"order_type": "market"})
-→ engine_run(strategy="momentum_rotation", start="2020-01-01", end="2024-12-31")
+→ strategy_create(name="sma_crossover",
+    hypothesis="短期均线上穿长期均线的标的在后续持有期内有正超额收益",
+    objectives={"total_return": {"min": 0.05}, "sharpe_ratio": {"min": 0.5}},
+    benchmarks=["SPY"])
+→ strategy_add_indicator(strategy="sma_crossover", name="sma_fast", type="SMA",
+    params={"column": "close", "period": 10})
+→ strategy_add_indicator(strategy="sma_crossover", name="sma_slow", type="SMA",
+    params={"column": "close", "period": 50})
+→ strategy_add_signal(strategy="sma_crossover", name="golden_cross", type="Crossover",
+    inputs={"fast": "sma_fast", "slow": "sma_slow"})
+→ strategy_add_rule(strategy="sma_crossover", name="enter_long", type="EntryRule",
+    params={"signal": "golden_cross", "shares": 100})
+→ engine_run(strategy="sma_crossover", symbols=["AAPL"],
+    start="2023-01-01", end="2024-12-31")
+→ engine_results(run_id="...")
+→ engine_trade_list(run_id="...")
 ```
 
 ### 4.2 宽表数据模型
@@ -383,21 +386,17 @@ class RoundTripTrade:
     method: TradeMethod
 ```
 
-### 4.5 Binding 系统
+### 4.5 列名引用
 
-Binding 系统提供声明式的组件间引用语法，编译时解析为具体的数据路径：
+组件间通过**宽表列名**直接引用，无需额外绑定语法。Indicator 输出追加为 `mktdata[symbol][name]` 列，Signal 和 Rule 按字符串列名引用：
 
+```python
+# Indicator "sma_fast" 的输出追加为列 mktdata["AAPL"]["sma_fast"]
+# Signal 通过 inputs={"fast": "sma_fast"} 引用该列
+# Rule 通过 signal="golden_cross" 引用 Signal 输出列
 ```
-@ind:<name>      → 引用指标输出
-@sig:<name>      → 引用信号输出
-@rule:<name>     → 引用规则输出
-@step:<alias>    → 引用管道步骤输出
-@prev:<kind>     → 引用历史信号
-@provider:<name> → 引用外部 provider
-@universe        → 当前 universe 快照（UniverseSnapshot）
-@portfolio       → 当前组合状态
-@orderbook       → 当前订单簿
-```
+
+这种设计保证了引用在运行时总是可验证的——如果列名不存在，会立即抛出 KeyError，而非静默失败。
 
 ### 4.6 三接口架构：策略与执行分离
 
@@ -418,59 +417,60 @@ Binding 系统提供声明式的组件间引用语法，编译时解析为具体
 ```
 
 ```python
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
+@runtime_checkable
 class MarketDataProvider(Protocol):
     """行情接口：策略获取行情数据的唯一入口"""
     def get_bars(self, symbol: str, start: str, end: str) -> pd.DataFrame: ...
     def get_latest(self, symbol: str) -> pd.Series: ...
 
+@runtime_checkable
 class OrderRouter(Protocol):
     """订单接口：策略提交订单的唯一出口"""
-    def submit_order(self, order: Order) -> str: ...       # 返回 order_id
-    def cancel_order(self, order_id: str) -> bool: ...
-    def get_open_orders(self, symbol: str = None) -> list[Order]: ...
+    def submit_order(self, order: Order) -> str: ...
 
+@runtime_checkable
 class FillReceiver(Protocol):
     """成交接口：成交回报回填到 portfolio 的唯一入口"""
-    def get_fills(self, order_id: str) -> list[Fill]: ...
-    def on_fill(self, callback: Callable[[Fill], None]) -> None: ...
+    def get_fills(self) -> list[Fill]: ...
 ```
+
+> **当前实现**：`SimBroker` 同时实现 OrderRouter 和 FillReceiver 两个 Protocol。`cancel_order`、`get_open_orders`、`on_fill` 等方法留给 Phase 3（交易执行）实现。
 
 三种运行模式通过注入不同实现切换，策略代码零修改（Universe 在策略内部，不随运行模式变化）：
 
 | 模式 | MarketDataProvider | OrderRouter | FillReceiver |
 |---|---|---|---|
-| **回测** | `HistoricalData` — 加载历史 OHLCV | `SimOrderBook` — 模拟订单簿 | `SimFillEngine` — 理想撮合 |
-| **Paper Trade** | `RealtimeData` — 实时行情 | `SimOrderBook` — 模拟订单簿 | `SimFillEngine` — 模拟撮合（含延迟、部分成交） |
-| **实盘** | `RealtimeData` — 实时行情 | `BrokerRouter` — 券商 API | `BrokerFill` — 实际成交回报 |
+| **回测** | `LocalMarketDataProvider` — 加载本地 Parquet | `SimBroker` — 模拟撮合 | `SimBroker` |
+| **Paper Trade（未来）** | `RealtimeDataProvider` — 实时行情 | `SimBroker` | `SimBroker` |
+| **实盘（未来）** | `RealtimeDataProvider` — 实时行情 | `BrokerAdapter` — 券商 API | `BrokerAdapter` |
 
-策略已通过 `strategy.set_universe()` 包含 Universe，`engine.run()` 只注入数据、订单、成交三个外部依赖：
+Strategy 的 `universe` 字段在构造时设定，`engine.run()` 通过关键字参数注入三个 Provider：
 
 ```python
 # 回测模式
-engine.run(strategy, providers={
-    "market":   HistoricalData(start="2020-01-01", end="2024-12-31"),
-    "order":    SimOrderBook(),
-    "fill":     SimFillEngine(slippage=FixedSlippage(bps=5)),
-})
+engine.run(strategy,
+    market=LocalMarketDataProvider(),
+    router=sim_broker,
+    receiver=sim_broker,
+    start="2023-01-01", end="2024-12-31",
+    initial_cash=100_000.0)
 
-# Paper trade：仅替换行情源，撮合引擎增加模拟延迟
-engine.run(strategy, providers={
-    "market":   RealtimeData(source="websocket"),
-    "order":    SimOrderBook(),
-    "fill":     SimFillEngine(slippage=FixedSlippage(bps=5), latency_ms=100, partial_fill=True),
-})
+# Paper trade（未来）：仅替换行情源
+engine.run(strategy,
+    market=RealtimeDataProvider(source="websocket"),
+    router=sim_broker,
+    receiver=sim_broker, ...)
 
-# 实盘：三个接口全部替换
-engine.run(strategy, providers={
-    "market":   RealtimeData(source="websocket"),
-    "order":    BrokerRouter(broker="interactive_brokers"),
-    "fill":     BrokerFill(broker="interactive_brokers"),
-})
+# 实盘（未来）：三个接口全部替换
+engine.run(strategy,
+    market=RealtimeDataProvider(source="websocket"),
+    router=live_broker,
+    receiver=live_broker, ...)
 ```
 
-> **当前阶段**：Phase 1 只实现 `StaticUniverse`（策略组件，已实现）+ `HistoricalData` + `SimOrderBook` + `SimFillEngine`（三个 Provider，回测模式）。`IndexUniverse`（Point-in-Time）和 `FilterUniverse` 留给 Phase 2。Paper trade 和实盘的实现留给后续 Phase，但三个 Provider Protocol 从第一天就定义好，确保架构不需要重构。
+> **当前阶段**：已实现 `StaticUniverse` + `FilterUniverse`（策略组件）、`LocalMarketDataProvider`（历史数据）、`SimBroker`（模拟撮合，同时实现 OrderRouter + FillReceiver）。`IndexUniverse`（Point-in-Time）留给 Phase 2。Paper trade 和实盘的实现留给后续 Phase，但三个 Provider Protocol 从第一天就定义好，确保架构不需要重构。
 
 ---
 
@@ -670,7 +670,21 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 5. Entry Rules    → 建仓信号              （最低优先级）
 ```
 
-**仓位管理函数**：
+**已实现的入场规则**：
+
+| 规则 | 参数 | 买入逻辑 |
+|------|------|----------|
+| `EntryRule` | signal, shares | 信号触发时固定股数买入 |
+| `TargetValueEntryRule` | signal, target_value | 信号触发时按目标市值买入（自动算股数） |
+| `FullPositionEntryRule` | signal | 信号触发时全仓买入（用全部可用现金） |
+
+**已实现的出场规则**：
+
+| 规则 | 参数 | 卖出逻辑 |
+|------|------|----------|
+| `ExitRule` | fast, slow | 快线跌破慢线时全仓卖出 |
+
+**仓位管理函数**（Phase 2+）：
 - `osMaxPos` - 最大仓位限制
 - `osEqualWeight` - 等权分配
 - `osRiskParity` - 风险平价
@@ -701,10 +715,17 @@ Engine 是通用策略执行引擎，执行 Universe → Indicator → Signal �
 | 模拟盘（未来） | `RealtimeDataProvider` | `SimBroker` | `SimBroker` |
 | 实盘（未来） | `RealtimeDataProvider` | `BrokerAdapter` | `BrokerAdapter` |
 
-- 支持分阶段运行（`run_through` 参数）用于逐组件评估
-- `SimBroker`（`oxq.trade`）实现 OrderRouter + FillReceiver，模拟撮合
-- 绩效分析（`RunResult`，`oxq.portfolio.analytics`）：Sharpe Ratio, Max Drawdown 等
-- 策略评估达标检查：运行结果自动与 `strategy.objectives` 对比，输出各指标的达标状态
+**`Engine.run()` 签名**：
+
+```python
+def run(self, strategy, market, router, receiver,
+        start, end, initial_cash=100_000.0, run_through=None) -> RunResult
+```
+
+- `run_through="indicator"` / `"signal"` 支持分阶段运行，用于逐组件评估
+- `SimBroker`（`oxq.trade`）同时实现 OrderRouter + FillReceiver，在每个 bar 的 close 价格模拟撮合
+- `RunResult`（`oxq.portfolio.analytics`）包含 portfolio、trades、equity_curve、mktdata，提供 `total_return()`、`sharpe_ratio()`、`max_drawdown()` 方法
+- 策略评估达标检查：通过 `engine_results` tool 自动与 `strategy.objectives` 对比，输出各指标的达标状态（pass/fail）
 
 ### 5.8 参数优化 (oxq.optimize)
 
@@ -887,28 +908,22 @@ Tool 定义是框架的核心资产之一，与传输协议无关。每个 Tool 
 
 ### 6.2 MCP Server（可选分发层）
 
-MCP Server 是 `oxq.tools` 的 MCP 协议适配，用于支持不能执行代码的 AI 客户端（Claude Desktop、Windsurf 等）。MCP Server 本身不包含业务逻辑，只做三件事：MCP 协议适配、会话状态管理、从 `oxq.tools` 导入 Tool 定义。
+MCP Server 是 `oxq.tools` 的 MCP 协议适配，用于支持不能执行代码的 AI 客户端（Claude Desktop、Windsurf 等）。MCP Server 本身不包含业务逻辑，只做两件事：MCP 协议适配、从 `oxq.tools.registry` 自动注册所有 Tool。
+
+会话状态管理由 `oxq.tools.session` 模块负责（文件持久化，跨 MCP 进程重启保持状态）。MCP Server 目录下只有 `server.py` 一个文件，无子目录。
 
 > **注意**：Coding Agent（如 Claude Code、Cursor）直接 `import oxq` 即可，不需要 MCP Server。MCP 的价值是**分发渠道**——让本地 SDK 能被非 Coding AI 客户端开箱即用。
 
 ```python
-# mcp_server/server.py — 薄适配层，从 oxq.tools 导入
-from mcp.server import Server
-from oxq.tools import registry as tool_registry
+# mcp_server/server.py — 薄适配层
+from mcp.server.fastmcp import FastMCP
+from oxq.tools import registry
 
-server = Server("open-xquant")
-
-# 会话状态管理（MCP server 维护跨 tool 调用的生命周期）
-class SessionState:
-    strategies: Dict[str, Strategy]
-    universes: Dict[str, UniverseProvider]
-    datasets: Dict[str, DataFrame]
-    run_results: Dict[str, RunResult]
-    paramsets: Dict[str, ParamSet]
+mcp = FastMCP("open-xquant")
 
 # 自动从 oxq.tools 注册所有 tool 到 MCP server
-for tool_def in tool_registry.all_tools():
-    server.tool()(tool_def.as_mcp_handler(session_state))
+for tool_def in registry.all_tools():
+    mcp.tool(name=tool_def.name, description=tool_def.description)(tool_def.fn)
 ```
 
 ---
@@ -921,41 +936,26 @@ for tool_def in tool_registry.all_tools():
 
 ### 7.1 strategy-builder.md
 
+策略构建的完整工作流，覆盖从约束确认到回测评估的 6 个阶段（Phase 0–5）：
+
 ```markdown
 ---
 name: strategy-builder
-description: 指导 Agent 构建量化交易策略
-tools_required: [universe.*, strategy.*, data.*]
+description: 指导 Agent 构建量化交易策略并进行回测评估
+tools_required: [strategy_*, engine_*, data_*, universe_*]
 ---
 
-## 工作流
-
-1. 理解用户意图，提炼可测试的假设
-2. 明确业务约束和目标（资金、费率、目标 Sharpe、最大回撤）
-3. 创建策略：strategy_create（含 hypothesis, objectives, benchmarks）
-4. 设定 Universe：
-   a. universe_list_indexes 查看可用指数
-   b. universe_set 设定标的池（指数成分/静态列表/条件过滤）
-   c. universe_inspect 确认成分合理
-5. 加载数据：调用 data_load_symbols 加载行情
-6. 探索数据：调用 data_inspect 了解数据特征
-7. 逐层构建并评估：
-   a. 添加 Indicator → 独立评估指标质量（analysis_component）
-   b. 添加 Signal → 评估信号预测力（前瞻收益分布）
-   c. 添加 Rule（先 entry + exit，再考虑 risk rule）
-8. 验证：strategy_validate（含 rule burden 检查）
-9. 回测 → 对照 objectives 检查是否达标
-
-## 决策指南
-- 趋势策略 → SMA/EMA + Crossover signal
-- 动量策略 → RSI/MACD + Threshold signal
-- 均值回归 → BBands + Threshold signal
-- 始终添加止损规则（建议 ATR-based）
+Phase 0: 业务约束 — 明确资金、品种、频率
+Phase 1: 基准与目标 — 设定可量化的 total_return / sharpe_ratio / max_drawdown 目标
+Phase 2: 假设 — 5 要素可测试假设（信号、品种、方向、依据、退出）
+Phase 3: 数据准备 — data_load_symbols → data_inspect → universe_set
+Phase 4: 逐层构建 — strategy_create → add_indicator → add_signal → add_rule → inspect
+Phase 5: 回测与达标检查 — engine_run → engine_results → engine_trade_list（三个工具必须按顺序全部调用）
 
 ## 红线规则
-- 不要在参数优化后添加新规则（Rule Burden）
-- 策略修改必须有假设支撑，不得因回测结果不满意而随意调整
-- 始终添加止损规则（建议基于 MAE 分布实证推导）
+- 不替用户编造假设、约束、目标
+- 不在回测后添加新规则（Rule Burden）
+- 规格变更必须记录
 ```
 
 ### 7.2 parameter-tuner.md
@@ -986,13 +986,16 @@ tools_required: [optimize.*, analysis.*]
 
 ### 7.3 其他 Skills
 
-| Skill | 核心工作流 |
-|-------|-----------|
-| `engine-runner.md` | 配置运行 → 执行策略 → 分析绩效 → 检查过拟合 → 给出改进建议 |
-| `risk-analyzer.md` | 回撤分析 → 压力测试 → 尾部风险 → 建议风控规则 |
-| `performance-reviewer.md` | 多维绩效分析 → 归因分析 → 与基准对比 → 生成报告 |
-| `trade-executor.md` | 生成订单 → 估算成本 → 确认后执行 → 监控成交 → 记录结果 |
-| `strategy-monitor.md` | 实盘监控 → 偏离检测 → 风控预警 → 建议调仓 |
+| Skill | 状态 | 核心工作流 |
+|-------|------|-----------|
+| `data-explorer.md` | 已实现 | 检查本地数据 → 下载行情/宏观因子 → 质量检查 |
+| `backtest-runner.md` | 已重定向 | → strategy-builder（回测集成在策略构建流程中） |
+| `universe-builder.md` | 模板 | Universe 构建专用（Phase 2+） |
+| `parameter-tuner.md` | 模板 | 参数优化 + 统计检验（Phase 2+） |
+| `performance-reviewer.md` | 模板 | 多维绩效分析 + 归因 + 基准对比 |
+| `risk-analyzer.md` | 模板 | 回撤分析 + 压力测试 + 尾部风险 |
+| `trade-executor.md` | 模板 | 生成订单 → 确认执行 → 监控成交（Phase 3+） |
+| `strategy-monitor.md` | 模板 | 实盘监控 + 偏离检测 + 风控预警（Phase 3+） |
 
 ---
 
@@ -1016,19 +1019,21 @@ tools_required: [optimize.*, analysis.*]
 
 ## 9. 实现路线
 
-### Phase 1: 核心引擎 + SDK (MVP)
-- `oxq.core`: Strategy, Engine, Registry, 基础类型
-- `oxq.universe`: UniverseProvider Protocol, StaticUniverse
-- `oxq.indicators`: 5 个内置指标 (SMA, EMA, RSI, MACD, BBands)
-- `oxq.signals`: 3 个信号 (Crossover, Threshold, Comparison)
-- `oxq.rules`: EntryRule, ExitRule, 基础 sizing
-- `oxq.portfolio`: Portfolio, Position
-- `oxq.core.engine`: 通用执行引擎（provider-agnostic）
-- `oxq.trade`: SimBroker（模拟撮合）
-- `oxq.portfolio`: RunResult + analytics
-- `oxq.tools`: universe_* + strategy_* + engine_* tool 定义（核心交付物）
-- `skills/`: strategy-builder.md, engine-runner.md
-- **目标**: Coding Agent / 开发者可以通过 SDK 构建简单策略并运行（回测/模拟/实盘取决于 Provider）
+### Phase 1: 核心引擎 + SDK (MVP) ✅ 已完成
+- `oxq.core`: Strategy (dataclass), Engine (4-phase pipeline), types (Order, Fill, Portfolio, Position, Protocol 定义)
+- `oxq.universe`: UniverseProvider Protocol, StaticUniverse, FilterUniverse
+- `oxq.indicators`: SMA（其余指标文件已创建，待实现）
+- `oxq.signals`: Crossover（其余信号文件已创建，待实现）
+- `oxq.rules`: EntryRule, TargetValueEntryRule, FullPositionEntryRule, ExitRule
+- `oxq.portfolio`: Portfolio, Position, RunResult + analytics (total_return, sharpe_ratio, max_drawdown)
+- `oxq.core.engine`: 通用执行引擎（provider-agnostic），支持 `run_through` 分阶段执行
+- `oxq.trade`: SimBroker（模拟撮合，同时实现 OrderRouter + FillReceiver）
+- `oxq.data`: LocalMarketDataProvider, YFinanceDownloader, AkShareDownloader, WorldBank 因子
+- `oxq.tools`: data_* (6) + universe_* (4) + strategy_* (5) + engine_* (3) = 18 个 tool
+- `oxq.tools.session`: 文件持久化的会话状态（跨 MCP 进程重启保持策略和运行结果）
+- `mcp_server`: FastMCP 适配层，自动注册所有 tool
+- `skills/`: strategy-builder.md（已实现 6 阶段流程）, data-explorer.md（已实现）
+- **目标**: ✅ Coding Agent / 开发者可以通过 SDK 构建 SMA 策略并回测
 
 ### Phase 2: 参数优化 + 统计检验 + Universe 扩展 + MCP 分发
 - `oxq.universe`: IndexUniverse（Point-in-Time）, FilterUniverse

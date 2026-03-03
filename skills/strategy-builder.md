@@ -106,7 +106,9 @@ strategy_add_rule(strategy="sma_crossover", name="sell_on_cross", type="ExitRule
 ```
 
 可用规则类型：
-- `EntryRule` — 信号触发时买入（params: signal, shares）
+- `EntryRule` — 信号触发时固定股数买入（params: signal, shares）
+- `TargetValueEntryRule` — 信号触发时按目标市值买入（params: signal, target_value）
+- `FullPositionEntryRule` — 信号触发时全仓买入，用全部可用现金（params: signal）
 - `ExitRule` — 快线跌破慢线时卖出（params: fast, slow）
 
 ### 4.5 检查策略
@@ -118,23 +120,35 @@ strategy_inspect(strategy="sma_crossover")
 
 ## Phase 5：回测与达标检查
 
+**重要：Phase 5 的三个工具必须按顺序全部调用，不可跳过。**
+
 ### 5.1 执行回测
 ```
 engine_run(strategy="sma_crossover", symbols=["AAPL"], start="2023-01-01", end="2024-12-31")
 ```
+engine_run 返回 `run_id`、组合概况和交易数，但**不包含绩效指标**。
 
-### 5.2 查看绩效
+### 5.2 查看绩效（必须调用）
 ```
 engine_results(run_id="...")
 ```
+**必须用 engine_run 返回的 run_id 调用 engine_results**，才能获取绩效指标和目标达标检查。engine_results 返回 total_return、sharpe_ratio、max_drawdown 以及每项目标的 pass/fail。
 
 向用户报告：
 - 总收益率、夏普比率、最大回撤
 - 各项目标的达标情况（pass/fail）
 
-### 5.3 查看交易明细
+### 5.3 查看交易明细（必须调用）
 ```
 engine_trade_list(run_id="...")
+```
+**必须用同一个 run_id 调用 engine_trade_list**，获取完整交易记录。
+
+### 调用链示例
+```
+1. result = engine_run(strategy=..., symbols=..., start=..., end=...)
+2. engine_results(run_id=result["run_id"])
+3. engine_trade_list(run_id=result["run_id"])
 ```
 
 向用户报告交易次数、买卖时间、价格。

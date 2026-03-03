@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,7 @@ nest_asyncio.apply()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_DIR = PROJECT_ROOT / "skills"
-MAX_TOOL_ROUNDS = 15
+MAX_TOOL_ROUNDS = 30
 
 
 # -- Sidebar -------------------------------------------------------------------
@@ -50,6 +51,9 @@ with st.sidebar:
 
     if st.button("Clear Chat"):
         st.session_state.messages = []
+        # Clear persisted MCP session state
+        _session_file = Path(tempfile.gettempdir()) / "oxq_mcp_session.pkl"
+        _session_file.unlink(missing_ok=True)
         st.rerun()
 
 
