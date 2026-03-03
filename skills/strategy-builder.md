@@ -90,14 +90,16 @@ strategy_add_indicator(strategy="sma_crossover", name="sma_10", type="SMA", para
 strategy_add_indicator(strategy="sma_crossover", name="sma_50", type="SMA", params={"column": "close", "period": 50})
 ```
 
-可用指标类型：`SMA`
+可用指标类型：`SMA`, `Ratio`
 
 ### 4.3 添加信号（Signal 层）
 ```
 strategy_add_signal(strategy="sma_crossover", name="golden_cross", type="Crossover", inputs={"fast": "sma_10", "slow": "sma_50"})
 ```
 
-可用信号类型：`Crossover`
+可用信号类型：`Crossover`, `TopNRanking`
+
+- `TopNRanking` — 截面排名选 Top N，归一化权重，支持权重上限（params: score, n, filter_negative, max_weight）
 
 ### 4.4 添加规则（Rule 层）
 ```
@@ -110,6 +112,7 @@ strategy_add_rule(strategy="sma_crossover", name="sell_on_cross", type="ExitRule
 - `TargetValueEntryRule` — 信号触发时按目标市值买入（params: signal, target_value）
 - `FullPositionEntryRule` — 信号触发时全仓买入，用全部可用现金（params: signal）
 - `ExitRule` — 快线跌破慢线时卖出（params: fast, slow）
+- `RebalanceRule` — 按目标权重定期调仓（params: weight_col, frequency）
 
 ### 4.5 检查策略
 ```
