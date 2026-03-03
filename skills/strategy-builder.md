@@ -1,7 +1,7 @@
 ---
 name: strategy-builder
 description: 指导 Agent 构建量化交易策略并进行回测评估
-tools_required: [strategy_create, strategy_add_indicator, strategy_add_signal, strategy_add_rule, strategy_inspect, engine_run, engine_results, engine_trade_list, data_load_symbols, data_list_symbols, data_inspect, universe_set]
+tools_required: [strategy_create, strategy_add_indicator, strategy_add_signal, strategy_add_rule, strategy_inspect, indicator_describe, indicator_list, engine_run, engine_results, engine_trade_list, data_load_symbols, data_list_symbols, data_inspect, universe_set]
 ---
 
 ## 你的角色
@@ -105,6 +105,25 @@ strategy_add_indicator(strategy="sma_crossover", name="sma_50", type="SMA", para
 **其他:** `LogReturn`, `NdayReturn`, `RollingMDD`, `Ratio`
 
 > 注意：MACD 系列需按顺序注册：先 `MACDLine`（命名为 "macd"），再 `MACDSignal`（命名为 "macd_signal"），最后 `MACDHistogram`。
+
+### 4.2.1 查询指标信息
+
+在选择指标前，可以查看所有可用指标及其公式：
+
+```
+indicator_list()
+```
+
+查看某个具体指标的公式、参数和依赖：
+
+```
+indicator_describe(type="RSI")
+# 返回: name, formula (LaTeX), description, params, depends_on
+```
+
+每个指标都包含 LaTeX 格式的计算公式（`formula` 属性），例如：
+- RSI: `RSI = 100 - \frac{100}{1 + \frac{AvgGain}{AvgLoss}}`
+- SMA: `SMA_t = \frac{1}{N} \sum_{i=0}^{N-1} P_{t-i}`
 
 ### 4.3 添加信号（Signal 层）
 ```

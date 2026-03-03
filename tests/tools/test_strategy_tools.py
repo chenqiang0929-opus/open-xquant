@@ -6,6 +6,9 @@ import pytest
 
 from oxq.tools import session
 from oxq.tools.strategy import (
+    INDICATOR_TYPES,
+    indicator_describe,
+    indicator_list,
     strategy_add_indicator,
     strategy_add_rule,
     strategy_add_signal,
@@ -187,3 +190,62 @@ def test_strategy_inspect() -> None:
 def test_strategy_inspect_not_found() -> None:
     result = strategy_inspect("missing")
     assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# indicator_describe
+# ---------------------------------------------------------------------------
+
+
+def test_indicator_describe_rsi() -> None:
+    result = indicator_describe(type="RSI")
+    assert result["name"] == "RSI"
+    assert "frac" in result["formula"]
+    assert result["params"]["period"] == "14"
+    assert result["params"]["column"] == "close"
+    assert result["depends_on"] == []
+
+
+def test_indicator_describe_macd_signal_depends_on() -> None:
+    result = indicator_describe(type="MACDSignal")
+    assert result["name"] == "MACDSignal"
+    assert "macd" in result["depends_on"]
+
+
+def test_indicator_describe_unknown() -> None:
+    result = indicator_describe(type="FooBar")
+    assert "error" in result
+    assert "FooBar" in result["error"]
+
+
+def test_indicator_describe_all_have_formula() -> None:
+    """Every indicator returned by describe should have a non-empty formula."""
+    for name in INDICATOR_TYPES:
+        result = indicator_describe(type=name)
+        assert "error" not in result, f"{name} returned error"
+        assert len(result["formula"]) > 0, f"{name} has empty formula"
+
+
+# ---------------------------------------------------------------------------
+# indicator_list
+# ---------------------------------------------------------------------------
+
+
+def test_indicator_list_count() -> None:
+    result = indicator_list()
+    assert len(result["indicators"]) == 27
+
+
+def test_indicator_list_structure() -> None:
+    result = indicator_list()
+    for item in result["indicators"]:
+        assert "name" in item
+        assert "formula" in item
+        assert "description" in item
+        assert len(item["formula"]) > 0, f"{item['name']} has empty formula"
+
+
+def test_indicator_list_sorted() -> None:
+    result = indicator_list()
+    names = [i["name"] for i in result["indicators"]]
+    assert names == sorted(names)

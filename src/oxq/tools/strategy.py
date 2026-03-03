@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from oxq.core.strategy import Strategy
@@ -264,5 +265,54 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
         "rebalance_rules": [
             {"type": r.__class__.__name__, "name": r.name}
             for r in strat.rebalance_rules
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Indicator metadata tools
+# ---------------------------------------------------------------------------
+
+
+@registry.tool(
+    name="indicator_describe",
+    description="Describe an indicator: show its LaTeX formula, parameters, category, and dependencies",
+)
+def indicator_describe(type: str) -> dict[str, Any]:
+    """Return indicator metadata including LaTeX formula."""
+    cls = INDICATOR_TYPES.get(type)
+    if cls is None:
+        return {"error": f"Unknown indicator '{type}'. Available: {sorted(INDICATOR_TYPES)}"}
+
+    sig = inspect.signature(cls().compute)
+    params = {
+        k: str(v.default) if v.default is not v.empty else "(required)"
+        for k, v in sig.parameters.items()
+        if k not in ("self", "mktdata")
+    }
+
+    return {
+        "name": getattr(cls, "name", type),
+        "formula": getattr(cls, "formula", ""),
+        "description": (cls.__doc__ or "").strip(),
+        "params": params,
+        "depends_on": list(getattr(cls, "depends_on", ())),
+    }
+
+
+@registry.tool(
+    name="indicator_list",
+    description="List all available indicator types with their formulas",
+)
+def indicator_list() -> dict[str, Any]:
+    """Return all indicator types with names, formulas, and descriptions."""
+    return {
+        "indicators": [
+            {
+                "name": name,
+                "formula": getattr(cls, "formula", ""),
+                "description": (cls.__doc__ or "").split("\n")[0].strip(),
+            }
+            for name, cls in sorted(INDICATOR_TYPES.items())
         ],
     }

@@ -26,6 +26,7 @@ class EMA:
     """Exponential Moving Average."""
 
     name = "EMA"
+    formula = r"EMA_t = \alpha \cdot P_t + (1 - \alpha) \cdot EMA_{t-1}, \quad \alpha = \frac{2}{N+1}"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,
@@ -38,6 +39,7 @@ class WMA:
     """Weighted Moving Average (linearly weighted)."""
 
     name = "WMA"
+    formula = r"WMA_t = \frac{\sum_{i=0}^{N-1} (N-i) \cdot P_{t-i}}{\sum_{i=1}^{N} i}"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,
@@ -53,6 +55,7 @@ class DEMA:
     """Double Exponential Moving Average."""
 
     name = "DEMA"
+    formula = r"DEMA_t = 2 \cdot EMA_t - EMA(EMA_t)"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,
@@ -67,6 +70,7 @@ class TEMA:
     """Triple Exponential Moving Average."""
 
     name = "TEMA"
+    formula = r"TEMA_t = 3 \cdot EMA_t - 3 \cdot EMA_2_t + EMA_3_t"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,
@@ -85,6 +89,7 @@ class RSI:
     """Relative Strength Index (Wilder smoothing)."""
 
     name = "RSI"
+    formula = r"RSI = 100 - \frac{100}{1 + \frac{AvgGain}{AvgLoss}}"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 14,
@@ -106,6 +111,7 @@ class MACDLine:
     """MACD Line = EMA(fast) - EMA(slow)."""
 
     name = "MACDLine"
+    formula = r"MACD = EMA_{fast} - EMA_{slow}"
 
     def compute(
         self,
@@ -127,6 +133,7 @@ class MACDSignal:
     """
 
     name = "MACDSignal"
+    formula = r"Signal = EMA_9(MACD)"
     depends_on = ("macd",)
 
     def compute(
@@ -146,6 +153,7 @@ class MACDHistogram:
     """
 
     name = "MACDHistogram"
+    formula = r"Histogram = MACD - Signal"
     depends_on = ("macd", "macd_signal")
 
     def compute(
@@ -162,6 +170,7 @@ class ROC:
     """Rate of Change (percentage)."""
 
     name = "ROC"
+    formula = r"ROC_t = \frac{P_t - P_{t-N}}{P_{t-N}} \times 100"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 10,
@@ -174,6 +183,7 @@ class PPO:
     """Percentage Price Oscillator."""
 
     name = "PPO"
+    formula = r"PPO = \frac{EMA_{fast} - EMA_{slow}}{EMA_{slow}} \times 100"
 
     def compute(
         self,
@@ -192,6 +202,7 @@ class CCI:
     """Commodity Channel Index."""
 
     name = "CCI"
+    formula = r"CCI = \frac{TP - SMA(TP)}{0.015 \cdot MAD(TP)}, \quad TP = \frac{H+L+C}{3}"
 
     def compute(
         self, mktdata: pd.DataFrame, period: int = 20,
@@ -213,6 +224,7 @@ class BollingerUpper:
     """Bollinger Band — upper band."""
 
     name = "BollingerUpper"
+    formula = r"Upper = SMA_N + k \cdot \sigma_N"
 
     def compute(
         self,
@@ -230,6 +242,7 @@ class BollingerLower:
     """Bollinger Band — lower band."""
 
     name = "BollingerLower"
+    formula = r"Lower = SMA_N - k \cdot \sigma_N"
 
     def compute(
         self,
@@ -247,6 +260,7 @@ class ATR:
     """Average True Range (Wilder smoothing)."""
 
     name = "ATR"
+    formula = r"TR = \max(H-L, |H-C_{prev}|, |L-C_{prev}|), \quad ATR = Wilder(TR, N)"
 
     def compute(
         self, mktdata: pd.DataFrame, period: int = 14,
@@ -273,6 +287,7 @@ class OBV:
     """On-Balance Volume."""
 
     name = "OBV"
+    formula = r"OBV_t = OBV_{t-1} + sign(\Delta C_t) \cdot V_t"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close",
@@ -292,6 +307,7 @@ class VWAP:
     """Volume-Weighted Average Price (rolling)."""
 
     name = "VWAP"
+    formula = r"VWAP = \frac{\sum_{i} TP_i \cdot V_i}{\sum_{i} V_i}"
 
     def compute(
         self, mktdata: pd.DataFrame, period: int = 20,
@@ -306,6 +322,7 @@ class MFI:
     """Money Flow Index."""
 
     name = "MFI"
+    formula = r"MFI = 100 - \frac{100}{1 + \frac{PositiveFlow}{NegativeFlow}}"
 
     def compute(
         self, mktdata: pd.DataFrame, period: int = 14,
@@ -332,6 +349,7 @@ class ADX:
     """Average Directional Index."""
 
     name = "ADX"
+    formula = r"ADX = Wilder\left(\frac{|+DI - (-DI)|}{+DI + (-DI)} \times 100, N\right)"
 
     def compute(
         self, mktdata: pd.DataFrame, period: int = 14,
@@ -377,6 +395,7 @@ class AROON:
     """Aroon Oscillator (Aroon Up - Aroon Down)."""
 
     name = "AROON"
+    formula = r"Aroon = \frac{bars\_since\_high}{N} \times 100 - \frac{bars\_since\_low}{N} \times 100"
 
     def compute(
         self, mktdata: pd.DataFrame, period: int = 25,
@@ -400,6 +419,7 @@ class StochK:
     """Stochastic %K."""
 
     name = "StochK"
+    formula = r"\%K = \frac{C - L_N}{H_N - L_N} \times 100"
 
     def compute(
         self, mktdata: pd.DataFrame, period: int = 14,

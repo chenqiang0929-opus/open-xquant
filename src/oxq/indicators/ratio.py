@@ -9,6 +9,7 @@ class Ratio:
     """Element-wise ratio of two columns: col_a / col_b."""
 
     name = "Ratio"
+    formula = r"Ratio = \frac{A}{B}"
 
     def compute(
         self,

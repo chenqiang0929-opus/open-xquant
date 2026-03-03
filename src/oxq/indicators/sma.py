@@ -12,6 +12,7 @@ class SMA:
     """
 
     name = "SMA"
+    formula = r"SMA_t = \frac{1}{N} \sum_{i=0}^{N-1} P_{t-i}"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,

@@ -29,6 +29,14 @@ from oxq.indicators.builtin import (
     MACDSignal,
     StochK,
 )
+from oxq.indicators.log_return import LogReturn
+from oxq.indicators.momentum import Momentum
+from oxq.indicators.nday_return import NdayReturn
+from oxq.indicators.ratio import Ratio
+from oxq.indicators.rolling_mdd import RollingMDD
+from oxq.indicators.rolling_volatility import RollingVolatility
+from oxq.indicators.sma import SMA
+from oxq.tools.strategy import INDICATOR_TYPES
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -641,3 +649,36 @@ class TestStochK:
         valid = result.dropna()
         assert (valid >= 0).all()
         assert (valid <= 100).all()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Formula attribute — all indicators
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+ALL_INDICATOR_CLASSES = [
+    ADX, AROON, ATR, BollingerLower, BollingerUpper, CCI, DEMA, EMA,
+    LogReturn, MACDHistogram, MACDLine, MACDSignal, MFI, Momentum,
+    NdayReturn, OBV, PPO, ROC, RSI, Ratio, RollingMDD, RollingVolatility,
+    SMA, StochK, TEMA, VWAP, WMA,
+]
+
+
+@pytest.mark.parametrize("cls", ALL_INDICATOR_CLASSES, ids=lambda c: c.name)
+def test_indicator_has_formula(cls: type) -> None:
+    """Every indicator must have a non-empty formula class attribute."""
+    assert hasattr(cls, "formula"), f"{cls.name} missing 'formula'"
+    assert isinstance(cls.formula, str)
+    assert len(cls.formula) > 0, f"{cls.name} has empty formula"
+
+
+def test_indicator_types_count() -> None:
+    """INDICATOR_TYPES registry should contain exactly 27 indicators."""
+    assert len(INDICATOR_TYPES) == 27
+
+
+@pytest.mark.parametrize("name,cls", sorted(INDICATOR_TYPES.items()), ids=lambda x: x if isinstance(x, str) else x.name)
+def test_registry_indicator_has_formula(name: str, cls: type) -> None:
+    """Every registered indicator must have a non-empty formula."""
+    assert hasattr(cls, "formula"), f"{name} missing 'formula'"
+    assert len(cls.formula) > 0, f"{name} has empty formula"

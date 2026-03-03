@@ -13,6 +13,7 @@ class Momentum:
     """
 
     name = "Momentum"
+    formula = r"Mom_N = \frac{\ln P_t - \ln P_{t-N}}{N}"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,

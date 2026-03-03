@@ -13,6 +13,7 @@ class RollingVolatility:
     """
 
     name = "RollingVolatility"
+    formula = r"\sigma_N = \sqrt{\frac{1}{N-1}\sum_{i=0}^{N-1}(r_{t-i}-\bar{r}_N)^2}"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,

@@ -14,6 +14,7 @@ class RollingMDD:
     """
 
     name = "RollingMDD"
+    formula = r"MDD_N = \min_{i \in [t-N+1,t]}\left(\ln P_i - \max_{j \leq i} \ln P_j\right)"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,

@@ -10,6 +10,7 @@ class NdayReturn:
     """N-day cumulative log return: R_N = ln(P_t) - ln(P_{t-N})."""
 
     name = "NdayReturn"
+    formula = r"R_N = \ln P_t - \ln P_{t-N}"
 
     def compute(
         self, mktdata: pd.DataFrame, column: str = "close", period: int = 20,
