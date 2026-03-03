@@ -2,8 +2,8 @@
 
 import pandas as pd
 
-from oxq.backtest.broker import SimBroker
 from oxq.core.types import FillReceiver, Order, OrderRouter
+from oxq.trade.sim_broker import SimBroker
 
 
 def test_sim_broker_satisfies_order_router_protocol() -> None:

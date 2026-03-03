@@ -1,15 +1,15 @@
-"""Tests for BacktestEngine — full pipeline integration."""
+"""Tests for Engine — full pipeline integration."""
 
 import pandas as pd
 
-from oxq.backtest.broker import SimBroker
-from oxq.backtest.engine import BacktestEngine
+from oxq.core.engine import Engine, _apply_fill
 from oxq.core.strategy import Strategy
-from oxq.core.types import Portfolio
+from oxq.core.types import Fill, Order, Portfolio, Position
 from oxq.indicators.sma import SMA
 from oxq.rules.entry import EntryRule
 from oxq.rules.exit import ExitRule
 from oxq.signals.crossover import Crossover
+from oxq.trade.sim_broker import SimBroker
 from oxq.universe.static import StaticUniverse
 
 
@@ -80,10 +80,11 @@ def test_engine_full_pipeline() -> None:
     data = _make_trending_data()
     market = FakeMarketDataProvider(data)
     strategy = _make_strategy()
-    engine = BacktestEngine()
+    engine = Engine()
+    sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, broker=SimBroker(),
+        strategy, market=market, router=sim_broker, receiver=sim_broker,
         start="2024-01-01", end="2024-12-31",
     )
 
@@ -104,10 +105,11 @@ def test_engine_run_through_indicator() -> None:
     data = _make_trending_data()
     market = FakeMarketDataProvider(data)
     strategy = _make_strategy()
-    engine = BacktestEngine()
+    engine = Engine()
+    sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, broker=SimBroker(),
+        strategy, market=market, router=sim_broker, receiver=sim_broker,
         start="2024-01-01", end="2024-12-31",
         run_through="indicator",
     )
@@ -125,10 +127,11 @@ def test_engine_run_through_signal() -> None:
     data = _make_trending_data()
     market = FakeMarketDataProvider(data)
     strategy = _make_strategy()
-    engine = BacktestEngine()
+    engine = Engine()
+    sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, broker=SimBroker(),
+        strategy, market=market, router=sim_broker, receiver=sim_broker,
         start="2024-01-01", end="2024-12-31",
         run_through="signal",
     )
@@ -143,10 +146,11 @@ def test_engine_portfolio_cash_changes() -> None:
     data = _make_trending_data()
     market = FakeMarketDataProvider(data)
     strategy = _make_strategy()
-    engine = BacktestEngine()
+    engine = Engine()
+    sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, broker=SimBroker(),
+        strategy, market=market, router=sim_broker, receiver=sim_broker,
         start="2024-01-01", end="2024-12-31",
         initial_cash=100_000.0,
     )
@@ -163,10 +167,11 @@ def test_engine_metrics() -> None:
     data = _make_trending_data()
     market = FakeMarketDataProvider(data)
     strategy = _make_strategy()
-    engine = BacktestEngine()
+    engine = Engine()
+    sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, broker=SimBroker(),
+        strategy, market=market, router=sim_broker, receiver=sim_broker,
         start="2024-01-01", end="2024-12-31",
     )
 
@@ -181,9 +186,6 @@ def test_engine_metrics() -> None:
 
 
 def test_apply_fill_buy() -> None:
-    from oxq.backtest.engine import _apply_fill
-    from oxq.core.types import Fill, Order
-
     portfolio = Portfolio(cash=100_000.0)
     fill = Fill(
         order=Order(symbol="AAPL", side="BUY", shares=100),
@@ -199,9 +201,6 @@ def test_apply_fill_buy() -> None:
 
 
 def test_apply_fill_sell() -> None:
-    from oxq.backtest.engine import _apply_fill
-    from oxq.core.types import Fill, Order, Position
-
     portfolio = Portfolio(
         cash=50_000.0,
         positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=150.0)},

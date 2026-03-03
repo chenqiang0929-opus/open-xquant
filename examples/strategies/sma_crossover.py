@@ -1,7 +1,16 @@
-"""SMA Crossover Strategy — end-to-end backtest example.
+"""SMA Crossover Strategy — end-to-end example.
 
 Strategy: Buy when SMA10 crosses above SMA50 (golden cross),
           sell when SMA10 drops below SMA50 (death cross).
+
+Architecture note:
+    The strategy definition is provider-agnostic. The Engine doesn't know
+    whether it's running a backtest or live trading — it only depends on
+    three Protocol interfaces: MarketDataProvider, OrderRouter, FillReceiver.
+
+    "Backtest" = LocalMarketDataProvider + SimBroker
+    "Paper"    = RealtimeDataProvider   + SimBroker     (future)
+    "Live"     = RealtimeDataProvider   + BrokerAdapter  (future)
 
 Usage:
     # First download data
@@ -11,15 +20,15 @@ Usage:
     python examples/strategies/sma_crossover.py
 """
 
-from oxq.backtest import BacktestEngine, SimBroker
-from oxq.core import Strategy
+from oxq.core import Engine, Strategy
 from oxq.data import LocalMarketDataProvider
 from oxq.indicators import SMA
 from oxq.rules import EntryRule, ExitRule
 from oxq.signals import Crossover
+from oxq.trade import SimBroker
 from oxq.universe import StaticUniverse
 
-# ── Strategy Definition ──────────────────────────────────────────────────
+# ── 1. Strategy Definition (provider-agnostic) ──────────────────────
 
 strategy = Strategy(
     name="sma_crossover",
@@ -36,18 +45,24 @@ strategy = Strategy(
     exit_rules=[ExitRule(fast="sma_10", slow="sma_50")],
 )
 
-# ── Run Backtest ─────────────────────────────────────────────────────────
+# ── 2. Choose Providers (this is what makes it "backtest") ──────────
 
-engine = BacktestEngine()
+market = LocalMarketDataProvider()
+sim_broker = SimBroker()
+
+# ── 3. Run ──────────────────────────────────────────────────────────
+
+engine = Engine()
 result = engine.run(
     strategy,
-    market=LocalMarketDataProvider(),
-    broker=SimBroker(),
+    market=market,
+    router=sim_broker,      # SimBroker implements OrderRouter
+    receiver=sim_broker,    # SimBroker implements FillReceiver
     start="2023-01-01",
     end="2024-12-31",
 )
 
-# ── Results ──────────────────────────────────────────────────────────────
+# ── 4. Results ──────────────────────────────────────────────────────
 
 print("=" * 60)
 print(f"Strategy: {strategy.name}")

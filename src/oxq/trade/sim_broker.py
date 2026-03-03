@@ -1,4 +1,4 @@
-"""Simulated broker for backtesting — implements OrderRouter + FillReceiver."""
+"""Simulated broker — implements OrderRouter + FillReceiver for backtesting."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ class SimBroker:
     """Simulated broker that fills orders at the current bar's close price.
 
     Implements both :class:`OrderRouter` and :class:`FillReceiver` protocols.
-    In backtest mode, orders are queued via :meth:`submit_order` and filled
-    via :meth:`fill_pending_orders` each bar.
+    Orders are queued via :meth:`submit_order` and filled via
+    :meth:`fill_pending_orders` each bar.
     """
 
     def __init__(self) -> None:
@@ -36,7 +36,7 @@ class SimBroker:
         self._fills.clear()
         return fills
 
-    # -- Engine hook ----------------------------------------------------------
+    # -- Simulation step ------------------------------------------------------
 
     def fill_pending_orders(
         self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,

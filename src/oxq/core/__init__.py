@@ -1,3 +1,4 @@
+from oxq.core.engine import Engine
 from oxq.core.errors import DownloadError, OxqError, SymbolNotFoundError
 from oxq.core.strategy import Strategy
 from oxq.core.types import (
@@ -11,9 +12,11 @@ from oxq.core.types import (
     Rule,
     Signal,
 )
+from oxq.portfolio.analytics import RunResult
 
 __all__ = [
     "DownloadError",
+    "Engine",
     "Fill",
     "FillReceiver",
     "Indicator",
@@ -23,6 +26,7 @@ __all__ = [
     "Portfolio",
     "Position",
     "Rule",
+    "RunResult",
     "Signal",
     "Strategy",
     "SymbolNotFoundError",

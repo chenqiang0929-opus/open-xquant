@@ -1,4 +1,4 @@
-"""Backtest result and performance analytics."""
+"""Engine result and performance analytics."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from oxq.core.types import Fill, Portfolio
 
 
 @dataclass
-class BacktestResult:
-    """Container for backtest output with basic performance metrics."""
+class RunResult:
+    """Container for engine output with basic performance metrics."""
 
     portfolio: Portfolio
     trades: list[Fill]

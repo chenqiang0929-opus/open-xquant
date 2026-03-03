@@ -23,6 +23,10 @@ class Strategy:
     signals: dict[str, tuple[Signal, dict[str, Any]]]
     entry_rules: list[Rule]
     exit_rules: list[Rule]
+    # Placeholder for future rule types (Phase 2+)
+    risk_rules: list[Rule] = field(default_factory=list)
+    order_rules: list[Rule] = field(default_factory=list)
+    rebalance_rules: list[Rule] = field(default_factory=list)
     # Architecture metadata (Section 4.1)
     hypothesis: str = ""
     objectives: dict[str, dict[str, float]] = field(default_factory=dict)

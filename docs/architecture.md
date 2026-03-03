@@ -30,10 +30,9 @@ open-xquant/
 │   ├── indicators/                 # 技术指标库（SMA, EMA, RSI, MACD, BBands...）
 │   ├── signals/                    # 信号生成器（交叉、阈值、比较、公式、组合）
 │   ├── rules/                      # 交易规则（入场、出场、仓位管理、风控、再平衡）
-│   ├── portfolio/                  # 组合管理（持仓、订单簿、记账）
-│   ├── backtest/                   # 回测引擎（事件驱动、模拟撮合、绩效分析）
+│   ├── portfolio/                  # 组合管理（持仓、订单簿、记账、绩效分析）
 │   ├── optimize/                   # 参数优化（网格/随机/贝叶斯搜索、滚动前推、统计检验）
-│   ├── trade/                      # 交易执行（订单生成、费率、滑点、交易所配置）
+│   ├── trade/                      # 交易执行（SimBroker、费率、滑点、交易所配置）
 │   ├── universe/                   # Universe 构建（静态池、指数成分、条件过滤）
 │   ├── data/                       # 数据层（Provider 协议、行情/因子数据、数据加载）
 │   ├── observe/                    # 可观测性（追踪、日志、事件总线、审计）
@@ -56,10 +55,10 @@ open-xquant/
 ```
 ┌──────────────────────────────────────────────────────┐
 │              Skill Layer (skill.md)                   │  ← Agent 工作流指导
-│  strategy-builder / backtest-runner / tuner ...       │
+│  strategy-builder / engine-runner / tuner ...          │
 ├──────────────────────────────────────────────────────┤
 │              SDK + Tool Layer                         │  ← 核心资产
-│  oxq.universe / oxq.core / oxq.backtest / ...        │  Python SDK
+│  oxq.universe / oxq.core / oxq.trade / ...           │  Python SDK
 │  oxq.tools (协议无关的 Tool 定义)                     │  Tool 定义
 │          ┆                                            │
 │     ┌────┴──────────────────────┐                    │
@@ -81,7 +80,7 @@ open-xquant/
 
 ### 4.1 Universe → Indicator → Signal → Rule 四阶段模型
 
-策略始于**假设和目标**，而非代码——明确的假设（hypothesis）定义了策略试图捕捉的市场现象，目标（objectives）量化了成功标准，基准（benchmarks）提供了比较的参照系。策略由四层声明式组件构成：Universe（标的池）、Indicator（指标计算）、Signal（信号生成）、Rule（交易决策）。采用 compile once → run many 模式，策略编译后可重复执行。
+策略始于**假设和目标**，而非代码——明确的假设（hypothesis）定义了策略试图捕捉的市场现象，目标（objectives）量化了成功标准，基准（benchmarks）提供了比较的参照系。策略由四层声明式组件构成：Universe（标的池）、Indicator（指标计算）、Signal（信号生成）、Rule（交易决策）。Strategy 是纯声明式容器，直接传给 Engine 执行。
 
 **四层组件的精确语义**：
 
@@ -126,9 +125,10 @@ strategy.add_rule("exit_stop", ExitRule,
     inputs={"signal": "@sig:rsi_oversold"},
     params={"stop_loss_pct": 0.05, "trailing": True})
 
-# 编译 & 运行
-compiled = strategy.compile(registry)
-result = compiled.run(context, providers)
+# 运行（Provider 决定模式：回测 / 模拟 / 实盘）
+engine = Engine()
+result = engine.run(strategy, market=market, router=broker, receiver=broker,
+                    start="2020-01-01", end="2024-12-31")
 ```
 
 **等价的 Tool 调用（AI Agent 方式）**：
@@ -147,7 +147,7 @@ Tool 定义在 `oxq.tools` 中，协议无关——Coding Agent 直接 `import` 
     inputs={"fast": "@ind:sma_fast", "slow": "@ind:sma_slow"})
 → strategy_add_rule(strategy="momentum_rotation", name="enter_long", type="EntryRule",
     inputs={"signal": "@sig:golden_cross"}, params={"order_type": "market"})
-→ backtest_run(strategy="momentum_rotation", start="2020-01-01", end="2024-12-31")
+→ engine_run(strategy="momentum_rotation", start="2020-01-01", end="2024-12-31")
 ```
 
 ### 4.2 宽表数据模型
@@ -691,14 +691,20 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 
 **Round-trip Trade 定义**：交易统计（胜率、盈亏比、MAE/MFE 等）的计算结果取决于如何定义一笔"交易"的起止。框架默认使用 **flat-to-reduced** 方法——从首次增仓标记交易开始，任何减仓标记交易结束。该方法与券商对账单一致，便于回测与实盘结果对照。支持的方法见 `TradeMethod` 枚举。
 
-### 5.7 回测引擎 (oxq.backtest)
+### 5.7 执行引擎 (oxq.core.engine)
 
-- 事件驱动回测引擎，基于四阶段模型执行，支持分阶段运行（`run_through` 参数）用于逐组件评估
-- 模拟撮合引擎，支持可配置的滑点模型和费率
-- 逐笔交易记录 MAE/MFE（Maximum Adverse/Favorable Excursion），为经验止损/止盈提供统计依据
-- 绝对绩效指标：Sharpe Ratio, Max Drawdown, Calmar Ratio, Win Rate, Profit Factor 等
-- 基准相对指标：Tracking Error, Information Ratio, Alpha, Beta, 超额收益
-- 策略评估达标检查：回测结果自动与 `strategy.objectives` 对比，输出各指标的达标状态
+Engine 是通用策略执行引擎，执行 Universe → Indicator → Signal → Rule 四阶段管道。它是 **provider-agnostic** 的——不知道自己在运行回测、模拟盘还是实盘，区别仅在于接入的三个 Protocol 实现：
+
+| 模式 | MarketDataProvider | OrderRouter | FillReceiver |
+|------|-------------------|-------------|--------------|
+| 回测 | `LocalMarketDataProvider` | `SimBroker` | `SimBroker` |
+| 模拟盘（未来） | `RealtimeDataProvider` | `SimBroker` | `SimBroker` |
+| 实盘（未来） | `RealtimeDataProvider` | `BrokerAdapter` | `BrokerAdapter` |
+
+- 支持分阶段运行（`run_through` 参数）用于逐组件评估
+- `SimBroker`（`oxq.trade`）实现 OrderRouter + FillReceiver，模拟撮合
+- 绩效分析（`RunResult`，`oxq.portfolio.analytics`）：Sharpe Ratio, Max Drawdown 等
+- 策略评估达标检查：运行结果自动与 `strategy.objectives` 对比，输出各指标的达标状态
 
 ### 5.8 参数优化 (oxq.optimize)
 
@@ -842,10 +848,10 @@ Tool 定义是框架的核心资产之一，与传输协议无关。每个 Tool 
 | | `data_list_symbols` | 列出可用标的 |
 | | `data_inspect` | 查看数据摘要（时间范围、缺失值等） |
 | | `data_query` | 查询特定数据（价格、因子等） |
-| **backtest** | `backtest_run` | 运行回测 |
-| | `backtest_results` | 获取回测结果 |
-| | `backtest_compare` | 对比多个回测 |
-| | `backtest_trade_list` | 查看交易记录 |
+| **engine** | `engine_run` | 运行策略（回测/模拟/实盘取决于 Provider） |
+| | `engine_results` | 获取运行结果 |
+| | `engine_compare` | 对比多次运行 |
+| | `engine_trade_list` | 查看交易记录 |
 | **optimize** | `optimize_define_paramset` | 定义参数搜索空间 |
 | | `optimize_run_search` | 运行参数搜索 |
 | | `optimize_run_walk_forward` | 运行前推分析 |
@@ -874,7 +880,7 @@ Tool 定义是框架的核心资产之一，与传输协议无关。每个 Tool 
 
 1. **原子性**：每个 tool 做一件事，返回结构化 JSON
 2. **幂等性**：相同输入产生相同输出（除 execute 外）
-3. **可组合**：tools 之间通过 ID 引用关联（strategy_id, backtest_id, paramset_id）
+3. **可组合**：tools 之间通过 ID 引用关联（strategy_id, run_id, paramset_id）
 4. **错误友好**：返回清晰的错误信息 + 建议的修复动作
 5. **渐进披露**：简单场景用少量参数，复杂场景可展开全部参数
 6. **Thin Wrapper**：Tool 是 SDK 的薄封装，不得包含业务逻辑。每个 tool 函数体只做三件事：参数解析 → 调用 `oxq` SDK → 格式化返回。所有计算、状态管理、规则执行等逻辑必须实现在 `src/oxq/` 中，Tool 层只负责接口适配
@@ -897,7 +903,7 @@ class SessionState:
     strategies: Dict[str, Strategy]
     universes: Dict[str, UniverseProvider]
     datasets: Dict[str, DataFrame]
-    backtests: Dict[str, BacktestResult]
+    run_results: Dict[str, RunResult]
     paramsets: Dict[str, ParamSet]
 
 # 自动从 oxq.tools 注册所有 tool 到 MCP server
@@ -982,7 +988,7 @@ tools_required: [optimize.*, analysis.*]
 
 | Skill | 核心工作流 |
 |-------|-----------|
-| `backtest-runner.md` | 配置回测 → 运行 → 分析绩效 → 检查过拟合 → 给出改进建议 |
+| `engine-runner.md` | 配置运行 → 执行策略 → 分析绩效 → 检查过拟合 → 给出改进建议 |
 | `risk-analyzer.md` | 回撤分析 → 压力测试 → 尾部风险 → 建议风控规则 |
 | `performance-reviewer.md` | 多维绩效分析 → 归因分析 → 与基准对比 → 生成报告 |
 | `trade-executor.md` | 生成订单 → 估算成本 → 确认后执行 → 监控成交 → 记录结果 |
@@ -1017,10 +1023,12 @@ tools_required: [optimize.*, analysis.*]
 - `oxq.signals`: 3 个信号 (Crossover, Threshold, Comparison)
 - `oxq.rules`: EntryRule, ExitRule, 基础 sizing
 - `oxq.portfolio`: Portfolio, Position
-- `oxq.backtest`: 基础回测引擎 + analytics
-- `oxq.tools`: universe_* + strategy_* + backtest_* tool 定义（核心交付物）
-- `skills/`: strategy-builder.md, backtest-runner.md
-- **目标**: Coding Agent / 开发者可以通过 SDK 构建简单策略并回测
+- `oxq.core.engine`: 通用执行引擎（provider-agnostic）
+- `oxq.trade`: SimBroker（模拟撮合）
+- `oxq.portfolio`: RunResult + analytics
+- `oxq.tools`: universe_* + strategy_* + engine_* tool 定义（核心交付物）
+- `skills/`: strategy-builder.md, engine-runner.md
+- **目标**: Coding Agent / 开发者可以通过 SDK 构建简单策略并运行（回测/模拟/实盘取决于 Provider）
 
 ### Phase 2: 参数优化 + 统计检验 + Universe 扩展 + MCP 分发
 - `oxq.universe`: IndexUniverse（Point-in-Time）, FilterUniverse
@@ -1100,5 +1108,5 @@ python -m mcp_server.server
 ## 参考
 
 - **quantstrat (R)**: indicator → signal → rule 分层模型、paramset 参数优化、walk-forward analysis、Deflated Sharpe Ratio 统计检验、order book 管理
-- **xquant.shop**: agent pipeline 架构、compile once → run many 模式、immutable specs、provider injection、SparseVector 权重表示
+- **xquant.shop**: agent pipeline 架构、immutable specs、provider injection、SparseVector 权重表示
 - **Peterson, Brian G. (2017)**: *"Developing & Backtesting Systematic Trading Strategies"* — 假设驱动开发、逐组件评估、信号预测力评估、MAE/MFE 分析、Rule Burden、Walk Forward Analysis、统计检验方法论
