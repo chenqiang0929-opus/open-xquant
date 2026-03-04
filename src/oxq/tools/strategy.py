@@ -39,6 +39,8 @@ from oxq.rules.entry import EntryRule, FullPositionEntryRule, TargetValueEntryRu
 from oxq.rules.exit import ExitRule
 from oxq.rules.rebalance import RebalanceRule
 from oxq.signals.crossover import Crossover
+from oxq.signals.equal_weight import EqualWeight
+from oxq.signals.risk_parity import RiskParity
 from oxq.signals.top_n_ranking import TopNRanking
 from oxq.tools import session
 from oxq.tools.registry import registry
@@ -77,7 +79,12 @@ INDICATOR_TYPES: dict[str, type] = {
     "VWAP": VWAP,
     "WMA": WMA,
 }
-SIGNAL_TYPES: dict[str, type] = {"Crossover": Crossover, "TopNRanking": TopNRanking}
+SIGNAL_TYPES: dict[str, type] = {
+    "Crossover": Crossover,
+    "EqualWeight": EqualWeight,
+    "RiskParity": RiskParity,
+    "TopNRanking": TopNRanking,
+}
 RULE_TYPES: dict[str, type] = {
     "EntryRule": EntryRule,
     "TargetValueEntryRule": TargetValueEntryRule,
