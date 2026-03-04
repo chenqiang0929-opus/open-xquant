@@ -52,21 +52,22 @@ def test_risk_parity_max_weight_cap() -> None:
 def test_risk_parity_nan_skipped() -> None:
     mktdata = _make_mktdata({"A": [0.10], "B": [float("nan")]})
     result = RiskParity().compute(mktdata, vol="vol")
-    assert result["A"].iloc[0] == pytest.approx(1.0)
+    # Only A valid, weight = min(1.0, 0.9) = 0.9 (default max_weight)
+    assert result["A"].iloc[0] == pytest.approx(0.9)
     assert result["B"].iloc[0] == 0.0
 
 
 def test_risk_parity_zero_vol_skipped() -> None:
     mktdata = _make_mktdata({"A": [0.10], "B": [0.0]})
     result = RiskParity().compute(mktdata, vol="vol")
-    assert result["A"].iloc[0] == pytest.approx(1.0)
+    assert result["A"].iloc[0] == pytest.approx(0.9)
     assert result["B"].iloc[0] == 0.0
 
 
 def test_risk_parity_negative_vol_skipped() -> None:
     mktdata = _make_mktdata({"A": [0.10], "B": [-0.05]})
     result = RiskParity().compute(mktdata, vol="vol")
-    assert result["A"].iloc[0] == pytest.approx(1.0)
+    assert result["A"].iloc[0] == pytest.approx(0.9)
     assert result["B"].iloc[0] == 0.0
 
 

@@ -21,7 +21,7 @@ class RiskParity:
         self,
         mktdata: dict[str, pd.DataFrame],
         vol: str = "",
-        max_weight: float = 1.0,
+        max_weight: float = 0.9,
     ) -> dict[str, pd.Series]:
         """Return inverse-vol target_weight Series for every symbol."""
         symbols = list(mktdata.keys())
