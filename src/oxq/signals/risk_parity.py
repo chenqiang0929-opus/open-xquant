@@ -24,6 +24,9 @@ class RiskParity:
         max_weight: float = 0.9,
     ) -> dict[str, pd.Series]:
         """Return inverse-vol target_weight Series for every symbol."""
+        if not vol:
+            msg = "vol parameter is required: name of the volatility column"
+            raise ValueError(msg)
         symbols = list(mktdata.keys())
         if not symbols:
             return {}
