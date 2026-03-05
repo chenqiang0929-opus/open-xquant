@@ -8,11 +8,15 @@ import pandas as pd
 class EqualWeight:
     """Assign equal weight 1/N to every symbol with valid close data.
 
+    N is always the total number of symbols in the universe, regardless
+    of how many have data on a given date.  When a symbol is missing,
+    its share goes to cash (not redistributed to others).
+
     For each bar:
-    1. Count symbols with non-NaN close -> N
+    1. N = total symbols in universe (fixed)
     2. Each valid symbol gets weight = min(1/N, max_weight)
-    3. Invalid symbols (NaN close) get weight 0
-    4. Excess weight (from cap) goes to cash, not redistributed
+    3. Missing / NaN-close symbols get weight 0
+    4. Excess weight goes to cash, not redistributed
     """
 
     name = "EqualWeight"
@@ -49,7 +53,7 @@ class EqualWeight:
             if not valid:
                 continue
 
-            w = min(1.0 / len(valid), max_weight)
+            w = min(1.0 / len(symbols), max_weight)
             for s in valid:
                 result[s].at[date] = w
 
