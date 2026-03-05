@@ -52,22 +52,24 @@ def test_risk_parity_max_weight_cap() -> None:
 def test_risk_parity_nan_skipped() -> None:
     mktdata = _make_mktdata({"A": [0.10], "B": [float("nan")]})
     result = RiskParity().compute(mktdata, vol="vol")
-    # Only A valid, weight = min(1.0, 0.9) = 0.9 (default max_weight)
-    assert result["A"].iloc[0] == pytest.approx(0.9)
+    # N=2, 1 valid: scale=1/2, A=0.5*1.0=0.5
+    assert result["A"].iloc[0] == pytest.approx(0.5)
     assert result["B"].iloc[0] == 0.0
 
 
 def test_risk_parity_zero_vol_skipped() -> None:
     mktdata = _make_mktdata({"A": [0.10], "B": [0.0]})
     result = RiskParity().compute(mktdata, vol="vol")
-    assert result["A"].iloc[0] == pytest.approx(0.9)
+    # N=2, 1 valid: scale=1/2, A=0.5
+    assert result["A"].iloc[0] == pytest.approx(0.5)
     assert result["B"].iloc[0] == 0.0
 
 
 def test_risk_parity_negative_vol_skipped() -> None:
     mktdata = _make_mktdata({"A": [0.10], "B": [-0.05]})
     result = RiskParity().compute(mktdata, vol="vol")
-    assert result["A"].iloc[0] == pytest.approx(0.9)
+    # N=2, 1 valid: scale=1/2, A=0.5
+    assert result["A"].iloc[0] == pytest.approx(0.5)
     assert result["B"].iloc[0] == 0.0
 
 
@@ -95,12 +97,53 @@ def test_risk_parity_multi_day() -> None:
 def test_risk_parity_single_valid() -> None:
     mktdata = _make_mktdata({"A": [0.10], "B": [float("nan")]})
     result = RiskParity().compute(mktdata, vol="vol", max_weight=0.9)
-    assert result["A"].iloc[0] == pytest.approx(0.9)
+    # N=2, 1 valid: scale=1/2, A=0.5 (< max_weight 0.9)
+    assert result["A"].iloc[0] == pytest.approx(0.5)
 
 
 def test_risk_parity_empty_mktdata() -> None:
     result = RiskParity().compute({}, vol="vol")
     assert result == {}
+
+
+def test_risk_parity_cross_market_missing_dates() -> None:
+    """When symbols have different trading calendars, N is still total symbols.
+
+    Setup: A, B, C with N=3. C is missing on day 2.
+    A: vol=0.10 -> inv=10, B: vol=0.20 -> inv=5, C: vol=0.25 -> inv=4
+
+    Day 1 (all present, scale=3/3=1):
+      total_inv = 10+5+4 = 19
+      A = 10/19, B = 5/19, C = 4/19  (sum = 1.0)
+
+    Day 2 (C missing, scale=2/3):
+      total_inv = 10+5 = 15
+      A = (2/3)*10/15 = 20/45, B = (2/3)*5/15 = 10/45  (sum = 2/3)
+    """
+    dates = pd.bdate_range("2024-01-01", periods=2)
+    mktdata = {
+        "A": pd.DataFrame(
+            {"close": [100.0, 100.0], "vol": [0.10, 0.10]}, index=dates,
+        ),
+        "B": pd.DataFrame(
+            {"close": [100.0, 100.0], "vol": [0.20, 0.20]}, index=dates,
+        ),
+        "C": pd.DataFrame(
+            {"close": [100.0], "vol": [0.25]}, index=dates[[0]],
+        ),
+    }
+    result = RiskParity().compute(mktdata, vol="vol", max_weight=0.9)
+
+    # Day 1: all present, weights sum to 1.0
+    assert result["A"].iloc[0] == pytest.approx(10.0 / 19)
+    assert result["B"].iloc[0] == pytest.approx(5.0 / 19)
+    assert result["C"].iloc[0] == pytest.approx(4.0 / 19)
+
+    # Day 2: C missing, scale=2/3, weights sum to 2/3
+    assert result["A"].iloc[1] == pytest.approx(2.0 / 3 * 10.0 / 15)
+    assert result["B"].iloc[1] == pytest.approx(2.0 / 3 * 5.0 / 15)
+    total_day2 = result["A"].iloc[1] + result["B"].iloc[1]
+    assert total_day2 == pytest.approx(2.0 / 3)
 
 
 def test_risk_parity_has_name() -> None:

@@ -8,10 +8,13 @@ import pandas as pd
 class RiskParity:
     """Assign weights inversely proportional to rolling volatility.
 
+    N is always the total number of symbols in the universe.  When a
+    symbol is missing or has invalid vol, its share goes to cash.
+
     For each bar:
-    1. Read vol column from each symbol (pre-computed by indicator)
-    2. Compute inv_vol = 1 / vol (skip NaN and vol <= 0)
-    3. Normalize: weight = inv_vol / sum(inv_vol)
+    1. N = total symbols in universe (fixed)
+    2. Compute inv_vol = 1 / vol for valid symbols (skip NaN and vol <= 0)
+    3. Normalize among valid symbols, then scale by valid/N
     4. Cap at max_weight (excess goes to cash, not redistributed)
     """
 
@@ -54,8 +57,9 @@ class RiskParity:
                 continue
 
             total = sum(inv_vols.values())
+            scale = len(inv_vols) / len(symbols)
             for s, iv in inv_vols.items():
-                w = min(iv / total, max_weight)
+                w = min(scale * iv / total, max_weight)
                 result[s].at[date] = w
 
         return result
