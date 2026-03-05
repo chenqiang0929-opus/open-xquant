@@ -122,6 +122,7 @@ class Engine:
 
         trades: list[Fill] = []
         equity_curve: list[tuple[object, float]] = []
+        last_known_price: dict[str, float] = {}
 
         for date in dates:
             # Rebalance rules (priority 3)
@@ -167,9 +168,11 @@ class Engine:
             prices = {}
             for s in universe.symbols:
                 if date in mktdata[s].index:
-                    prices[s] = float(mktdata[s].loc[date, "close"])
-                elif s in portfolio.positions:
-                    prices[s] = portfolio.positions[s].avg_cost
+                    close = float(mktdata[s].loc[date, "close"])
+                    last_known_price[s] = close
+                    prices[s] = close
+                elif s in last_known_price:
+                    prices[s] = last_known_price[s]
             equity_curve.append((date, portfolio.total_value(prices)))
 
         return RunResult(

@@ -255,6 +255,83 @@ def test_engine_rebalance_rules() -> None:
     assert "tw" in result.mktdata["A"].columns
 
 
+def test_engine_missing_dates_uses_last_known_price() -> None:
+    """When a symbol has no bar on a given date, engine should use the last
+    known close price (not avg_cost) for equity curve valuation.
+
+    Regression test: previously the engine fell back to avg_cost, which
+    caused artificial volatility in cross-market portfolios where trading
+    calendars differ.
+
+    Setup:
+      - Symbol A: 5 dates, close = [100, 102, 104, 106, 108]
+      - Symbol B: 3 dates (d1, d2, d5), close = [200, 204, 216]
+        (B is missing on d3 and d4, simulating a different trading calendar)
+      - EntryRule buys 100 shares of each on d1 (via buy_signal column)
+      - initial_cash = 100,000
+
+    Hand-calculated equity curve:
+      d1: buy A@100×100, B@200×100 → cash=70000
+          equity = 70000 + 100×100 + 100×200 = 100,000
+      d2: equity = 70000 + 100×102 + 100×204 = 100,600
+      d3: B missing → use last_known=204
+          equity = 70000 + 100×104 + 100×204 = 100,800
+      d4: B missing → use last_known=204
+          equity = 70000 + 100×106 + 100×204 = 101,000
+      d5: equity = 70000 + 100×108 + 100×216 = 102,400
+    """
+    dates = pd.bdate_range("2024-01-01", periods=5)
+    b_dates = dates[[0, 1, 4]]  # d1, d2, d5 — missing d3, d4
+
+    def _make_df(idx: pd.DatetimeIndex, closes: list[float]) -> pd.DataFrame:
+        n = len(idx)
+        df = pd.DataFrame(
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": [1_000_000] * n,
+            },
+            index=idx,
+        )
+        # buy_signal is True only on day 1
+        df["buy_signal"] = False
+        df.iloc[0, df.columns.get_loc("buy_signal")] = True
+        return df
+
+    data = {
+        "A": _make_df(dates, [100.0, 102.0, 104.0, 106.0, 108.0]),
+        "B": _make_df(b_dates, [200.0, 204.0, 216.0]),
+    }
+
+    strategy = Strategy(
+        name="missing_dates_test",
+        hypothesis="Test last known price fallback",
+        universe=StaticUniverse(("A", "B")),
+        indicators={},
+        signals={},
+        entry_rules=[EntryRule(signal="buy_signal", shares=100)],
+        exit_rules=[],
+    )
+
+    broker = SimBroker()
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        router=broker,
+        receiver=broker,
+        start="2024-01-01",
+        end="2024-12-31",
+        initial_cash=100_000.0,
+    )
+
+    assert len(result.equity_curve) == 5
+    expected = [100_000.0, 100_600.0, 100_800.0, 101_000.0, 102_400.0]
+    actual = [v for _, v in result.equity_curve]
+    assert actual == expected, f"expected {expected}, got {actual}"
+
+
 def test_apply_fill_sell() -> None:
     portfolio = Portfolio(
         cash=50_000.0,
