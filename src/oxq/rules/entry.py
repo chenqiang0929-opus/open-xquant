@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pandas as pd
 
 from oxq.core.types import Order, Portfolio
@@ -63,7 +65,7 @@ class FullPositionEntryRule:
         if not row.get(self.signal):
             return None
         price = float(row["close"])
-        shares = int(portfolio.cash / price)
+        shares = int(float(portfolio.cash) / price)
         if shares <= 0:
             return None
         return Order(symbol=symbol, side="BUY", shares=shares)

@@ -1,5 +1,7 @@
 """Tests for SimBroker."""
 
+from decimal import Decimal
+
 import pandas as pd
 
 from oxq.core.types import FillReceiver, Order, OrderRouter
@@ -34,7 +36,7 @@ def test_fill_pending_orders() -> None:
 
     fills = broker.get_fills()
     assert len(fills) == 1
-    assert fills[0].filled_price == 150.0
+    assert fills[0].filled_price == Decimal("150")
     assert fills[0].order.symbol == "AAPL"
 
 
@@ -65,5 +67,5 @@ def test_multi_symbol_fill() -> None:
     fills = broker.get_fills()
     assert len(fills) == 2
     prices = {f.order.symbol: f.filled_price for f in fills}
-    assert prices["AAPL"] == 150.0
-    assert prices["MSFT"] == 300.0
+    assert prices["AAPL"] == Decimal("150")
+    assert prices["MSFT"] == Decimal("300")

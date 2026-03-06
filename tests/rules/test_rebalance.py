@@ -1,5 +1,7 @@
 """Tests for RebalanceRule."""
 
+from decimal import Decimal
+
 import pandas as pd
 
 from oxq.core.types import Portfolio, Position, Rule
@@ -18,7 +20,7 @@ def test_rebalance_rule_satisfies_rule_protocol() -> None:
 
 def test_rebalance_rule_buys_to_target() -> None:
     rule = RebalanceRule(weight_col="target_weight", frequency=1)
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
     row = _make_row(pd.Timestamp("2024-01-01"), 0.5, 100.0)
     order = rule.evaluate("AAPL", row, portfolio)
     assert order is not None
@@ -29,8 +31,8 @@ def test_rebalance_rule_buys_to_target() -> None:
 def test_rebalance_rule_sells_overweight() -> None:
     rule = RebalanceRule(weight_col="target_weight", frequency=1)
     portfolio = Portfolio(
-        cash=50_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=800, avg_cost=100.0)},
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=800, avg_cost=Decimal("100"))},
     )
     row = _make_row(pd.Timestamp("2024-01-01"), 0.3, 100.0)
     # total_value = 50000 + 800*100 = 130000
@@ -44,8 +46,8 @@ def test_rebalance_rule_sells_overweight() -> None:
 def test_rebalance_rule_zero_weight_sells_all() -> None:
     rule = RebalanceRule(weight_col="target_weight", frequency=1)
     portfolio = Portfolio(
-        cash=50_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=200, avg_cost=100.0)},
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=200, avg_cost=Decimal("100"))},
     )
     row = _make_row(pd.Timestamp("2024-01-01"), 0.0, 100.0)
     order = rule.evaluate("AAPL", row, portfolio)
@@ -57,8 +59,8 @@ def test_rebalance_rule_zero_weight_sells_all() -> None:
 def test_rebalance_rule_no_change_needed() -> None:
     rule = RebalanceRule(weight_col="target_weight", frequency=1)
     portfolio = Portfolio(
-        cash=10_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=500, avg_cost=100.0)},
+        cash=Decimal("10000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=500, avg_cost=Decimal("100"))},
     )
     # total=60000, weight=500*100/60000=0.8333, target_shares=int(60000*0.8333/100)=500
     row = _make_row(pd.Timestamp("2024-01-01"), 500 * 100 / 60_000, 100.0)
@@ -67,7 +69,7 @@ def test_rebalance_rule_no_change_needed() -> None:
 
 def test_rebalance_rule_frequency_gating() -> None:
     rule = RebalanceRule(weight_col="target_weight", frequency=3)
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
     dates = pd.bdate_range("2024-01-01", periods=6)
     orders = []
     for date in dates:
@@ -84,7 +86,7 @@ def test_rebalance_rule_frequency_gating() -> None:
 
 def test_rebalance_rule_multi_symbol_same_date() -> None:
     rule = RebalanceRule(weight_col="target_weight", frequency=2)
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
     d1, d2 = pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")
     # Date 1 (bar 1): not rebalance bar
     assert rule.evaluate("A", _make_row(d1, 0.5, 100.0), portfolio) is None
@@ -97,8 +99,8 @@ def test_rebalance_rule_multi_symbol_same_date() -> None:
 def test_rebalance_rule_nan_weight_as_zero() -> None:
     rule = RebalanceRule(weight_col="target_weight", frequency=1)
     portfolio = Portfolio(
-        cash=50_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=100.0)},
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("100"))},
     )
     row = _make_row(pd.Timestamp("2024-01-01"), float("nan"), 100.0)
     order = rule.evaluate("AAPL", row, portfolio)
@@ -109,10 +111,10 @@ def test_rebalance_rule_nan_weight_as_zero() -> None:
 
 def test_estimate_portfolio_value() -> None:
     portfolio = Portfolio(
-        cash=10_000.0,
+        cash=Decimal("10000"),
         positions={
-            "AAPL": Position(symbol="AAPL", shares=100, avg_cost=90.0),
-            "MSFT": Position(symbol="MSFT", shares=50, avg_cost=200.0),
+            "AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("90")),
+            "MSFT": Position(symbol="MSFT", shares=50, avg_cost=Decimal("200")),
         },
     )
     # AAPL: 100*110 (market price), MSFT: 50*200 (avg_cost)

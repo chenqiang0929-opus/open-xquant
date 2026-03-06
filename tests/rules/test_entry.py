@@ -1,5 +1,7 @@
 """Tests for EntryRule and TargetValueEntryRule."""
 
+from decimal import Decimal
+
 import pandas as pd
 
 from oxq.core.types import Portfolio, Position, Rule
@@ -13,7 +15,7 @@ def test_entry_rule_satisfies_rule_protocol() -> None:
 def test_entry_rule_buys_on_signal() -> None:
     rule = EntryRule(signal="sma_10_x_sma_50", shares=100)
     row = pd.Series({"close": 150.0, "sma_10_x_sma_50": True})
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
 
     order = rule.evaluate("AAPL", row, portfolio)
     assert order is not None
@@ -25,7 +27,7 @@ def test_entry_rule_buys_on_signal() -> None:
 def test_entry_rule_no_signal_no_order() -> None:
     rule = EntryRule(signal="sma_10_x_sma_50", shares=100)
     row = pd.Series({"close": 150.0, "sma_10_x_sma_50": False})
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
 
     assert rule.evaluate("AAPL", row, portfolio) is None
 
@@ -34,8 +36,8 @@ def test_entry_rule_no_buy_if_already_holding() -> None:
     rule = EntryRule(signal="sma_10_x_sma_50", shares=100)
     row = pd.Series({"close": 150.0, "sma_10_x_sma_50": True})
     portfolio = Portfolio(
-        cash=50_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=140.0)},
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("140"))},
     )
 
     assert rule.evaluate("AAPL", row, portfolio) is None
@@ -46,8 +48,8 @@ def test_entry_rule_buys_different_symbol() -> None:
     row = pd.Series({"close": 300.0, "sma_10_x_sma_50": True})
     # Already holding AAPL, but evaluating MSFT
     portfolio = Portfolio(
-        cash=50_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=140.0)},
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("140"))},
     )
 
     order = rule.evaluate("MSFT", row, portfolio)
@@ -68,7 +70,7 @@ def test_target_value_entry_rule_satisfies_protocol() -> None:
 def test_target_value_entry_rule_no_position() -> None:
     rule = TargetValueEntryRule(signal="cross", target_value=50_000)
     row = pd.Series({"close": 200.0, "cross": True})
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
 
     order = rule.evaluate("AAPL", row, portfolio)
     assert order is not None
@@ -80,8 +82,8 @@ def test_target_value_entry_rule_partial_position() -> None:
     rule = TargetValueEntryRule(signal="cross", target_value=50_000)
     row = pd.Series({"close": 200.0, "cross": True})
     portfolio = Portfolio(
-        cash=50_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=180.0)},
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("180"))},
     )
 
     order = rule.evaluate("AAPL", row, portfolio)
@@ -93,8 +95,8 @@ def test_target_value_entry_rule_already_at_target() -> None:
     rule = TargetValueEntryRule(signal="cross", target_value=50_000)
     row = pd.Series({"close": 200.0, "cross": True})
     portfolio = Portfolio(
-        cash=50_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=250, avg_cost=180.0)},
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=250, avg_cost=Decimal("180"))},
     )
 
     assert rule.evaluate("AAPL", row, portfolio) is None
@@ -103,7 +105,7 @@ def test_target_value_entry_rule_already_at_target() -> None:
 def test_target_value_entry_rule_no_signal() -> None:
     rule = TargetValueEntryRule(signal="cross", target_value=50_000)
     row = pd.Series({"close": 200.0, "cross": False})
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
 
     assert rule.evaluate("AAPL", row, portfolio) is None
 
@@ -120,7 +122,7 @@ def test_full_position_entry_rule_satisfies_protocol() -> None:
 def test_full_position_entry_rule_buys_all_cash() -> None:
     rule = FullPositionEntryRule(signal="cross")
     row = pd.Series({"close": 200.0, "cross": True})
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
 
     order = rule.evaluate("AAPL", row, portfolio)
     assert order is not None
@@ -131,7 +133,7 @@ def test_full_position_entry_rule_buys_all_cash() -> None:
 def test_full_position_entry_rule_partial_cash() -> None:
     rule = FullPositionEntryRule(signal="cross")
     row = pd.Series({"close": 200.0, "cross": True})
-    portfolio = Portfolio(cash=30_000.0)
+    portfolio = Portfolio(cash=Decimal("30000"))
 
     order = rule.evaluate("AAPL", row, portfolio)
     assert order is not None
@@ -141,7 +143,7 @@ def test_full_position_entry_rule_partial_cash() -> None:
 def test_full_position_entry_rule_no_cash() -> None:
     rule = FullPositionEntryRule(signal="cross")
     row = pd.Series({"close": 200.0, "cross": True})
-    portfolio = Portfolio(cash=50.0)
+    portfolio = Portfolio(cash=Decimal("50"))
 
     assert rule.evaluate("AAPL", row, portfolio) is None  # 50/200 = 0
 
@@ -149,6 +151,6 @@ def test_full_position_entry_rule_no_cash() -> None:
 def test_full_position_entry_rule_no_signal() -> None:
     rule = FullPositionEntryRule(signal="cross")
     row = pd.Series({"close": 200.0, "cross": False})
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
 
     assert rule.evaluate("AAPL", row, portfolio) is None

@@ -72,10 +72,10 @@ def _estimate_portfolio_value(
 
     Uses market price for current symbol, avg_cost for others.
     """
-    total = portfolio.cash
+    total = float(portfolio.cash)
     for sym, pos in portfolio.positions.items():
         if sym == current_symbol:
             total += pos.shares * current_price
         else:
-            total += pos.shares * pos.avg_cost
+            total += pos.shares * float(pos.avg_cost)
     return total

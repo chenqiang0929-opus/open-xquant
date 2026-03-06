@@ -1,6 +1,6 @@
 """Universal strategy execution engine.
 
-Executes the 4-phase pipeline: Universe → Indicator → Signal → Rule.
+Executes the 4-phase pipeline: Universe -> Indicator -> Signal -> Rule.
 Provider-agnostic — the same engine serves backtest, paper trading,
 and live trading.  The difference is which providers you plug in.
 """
@@ -8,6 +8,7 @@ and live trading.  The difference is which providers you plug in.
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Literal
 
 import pandas as pd
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 class Engine:
     """Universal strategy execution engine.
 
-    Executes the 4-phase pipeline: Universe → Indicator → Signal → Rule.
+    Executes the 4-phase pipeline: Universe -> Indicator -> Signal -> Rule.
     Provider-agnostic: the same engine serves backtest, paper trading,
     and live trading — the difference is which providers you plug in.
 
@@ -71,16 +72,16 @@ class Engine:
             Stop after this phase: ``"indicator"`` or ``"signal"``.
             ``None`` runs the full pipeline including rules.
         """
-        portfolio = Portfolio(cash=initial_cash)
+        portfolio = Portfolio(cash=Decimal(str(initial_cash)))
 
-        # ── Phase 0: Universe ──────────────────────────────────────────
+        # -- Phase 0: Universe ------------------------------------------------
         universe = strategy.universe.get_universe(as_of_date=end)
 
         mktdata: dict[str, pd.DataFrame] = {}
         for symbol in universe.symbols:
             mktdata[symbol] = market.get_bars(symbol, start, end).copy()
 
-        # ── Phase 1: Indicator (vectorized, per symbol) ────────────────
+        # -- Phase 1: Indicator (vectorized, per symbol) ----------------------
         for symbol in universe.symbols:
             for ind_name, (indicator, params) in strategy.indicators.items():
                 for dep_col in getattr(indicator, "depends_on", ()):
@@ -102,7 +103,7 @@ class Engine:
                 mktdata=mktdata,
             )
 
-        # ── Phase 2: Signal (vectorized, cross-sectional) ──────────────
+        # -- Phase 2: Signal (vectorized, cross-sectional) --------------------
         for sig_name, (signal, params) in strategy.signals.items():
             results = signal.compute(mktdata, **params)
             for symbol, series in results.items():
@@ -114,7 +115,7 @@ class Engine:
                 mktdata=mktdata,
             )
 
-        # ── Phase 3: Rule (bar-by-bar state machine) ───────────────────
+        # -- Phase 3: Rule (bar-by-bar state machine) -------------------------
         # Use union of all dates so no symbol's bars are skipped
         dates = mktdata[universe.symbols[0]].index
         for sym in universe.symbols[1:]:
@@ -155,8 +156,7 @@ class Engine:
                     if order:
                         router.submit_order(order)
 
-            # Process fills — SimBroker needs an explicit step call to
-            # simulate fills at bar close; live brokers fill asynchronously.
+            # Process fills
             if hasattr(router, "fill_pending_orders"):
                 router.fill_pending_orders(mktdata, date)
 
@@ -164,16 +164,16 @@ class Engine:
                 _apply_fill(portfolio, fill)
                 trades.append(fill)
 
-            # Record equity curve — use last known close for missing dates
-            prices = {}
+            # Record equity curve (float for numpy analytics)
+            prices: dict[str, Decimal] = {}
             for s in universe.symbols:
                 if date in mktdata[s].index:
-                    close = float(mktdata[s].loc[date, "close"])
-                    last_known_price[s] = close
+                    close = Decimal(str(float(mktdata[s].loc[date, "close"])))
+                    last_known_price[s] = float(close)
                     prices[s] = close
                 elif s in last_known_price:
-                    prices[s] = last_known_price[s]
-            equity_curve.append((date, portfolio.total_value(prices)))
+                    prices[s] = Decimal(str(last_known_price[s]))
+            equity_curve.append((date, float(portfolio.total_value(prices))))
 
         return RunResult(
             portfolio=portfolio,
@@ -190,7 +190,7 @@ def _apply_fill(portfolio: Portfolio, fill: Fill) -> None:
     cost = fill.filled_price * order.shares
 
     if order.side == "BUY":
-        portfolio.cash -= cost
+        portfolio.cash -= cost + fill.fee
         if symbol in portfolio.positions:
             old = portfolio.positions[symbol]
             total_shares = old.shares + order.shares
@@ -207,7 +207,7 @@ def _apply_fill(portfolio: Portfolio, fill: Fill) -> None:
                 avg_cost=fill.filled_price,
             )
     elif order.side == "SELL":
-        portfolio.cash += cost
+        portfolio.cash += cost - fill.fee
         if symbol in portfolio.positions:
             old = portfolio.positions[symbol]
             remaining = old.shares - order.shares

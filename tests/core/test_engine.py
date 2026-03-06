@@ -1,5 +1,7 @@
 """Tests for Engine — full pipeline integration."""
 
+from decimal import Decimal
+
 import pandas as pd
 
 from oxq.core.engine import Engine, _apply_fill
@@ -186,18 +188,18 @@ def test_engine_metrics() -> None:
 
 
 def test_apply_fill_buy() -> None:
-    portfolio = Portfolio(cash=100_000.0)
+    portfolio = Portfolio(cash=Decimal("100000"))
     fill = Fill(
         order=Order(symbol="AAPL", side="BUY", shares=100),
-        filled_price=150.0,
+        filled_price=Decimal("150"),
         filled_at="2024-01-02",
     )
     _apply_fill(portfolio, fill)
 
-    assert portfolio.cash == 85_000.0  # 100000 - 100*150
+    assert portfolio.cash == Decimal("85000")  # 100000 - 100*150
     assert "AAPL" in portfolio.positions
     assert portfolio.positions["AAPL"].shares == 100
-    assert portfolio.positions["AAPL"].avg_cost == 150.0
+    assert portfolio.positions["AAPL"].avg_cost == Decimal("150")
 
 
 def test_engine_rebalance_rules() -> None:
@@ -334,15 +336,15 @@ def test_engine_missing_dates_uses_last_known_price() -> None:
 
 def test_apply_fill_sell() -> None:
     portfolio = Portfolio(
-        cash=50_000.0,
-        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=150.0)},
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("150"))},
     )
     fill = Fill(
         order=Order(symbol="AAPL", side="SELL", shares=100),
-        filled_price=160.0,
+        filled_price=Decimal("160"),
         filled_at="2024-03-01",
     )
     _apply_fill(portfolio, fill)
 
-    assert portfolio.cash == 66_000.0  # 50000 + 100*160
+    assert portfolio.cash == Decimal("66000")  # 50000 + 100*160
     assert "AAPL" not in portfolio.positions

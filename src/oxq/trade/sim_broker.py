@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pandas as pd
 
 from oxq.core.types import Fill, Order
@@ -43,7 +45,7 @@ class SimBroker:
     ) -> None:
         """Fill all pending orders at each symbol's close price for *date*."""
         for order in self._pending:
-            price: float = mktdata[order.symbol].loc[date, "close"]  # type: ignore[assignment]
+            price = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))
             self._fills.append(
                 Fill(order=order, filled_price=price, filled_at=str(date)),
             )

@@ -1,5 +1,7 @@
 """Tests for RunResult performance metrics."""
 
+from decimal import Decimal
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,7 +15,7 @@ def _make_result(values: list[float]) -> RunResult:
     dates = pd.bdate_range("2024-01-01", periods=len(values))
     equity_curve = [(d, v) for d, v in zip(dates, values)]
     return RunResult(
-        portfolio=Portfolio(cash=values[-1] if values else 0.0),
+        portfolio=Portfolio(cash=Decimal(str(values[-1])) if values else Decimal("0")),
         trades=[],
         equity_curve=equity_curve,
         mktdata={},
