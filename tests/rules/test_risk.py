@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from oxq.core.types import Order, Portfolio, Position
+from oxq.core.types import Portfolio, Position
 from oxq.rules.risk import DailyLossLimitRisk, MaxDrawdownRisk
 
 

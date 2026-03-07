@@ -193,8 +193,6 @@ def test_trailing_stop_order() -> None:
 
 def test_stop_dedup_replaces_old() -> None:
     broker = SimBroker()
-    dates = pd.bdate_range("2024-01-01", periods=1)
-    mktdata = {"AAPL": pd.DataFrame({"close": [150.0]}, index=dates)}
 
     broker.submit_order(Order(
         symbol="AAPL", side="SELL", shares=100,
