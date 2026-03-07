@@ -409,3 +409,56 @@ def test_fill_pending_orders_legacy() -> None:
     assert fills_day2[0].order.side == "SELL"
     assert fills_day2[0].order.order_type == "stop"
     assert fills_day2[0].filled_price == Decimal("140")
+
+
+def test_cap_pending_sells() -> None:
+    """cap_pending_sells should reduce shares on SELL orders."""
+    broker = SimBroker()
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=500,
+        order_type="stop", stop_price=Decimal("140"),
+    ))
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=500,
+        order_type="limit", limit_price=Decimal("180"),
+    ))
+
+    broker.cap_pending_sells("AAPL", max_shares=300)
+
+    for m in broker.get_open_orders("AAPL"):
+        assert m.order.shares == 300
+
+
+def test_cap_pending_sells_cancel_on_zero() -> None:
+    """cap_pending_sells with max_shares=0 should cancel orders."""
+    broker = SimBroker()
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=500,
+        order_type="stop", stop_price=Decimal("140"),
+    ))
+    broker.cap_pending_sells("AAPL", max_shares=0)
+    assert len(broker.get_open_orders("AAPL")) == 0
+
+
+def test_cap_pending_sells_then_trigger() -> None:
+    """After capping, a triggered order should fill with the capped shares."""
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=2)
+    mktdata = {"AAPL": pd.DataFrame({"close": [150.0, 135.0]}, index=dates)}
+
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=500,
+        order_type="stop", stop_price=Decimal("140"),
+    ))
+    # Position was reduced to 300, cap the order
+    broker.cap_pending_sells("AAPL", max_shares=300)
+
+    # Day 1: no trigger
+    broker.process_pending_orders(mktdata, dates[0])
+    assert len(broker.get_fills()) == 0
+
+    # Day 2: triggers with capped shares
+    broker.process_pending_orders(mktdata, dates[1])
+    fills = broker.get_fills()
+    assert len(fills) == 1
+    assert fills[0].order.shares == 300

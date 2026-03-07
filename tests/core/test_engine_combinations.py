@@ -13,6 +13,7 @@ from decimal import Decimal
 import pandas as pd
 
 from oxq.core.engine import Engine
+from oxq.portfolio.analytics import RunResult
 from oxq.core.strategy import Strategy
 from oxq.core.types import Portfolio
 from oxq.rules.entry import EntryRule, FullPositionEntryRule
@@ -696,19 +697,7 @@ def test_multi_symbol_rebalance_with_all_order_rules() -> None:
     assert len(result.trades) > 0
 
     # Replay all fills to check no intermediate negative positions
-    positions: dict[str, int] = {}
-    for fill in result.trades:
-        sym = fill.order.symbol
-        current = positions.get(sym, 0)
-        if fill.order.side == "BUY":
-            positions[sym] = current + fill.order.shares
-        else:
-            positions[sym] = current - fill.order.shares
-        assert positions[sym] >= 0, (
-            f"Negative position for {sym} at {fill.filled_at}: "
-            f"{positions[sym]} ({fill.order.side} {fill.order.shares} "
-            f"{fill.order.order_type})"
-        )
+    _assert_no_negative_fill_replay(result)
 
 
 # ---------------------------------------------------------------------------
@@ -747,20 +736,7 @@ def test_partial_rebalance_caps_take_profit_shares() -> None:
 
     result = _run(strategy, data)
 
-    # Replay fills to verify no negative positions at any point
-    positions: dict[str, int] = {}
-    for fill in result.trades:
-        sym = fill.order.symbol
-        current = positions.get(sym, 0)
-        if fill.order.side == "BUY":
-            positions[sym] = current + fill.order.shares
-        else:
-            positions[sym] = current - fill.order.shares
-        assert positions[sym] >= 0, (
-            f"Negative position for {sym} at {fill.filled_at}: "
-            f"{positions[sym]} shares (order: {fill.order.side} "
-            f"{fill.order.shares} {fill.order.order_type})"
-        )
+    _assert_no_negative_fill_replay(result)
     _assert_no_negative_positions(result)
     _assert_reasonable_equity(result)
 
@@ -787,20 +763,7 @@ def test_partial_rebalance_caps_stop_shares() -> None:
 
     result = _run(strategy, data)
 
-    # Replay fills — no negative positions
-    positions: dict[str, int] = {}
-    for fill in result.trades:
-        sym = fill.order.symbol
-        current = positions.get(sym, 0)
-        if fill.order.side == "BUY":
-            positions[sym] = current + fill.order.shares
-        else:
-            positions[sym] = current - fill.order.shares
-        assert positions[sym] >= 0, (
-            f"Negative position for {sym} at {fill.filled_at}: "
-            f"{positions[sym]} shares (order: {fill.order.side} "
-            f"{fill.order.shares} {fill.order.order_type})"
-        )
+    _assert_no_negative_fill_replay(result)
     _assert_no_negative_positions(result)
     _assert_reasonable_equity(result)
 
@@ -836,6 +799,15 @@ def test_partial_exit_caps_trailing_stop_shares() -> None:
     result = _run(strategy, data)
 
     # Replay fills — no negative positions
+    _assert_no_negative_fill_replay(result)
+
+
+# ---------------------------------------------------------------------------
+# Helper: replay fills and assert no negative intermediate positions
+# ---------------------------------------------------------------------------
+
+def _assert_no_negative_fill_replay(result: RunResult) -> None:
+    """Replay all fills in order and assert positions never go negative."""
     positions: dict[str, int] = {}
     for fill in result.trades:
         sym = fill.order.symbol
@@ -849,3 +821,119 @@ def test_partial_exit_caps_trailing_stop_shares() -> None:
             f"{positions[sym]} shares (order: {fill.order.side} "
             f"{fill.order.shares} {fill.order.order_type})"
         )
+
+
+# ---------------------------------------------------------------------------
+# 19. Exact Bug 3 reproduction: partial rebalance → stale limit oversells
+# ---------------------------------------------------------------------------
+
+def test_rebalance_partial_sell_stale_limit_oversells() -> None:
+    """Exact reproduction of the reported Bug 3 scenario.
+
+    Timeline:
+    - Bar 10: rebalance buys 500 shares at 100
+    - Bar 10+: TP rule submits limit SELL 500 @ 115
+    - Bar 20: rebalance reduces weight → sells ~200 shares, position ≈ 300
+    - Bar 25+: price crosses 115 → limit SELL must be capped to 300 (not 500)
+    """
+    n = 40
+    weights = [0.5] * 10 + [0.5] * 10 + [0.3] * 20
+    closes = [100.0] * 10 + [101.0] * 15 + [120.0] * 15
+    data = {
+        "A": _make_bars(closes, weight=weights),
+    }
+
+    strategy = Strategy(
+        name="bug3_exact",
+        universe=StaticUniverse(("A",)),
+        indicators={}, signals={},
+        rebalance_rules=[RebalanceRule(weight_col="weight", frequency=10)],
+        order_rules=[TakeProfitRule(threshold=0.15)],
+        entry_rules=[], exit_rules=[],
+    )
+
+    result = _run(strategy, data)
+
+    _assert_no_negative_fill_replay(result)
+    _assert_no_negative_positions(result)
+    _assert_reasonable_equity(result)
+
+    # Any limit fill after the partial sell must have shares ≤ position at that time
+    limit_fills = [t for t in result.trades if t.order.order_type == "limit"]
+    for lf in limit_fills:
+        assert lf.order.shares <= 500, (
+            f"Limit fill shares {lf.order.shares} exceeds original position"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 20. Multiple partial reductions: cap updates each rebalance period
+# ---------------------------------------------------------------------------
+
+def test_multiple_partial_reductions_cap_correctly() -> None:
+    """Weight drops across multiple rebalance periods.
+
+    Bar 10: buy 500 (weight=0.5)
+    Bar 20: weight→0.3, position→~300, stop capped to 300
+    Bar 30: weight→0.15, position→~150, stop capped to 150
+    Bar 35+: price drops below stop → sells at most 150
+    """
+    n = 50
+    weights = ([0.5] * 10 + [0.5] * 10 + [0.3] * 10
+               + [0.15] * 10 + [0.15] * 10)
+    closes = [100.0] * 10 + [100.0] * 20 + [100.0] * 5 + [85.0] * 15
+    data = {
+        "A": _make_bars(closes, weight=weights),
+    }
+
+    strategy = Strategy(
+        name="multi_partial",
+        universe=StaticUniverse(("A",)),
+        indicators={}, signals={},
+        rebalance_rules=[RebalanceRule(weight_col="weight", frequency=10)],
+        order_rules=[StopLossRule(threshold=0.10)],
+        entry_rules=[], exit_rules=[],
+    )
+
+    result = _run(strategy, data)
+
+    _assert_no_negative_fill_replay(result)
+    _assert_no_negative_positions(result)
+    _assert_reasonable_equity(result)
+
+
+# ---------------------------------------------------------------------------
+# 21. Multi-symbol partial reduction: cap is per-symbol
+# ---------------------------------------------------------------------------
+
+def test_multi_symbol_partial_reduction_per_symbol_cap() -> None:
+    """Two symbols partially reduced at different rates.
+
+    A: weight 0.5 → 0.3 (reduced)
+    B: weight 0.5 → 0.5 (unchanged)
+
+    Stop orders for A must be capped; B's stop must remain at full size.
+    """
+    n = 40
+    weights_a = [0.5] * 10 + [0.5] * 10 + [0.3] * 20
+    weights_b = [0.5] * 10 + [0.5] * 10 + [0.5] * 20
+    closes_drop = [100.0] * 10 + [100.0] * 15 + [85.0] * 15
+    data = {
+        "A": _make_bars(closes_drop, weight=weights_a),
+        "B": _make_bars(closes_drop, weight=weights_b),
+    }
+
+    strategy = Strategy(
+        name="multi_sym_partial",
+        universe=StaticUniverse(("A", "B")),
+        indicators={}, signals={},
+        rebalance_rules=[RebalanceRule(weight_col="weight", frequency=10)],
+        order_rules=[StopLossRule(threshold=0.10)],
+        entry_rules=[], exit_rules=[],
+    )
+
+    result = _run(strategy, data)
+
+    _assert_no_negative_fill_replay(result)
+    _assert_no_negative_positions(result)
+    _assert_reasonable_equity(result)
