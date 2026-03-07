@@ -35,9 +35,11 @@ from oxq.indicators.ratio import Ratio
 from oxq.indicators.rolling_mdd import RollingMDD
 from oxq.indicators.rolling_volatility import RollingVolatility
 from oxq.indicators.sma import SMA
-from oxq.rules.entry import EntryRule, FullPositionEntryRule, TargetValueEntryRule
+from oxq.rules.entry import EntryRule, FullPositionEntryRule, SizedEntryRule, TargetValueEntryRule
 from oxq.rules.exit import ExitRule
+from oxq.rules.order import StopLossRule, TakeProfitRule, TrailingStopRule
 from oxq.rules.rebalance import RebalanceRule
+from oxq.rules.risk import DailyLossLimitRisk, MaxDrawdownRisk
 from oxq.signals.crossover import Crossover
 from oxq.signals.equal_weight import EqualWeight
 from oxq.signals.risk_parity import RiskParity
@@ -89,8 +91,14 @@ RULE_TYPES: dict[str, type] = {
     "EntryRule": EntryRule,
     "TargetValueEntryRule": TargetValueEntryRule,
     "FullPositionEntryRule": FullPositionEntryRule,
+    "SizedEntryRule": SizedEntryRule,
     "ExitRule": ExitRule,
+    "StopLossRule": StopLossRule,
+    "TakeProfitRule": TakeProfitRule,
+    "TrailingStopRule": TrailingStopRule,
     "RebalanceRule": RebalanceRule,
+    "MaxDrawdownRisk": MaxDrawdownRisk,
+    "DailyLossLimitRisk": DailyLossLimitRisk,
 }
 
 
@@ -198,7 +206,7 @@ def strategy_add_signal(
 
 @registry.tool(
     name="strategy_add_rule",
-    description="Add an entry or exit rule to a strategy",
+    description="Add a rule (entry, exit, order, rebalance, or risk) to a strategy",
 )
 def strategy_add_rule(
     strategy: str,
@@ -221,12 +229,16 @@ def strategy_add_rule(
     except TypeError as e:
         return {"error": f"Invalid params for {type}: {e}"}
 
-    if type in ("EntryRule", "TargetValueEntryRule", "FullPositionEntryRule"):
+    if type in ("EntryRule", "TargetValueEntryRule", "FullPositionEntryRule", "SizedEntryRule"):
         strat.entry_rules.append(rule)
     elif type == "ExitRule":
         strat.exit_rules.append(rule)
+    elif type in ("StopLossRule", "TakeProfitRule", "TrailingStopRule"):
+        strat.order_rules.append(rule)
     elif type == "RebalanceRule":
         strat.rebalance_rules.append(rule)
+    elif type in ("MaxDrawdownRisk", "DailyLossLimitRisk"):
+        strat.risk_rules.append(rule)
 
     session._save()
     return {
@@ -269,9 +281,17 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
             {"type": r.__class__.__name__, "name": r.name}
             for r in strat.exit_rules
         ],
+        "order_rules": [
+            {"type": r.__class__.__name__, "name": r.name}
+            for r in strat.order_rules
+        ],
         "rebalance_rules": [
             {"type": r.__class__.__name__, "name": r.name}
             for r in strat.rebalance_rules
+        ],
+        "risk_rules": [
+            {"type": r.__class__.__name__, "name": r.name}
+            for r in strat.risk_rules
         ],
     }
 

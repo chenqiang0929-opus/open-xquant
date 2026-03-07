@@ -44,3 +44,29 @@ def test_clip_pct_equity_partial_holding() -> None:
     # total = 50000 + 100*100 = 60000, max 20% = 12000, current = 10000, room = 2000/100 = 20
     result = clip_to_pct_equity(100, "AAPL", Decimal("100"), portfolio, prices, max_pct=0.2)
     assert result == 20
+
+
+def test_clip_max_position_over_limit() -> None:
+    portfolio = Portfolio(
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=600, avg_cost=Decimal("150"))},
+    )
+    assert clip_to_max_position(100, "AAPL", portfolio, max_shares=500) == 0
+
+
+def test_clip_pct_equity_at_limit() -> None:
+    portfolio = Portfolio(
+        cash=Decimal("80000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=200, avg_cost=Decimal("100"))},
+    )
+    prices = {"AAPL": Decimal("100")}
+    # total = 80000 + 200*100 = 100000, max 20% = 20000, current = 200*100 = 20000, room = 0
+    result = clip_to_pct_equity(100, "AAPL", Decimal("100"), portfolio, prices, max_pct=0.2)
+    assert result == 0
+
+
+def test_clip_pct_equity_zero_price() -> None:
+    portfolio = Portfolio(cash=Decimal("100000"))
+    prices = {"AAPL": Decimal("0")}
+    result = clip_to_pct_equity(100, "AAPL", Decimal("0"), portfolio, prices, max_pct=0.2)
+    assert result == 0

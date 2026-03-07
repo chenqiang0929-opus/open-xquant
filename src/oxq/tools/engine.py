@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
@@ -11,13 +12,15 @@ from oxq.data.loaders import resolve_data_dir
 from oxq.data.market import LocalMarketDataProvider
 from oxq.tools import session
 from oxq.tools.registry import registry
+from oxq.trade.fees import PercentageFee
 from oxq.trade.sim_broker import SimBroker
+from oxq.trade.slippage import PercentageSlippage
 from oxq.universe.static import StaticUniverse
 
 
 @registry.tool(
     name="engine_run",
-    description="Run a strategy backtest and return summary results",
+    description="Run a strategy backtest and return summary results. Supports fee and slippage models.",
 )
 def engine_run(
     strategy: str,
@@ -27,6 +30,9 @@ def engine_run(
     initial_cash: float = 100_000.0,
     run_through: Literal["indicator", "signal"] | None = None,
     data_dir: str | None = None,
+    fee_rate: float | None = None,
+    fee_min: float | None = None,
+    slippage_rate: float | None = None,
 ) -> dict[str, Any]:
     """Run a strategy through the engine and store the result."""
     strat = session._strategies.get(strategy)
@@ -38,7 +44,20 @@ def engine_run(
 
     path = resolve_data_dir(Path(data_dir) if data_dir else None)
     market = LocalMarketDataProvider(path)
-    broker = SimBroker()
+
+    # Build fee and slippage models from params
+    fee_model = None
+    if fee_rate is not None:
+        fee_model = PercentageFee(
+            rate=Decimal(str(fee_rate)),
+            min_fee=Decimal(str(fee_min)) if fee_min is not None else Decimal("0"),
+        )
+
+    slippage_model = None
+    if slippage_rate is not None:
+        slippage_model = PercentageSlippage(rate=Decimal(str(slippage_rate)))
+
+    broker = SimBroker(fee_model=fee_model, slippage_model=slippage_model)
 
     try:
         result = Engine().run(
@@ -116,6 +135,9 @@ def engine_results(run_id: str) -> dict[str, Any]:
     strategy_name = run_id.rsplit("_", 1)[0]
     strat = session._strategies.get(strategy_name)
 
+    # Metrics where the value is negative and "max" means abs(actual) <= abs(max)
+    _abs_compare_metrics = {"max_drawdown"}
+
     if strat and strat.objectives:
         for metric_name, bounds in strat.objectives.items():
             actual = metrics.get(metric_name)
@@ -128,7 +150,12 @@ def engine_results(run_id: str) -> dict[str, Any]:
                 passed = passed and actual >= bounds["min"]
             if "max" in bounds:
                 check["max"] = bounds["max"]
-                passed = passed and actual <= bounds["max"]
+                if metric_name in _abs_compare_metrics:
+                    # For drawdown: -0.08 is better than -0.15,
+                    # so abs(actual) <= abs(max) means pass
+                    passed = passed and abs(actual) <= abs(bounds["max"])
+                else:
+                    passed = passed and actual <= bounds["max"]
             if "target" in bounds:
                 check["target"] = bounds["target"]
             check["pass"] = passed
@@ -156,7 +183,9 @@ def engine_trade_list(run_id: str) -> dict[str, Any]:
             "symbol": fill.order.symbol,
             "side": fill.order.side,
             "shares": int(fill.order.shares),
+            "order_type": fill.order.order_type,
             "price": float(fill.filled_price),
+            "fee": float(fill.fee),
             "date": fill.filled_at,
         }
         for fill in result.trades

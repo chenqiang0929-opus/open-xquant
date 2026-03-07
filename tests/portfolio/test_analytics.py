@@ -107,3 +107,88 @@ def test_sortino_ratio_no_downside() -> None:
 def test_sortino_ratio_empty() -> None:
     result = _make_result([])
     assert result.sortino_ratio() == 0.0
+
+
+# -- total_return --------------------------------------------------------------
+
+def test_total_return_positive() -> None:
+    result = _make_result([100, 110, 115])
+    assert result.total_return() == pytest.approx(0.15, rel=1e-4)
+
+
+def test_total_return_negative() -> None:
+    result = _make_result([100, 90, 85])
+    assert result.total_return() == pytest.approx(-0.15, rel=1e-4)
+
+
+def test_total_return_empty() -> None:
+    result = _make_result([])
+    assert result.total_return() == 0.0
+
+
+def test_total_return_single_point() -> None:
+    result = _make_result([100.0])
+    assert result.total_return() == 0.0
+
+
+def test_total_return_zero_start() -> None:
+    result = _make_result([0.0, 100.0])
+    assert result.total_return() == 0.0
+
+
+# -- sharpe_ratio --------------------------------------------------------------
+
+def test_sharpe_ratio_basic() -> None:
+    values = [100, 102, 99, 103, 101, 104]
+    result = _make_result(values)
+    arr = np.array(values, dtype=float)
+    returns = np.diff(arr) / arr[:-1]
+    expected = float(np.mean(returns) / np.std(returns) * np.sqrt(252))
+    assert result.sharpe_ratio() == pytest.approx(expected, rel=1e-4)
+
+
+def test_sharpe_ratio_empty() -> None:
+    result = _make_result([])
+    assert result.sharpe_ratio() == 0.0
+
+
+def test_sharpe_ratio_constant() -> None:
+    result = _make_result([100.0] * 10)
+    assert result.sharpe_ratio() == 0.0
+
+
+def test_sharpe_ratio_single_point() -> None:
+    result = _make_result([100.0])
+    assert result.sharpe_ratio() == 0.0
+
+
+# -- max_drawdown --------------------------------------------------------------
+
+def test_max_drawdown_basic() -> None:
+    values = [100, 110, 90, 95, 85]
+    result = _make_result(values)
+    arr = np.array(values, dtype=float)
+    peak = np.maximum.accumulate(arr)
+    expected = float(np.min((arr - peak) / peak))
+    assert result.max_drawdown() == pytest.approx(expected, rel=1e-4)
+
+
+def test_max_drawdown_no_drawdown() -> None:
+    result = _make_result([100, 110, 120, 130])
+    assert result.max_drawdown() == 0.0
+
+
+def test_max_drawdown_empty() -> None:
+    result = _make_result([])
+    assert result.max_drawdown() == 0.0
+
+
+def test_max_drawdown_single_point() -> None:
+    result = _make_result([100.0])
+    assert result.max_drawdown() == 0.0
+
+
+def test_max_drawdown_returns_negative() -> None:
+    values = [100, 110, 90, 95, 85]
+    result = _make_result(values)
+    assert result.max_drawdown() <= 0

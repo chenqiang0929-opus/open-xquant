@@ -81,14 +81,21 @@ class TestApiKeyValidation:
 # 3. Full agent conversation (requires network)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.e2e
 class TestAgentConversation:
     """Test a real conversation with the LLM via the agent demo."""
 
     def _fill_api_key(self, page: Page) -> None:
-        """Fill in the API key in the sidebar."""
+        """Switch to Manual mode (no skill) and fill API key in the sidebar."""
         sidebar = page.locator('[data-testid="stSidebar"]')
-        api_key_input = sidebar.get_by_label("API Key")
-        api_key_input.fill(API_KEY)
+
+        # Switch to Manual mode first (triggers Streamlit rerun)
+        sidebar.get_by_text("Manual").click()
+        # Wait for rerun to complete
+        page.wait_for_selector('[data-testid="stChatInput"]', timeout=10000)
+
+        # Fill API key after rerun so the value persists
+        sidebar.get_by_label("API Key").fill(API_KEY)
 
     def test_simple_chat_response(self, app_page: Page) -> None:
         """Send a simple greeting and verify the assistant responds."""
@@ -107,12 +114,12 @@ class TestAgentConversation:
         )
         expect(user_msgs.first).to_be_visible(timeout=10000)
 
-        # Wait for assistant response (any new chat message after the user's)
-        assistant_msgs = app_page.locator('[data-testid="stChatMessage"]')
-        # There should be at least 2 messages (user + assistant)
-        expect(assistant_msgs.nth(1)).to_be_visible(timeout=30000)
-        # The assistant should mention "2" somewhere
-        expect(assistant_msgs.nth(1)).to_contain_text("2", timeout=30000)
+        # Wait for assistant response containing "2" (may not be the 2nd
+        # message if auto-skill mode triggers tool calls first)
+        assistant_response = app_page.locator(
+            '[data-testid="stChatMessage"]:has-text("2")'
+        )
+        expect(assistant_response.first).to_be_visible(timeout=60000)
 
     def test_tool_call_get_date(self, app_page: Page) -> None:
         """Ask about today's date to trigger the get_current_date tool."""

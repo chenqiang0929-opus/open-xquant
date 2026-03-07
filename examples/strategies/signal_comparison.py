@@ -17,8 +17,8 @@ Pipeline:
     Rule 层     — RebalanceRule(weight_col=tw, frequency=10)
 
 Variants (三种信号方法对比):
-    - 等权 (EqualWeight)   — 所有资产等权分配，单只上限 60%
-    - 归一化 (TopNRanking) — 按风险调整动量排名，选 Top 2 归一化权重
+    - 等权 (EqualWeight)   — 所有资产等权分配
+    - 动量排名 (TopNRanking) — 按动量排名，Top 3 归一化权重，过滤负动量
     - 风险平价 (RiskParity) — 按波动率倒数分配权重，低波动资产获得更高权重
 
 Architecture note:
@@ -34,20 +34,12 @@ Architecture note:
       - 518880.SS  黄金ETF（贵金属）
 
 Usage:
-    # 1. Download data (akshare)
-    python -c "
-    from oxq.data import AkShareDownloader
-    dl = AkShareDownloader()
-    for s in ['513100.SS', '510300.SS', '518880.SS']:
-        dl.download(s, '2024-11-15', '2026-02-28')
-    "
-
-    # 2. Run strategy
+    # Data is downloaded automatically via YFinanceDownloader
     python examples/strategies/signal_comparison.py
 """
 
 from oxq.core import Engine, Strategy
-from oxq.data import LocalMarketDataProvider
+from oxq.data import LocalMarketDataProvider, YFinanceDownloader
 from oxq.indicators import Momentum, Ratio, RollingVolatility
 from oxq.rules import RebalanceRule
 from oxq.signals import EqualWeight, RiskParity, TopNRanking
@@ -63,8 +55,14 @@ SYMBOL_NAMES = {
     "518880.SS": "黄金ETF",
 }
 INITIAL_CASH = 100_000.0
-START = "2024-11-15"
-END = "2026-02-28"
+START = "2021-01-01"
+END = "2026-03-05"
+
+# ── 0.5. Download data ─────────────────────────────────────────────
+
+downloader = YFinanceDownloader()
+for sym in SYMBOLS:
+    downloader.download(sym, start=START, end=END)
 
 # ── 1. Common pipeline components (indicators only) ────────────────
 
@@ -98,21 +96,21 @@ STRATEGIES = {
     "等权": Strategy(
         name="equal_weight",
         signals={
-            "tw": (EqualWeight(), {"max_weight": 0.6}),
+            "tw": (EqualWeight(), {}),
         },
         **COMMON,
     ),
-    "归一化": Strategy(
-        name="top_n_ranking",
+    "动量排名": Strategy(
+        name="momentum_ranking",
         signals={
-            "tw": (TopNRanking(), {"score": "ram", "n": 2, "max_weight": 0.6}),
+            "tw": (TopNRanking(), {"score": "ram", "n": 3, "filter_negative": True}),
         },
         **COMMON,
     ),
     "风险平价": Strategy(
         name="risk_parity",
         signals={
-            "tw": (RiskParity(), {"vol": "vol", "max_weight": 0.6}),
+            "tw": (RiskParity(), {"vol": "vol"}),
         },
         **COMMON,
     ),

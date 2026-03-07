@@ -48,36 +48,45 @@ def sample_data_dir(tmp_path):
     return tmp_path
 
 
-def _build_full_strategy() -> None:
+def _build_strategy(
+    name: str = "sma_cross",
+    objectives: dict | None = None,
+) -> None:
     """Build a complete SMA crossover strategy via tools."""
-    strategy_create(
-        name="sma_cross",
-        hypothesis="SMA10 crossing above SMA50 predicts positive returns",
-        objectives={
+    if objectives is None:
+        objectives = {
             "total_return": {"min": -0.5},
             "max_drawdown": {"max": 0.0},
-        },
+        }
+    strategy_create(
+        name=name,
+        hypothesis="SMA10 crossing above SMA50 predicts positive returns",
+        objectives=objectives,
     )
     strategy_add_indicator(
-        strategy="sma_cross", name="sma_10", type="SMA",
+        strategy=name, name="sma_10", type="SMA",
         params={"column": "close", "period": 10},
     )
     strategy_add_indicator(
-        strategy="sma_cross", name="sma_50", type="SMA",
+        strategy=name, name="sma_50", type="SMA",
         params={"column": "close", "period": 50},
     )
     strategy_add_signal(
-        strategy="sma_cross", name="cross_up", type="Crossover",
+        strategy=name, name="cross_up", type="Crossover",
         inputs={"fast": "sma_10", "slow": "sma_50"},
     )
     strategy_add_rule(
-        strategy="sma_cross", name="buy", type="EntryRule",
+        strategy=name, name="buy", type="EntryRule",
         params={"signal": "cross_up", "shares": 100},
     )
     strategy_add_rule(
-        strategy="sma_cross", name="sell", type="ExitRule",
+        strategy=name, name="sell", type="ExitRule",
         params={"fast": "sma_10", "slow": "sma_50"},
     )
+
+
+def _build_full_strategy() -> None:
+    _build_strategy()
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +176,89 @@ def test_engine_results_not_found() -> None:
     assert "error" in result
 
 
+def test_engine_results_drawdown_pass_when_better(sample_data_dir) -> None:
+    """Drawdown -8% with max -99% should pass (abs(actual) < abs(max))."""
+    _build_strategy("dd_pass", objectives={"max_drawdown": {"max": -0.99}})
+    run = engine_run(
+        strategy="dd_pass", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+    )
+    result = engine_results(run["run_id"])
+    dd_check = next(c for c in result["objectives_check"] if c["metric"] == "max_drawdown")
+    assert dd_check["pass"] is True
+
+
+def test_engine_results_drawdown_fail_when_worse(sample_data_dir) -> None:
+    """Drawdown exceeding tight limit should fail."""
+    _build_strategy("dd_fail", objectives={"max_drawdown": {"max": -0.001}})
+    run = engine_run(
+        strategy="dd_fail", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+    )
+    result = engine_results(run["run_id"])
+    dd_check = next(c for c in result["objectives_check"] if c["metric"] == "max_drawdown")
+    assert dd_check["pass"] is False
+
+
+def test_engine_results_drawdown_exact_boundary(sample_data_dir) -> None:
+    """Drawdown exactly at boundary should pass (abs(actual) == abs(max))."""
+    _build_strategy("dd_exact", objectives={"max_drawdown": {"max": -0.99}})
+    run = engine_run(
+        strategy="dd_exact", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+    )
+    actual_dd = engine_results(run["run_id"])["metrics"]["max_drawdown"]
+
+    # Rebuild with exact drawdown as boundary
+    session.clear()
+    _build_strategy("dd_exact", objectives={"max_drawdown": {"max": actual_dd}})
+    run2 = engine_run(
+        strategy="dd_exact", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+    )
+    dd_check = next(
+        c for c in engine_results(run2["run_id"])["objectives_check"]
+        if c["metric"] == "max_drawdown"
+    )
+    assert dd_check["pass"] is True
+
+
+def test_engine_results_volatility_uses_normal_comparison(sample_data_dir) -> None:
+    """Non-drawdown metrics like volatility use normal <= comparison."""
+    _build_strategy("vol_check", objectives={"annualized_volatility": {"max": 0.001}})
+    run = engine_run(
+        strategy="vol_check", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+    )
+    result = engine_results(run["run_id"])
+    vol_check = next(c for c in result["objectives_check"] if c["metric"] == "annualized_volatility")
+    assert vol_check["pass"] is False
+
+
+def test_engine_results_mixed_objectives(sample_data_dir) -> None:
+    """Multiple objectives: drawdown uses abs comparison, others use normal."""
+    _build_strategy("mixed", objectives={
+        "total_return": {"min": -10.0},
+        "max_drawdown": {"max": -0.99},
+    })
+    run = engine_run(
+        strategy="mixed", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+    )
+    checks = {
+        c["metric"]: c["pass"]
+        for c in engine_results(run["run_id"])["objectives_check"]
+    }
+    assert checks["total_return"] is True
+    assert checks["max_drawdown"] is True
+
+
 # ---------------------------------------------------------------------------
 # engine_trade_list
 # ---------------------------------------------------------------------------
@@ -193,6 +285,70 @@ def test_engine_trade_list(sample_data_dir) -> None:
     assert trade["symbol"] == "AAPL"
 
 
+def test_engine_trade_list_includes_order_type_and_fee(sample_data_dir) -> None:
+    _build_full_strategy()
+    run = engine_run(
+        strategy="sma_cross", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+    )
+    result = engine_trade_list(run["run_id"])
+    trade = result["trades"][0]
+    assert "order_type" in trade
+    assert "fee" in trade
+    assert trade["order_type"] == "market"
+    assert trade["fee"] == 0.0
+
+
 def test_engine_trade_list_not_found() -> None:
     result = engine_trade_list("nonexistent_123")
     assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# engine_run with fee/slippage
+# ---------------------------------------------------------------------------
+
+
+def test_engine_run_with_fee(sample_data_dir) -> None:
+    _build_strategy("fee_test")
+    run = engine_run(
+        strategy="fee_test", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+        fee_rate=0.001,
+        fee_min=5.0,
+    )
+    assert "error" not in run
+    trades = engine_trade_list(run["run_id"])["trades"]
+    assert len(trades) > 0
+    # Every trade should have a non-zero fee
+    for t in trades:
+        assert t["fee"] >= 5.0
+
+
+def test_engine_run_with_slippage(sample_data_dir) -> None:
+    # Run without slippage
+    _build_strategy("no_slip")
+    run_no = engine_run(
+        strategy="no_slip", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+    )
+    trades_no = engine_trade_list(run_no["run_id"])["trades"]
+
+    # Run with slippage
+    session.clear()
+    _build_strategy("with_slip")
+    run_with = engine_run(
+        strategy="with_slip", symbols=["AAPL"],
+        start="2024-01-01", end="2024-12-31",
+        data_dir=str(sample_data_dir),
+        slippage_rate=0.01,
+    )
+    trades_with = engine_trade_list(run_with["run_id"])["trades"]
+
+    # BUY price with slippage should be higher
+    buy_no = next(t for t in trades_no if t["side"] == "BUY")
+    buy_with = next(t for t in trades_with if t["side"] == "BUY")
+    assert buy_with["price"] > buy_no["price"]

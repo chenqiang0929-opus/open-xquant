@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -15,7 +16,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 APP_PATH = PROJECT_ROOT / "examples" / "app" / "agent_demo.py"
 STREAMLIT_PORT = 8599  # Use a non-default port to avoid conflicts
 
-API_KEY = "sk-d820e7903402490a9a8a76d3371d1bf4"
+API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+
+
+def pytest_collection_modifyitems(config, items):  # noqa: ARG001
+    """Skip LLM-dependent tests when DEEPSEEK_API_KEY is not set."""
+    if API_KEY:
+        return
+    skip_no_key = pytest.mark.skip(reason="DEEPSEEK_API_KEY not set")
+    for item in items:
+        if "AgentConversation" in item.nodeid or "StrategyBuilderE2E" in item.nodeid:
+            item.add_marker(skip_no_key)
 
 
 @pytest.fixture(scope="session")

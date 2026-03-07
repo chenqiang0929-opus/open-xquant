@@ -21,9 +21,9 @@ tools_required: [strategy_create, strategy_add_indicator, strategy_add_signal, s
 - **初始资金**：回测起始资金（默认 100,000）
 - **品种范围**：交易哪些标的？（如 AAPL、SPY）
 - **交易频率**：日频 / 周频
-- **费用假设**：当前版本暂不收费（SimBroker 零费率）
+- **交易成本**：手续费率、最低手续费、滑点率（默认零成本）
 
-**提问示例：** "请告诉我你计划交易的品种、初始资金、以及回测时间范围。"
+**提问示例：** "请告诉我你计划交易的品种、初始资金、回测时间范围，以及是否需要模拟交易成本。"
 
 ## Phase 1：基准与目标
 
@@ -137,17 +137,73 @@ strategy_add_signal(strategy="sma_crossover", name="golden_cross", type="Crossov
 - `TopNRanking` — 截面排名选 Top N，归一化权重，支持权重上限（params: score, n, filter_negative, max_weight）
 
 ### 4.4 添加规则（Rule 层）
+
+规则分五大类，按 Engine 执行顺序排列：
+
+#### 4.4.1 风险规则（Risk Rules）— 熔断器
+
+在每根 bar 最先执行。触发后冻结后续所有规则（但已挂条件单仍可触发）。
+
 ```
-strategy_add_rule(strategy="sma_crossover", name="buy_on_cross", type="EntryRule", params={"signal": "golden_cross", "shares": 100})
-strategy_add_rule(strategy="sma_crossover", name="sell_on_cross", type="ExitRule", params={"fast": "sma_10", "slow": "sma_50"})
+strategy_add_rule(strategy="...", name="dd_breaker", type="MaxDrawdownRisk", params={"max_drawdown": 0.15})
+strategy_add_rule(strategy="...", name="daily_limit", type="DailyLossLimitRisk", params={"max_daily_loss": 0.03})
 ```
 
-可用规则类型：
-- `EntryRule` — 信号触发时固定股数买入（params: signal, shares）
-- `TargetValueEntryRule` — 信号触发时按目标市值买入（params: signal, target_value）
-- `FullPositionEntryRule` — 信号触发时全仓买入，用全部可用现金（params: signal）
-- `ExitRule` — 快线跌破慢线时卖出（params: fast, slow）
-- `RebalanceRule` — 按目标权重定期调仓（params: weight_col, frequency）
+| 类型 | 参数 | 说明 |
+|------|------|------|
+| `MaxDrawdownRisk` | `max_drawdown` (默认 0.15) | 组合回撤超阈值 → 清仓 + 冻结 |
+| `DailyLossLimitRisk` | `max_daily_loss` (默认 0.03) | 当日亏损超阈值 → 冻结（不清仓） |
+
+#### 4.4.2 委托规则（Order Rules）— 条件单
+
+挂 stop/limit/trailing_stop 条件单到 SimBroker 的 OrderBook。同标的同类型自动去重（新的覆盖旧的）。
+
+```
+strategy_add_rule(strategy="...", name="stop_loss", type="StopLossRule", params={"threshold": 0.05})
+strategy_add_rule(strategy="...", name="take_profit", type="TakeProfitRule", params={"threshold": 0.15})
+strategy_add_rule(strategy="...", name="trailing", type="TrailingStopRule", params={"trail_pct": 0.05})
+```
+
+| 类型 | 参数 | 说明 |
+|------|------|------|
+| `StopLossRule` | `threshold` (默认 0.05) | 止损：`stop_price = avg_cost × (1 - threshold)` |
+| `TakeProfitRule` | `threshold` (默认 0.15) | 止盈：`limit_price = avg_cost × (1 + threshold)` |
+| `TrailingStopRule` | `trail_pct` (默认 0.05) | 追踪止损：从高水位回撤 trail_pct 触发 |
+
+#### 4.4.3 调仓规则（Rebalance Rules）
+
+按目标权重定期调仓，配合 Signal 层的权重信号使用。
+
+```
+strategy_add_rule(strategy="...", name="rebal", type="RebalanceRule", params={"weight_col": "rp_weight", "frequency": 10})
+```
+
+| 类型 | 参数 | 说明 |
+|------|------|------|
+| `RebalanceRule` | `weight_col`, `frequency` (默认 10) | 每 N 根 bar 按目标权重调仓 |
+
+#### 4.4.4 退出规则（Exit Rules）
+
+```
+strategy_add_rule(strategy="...", name="sell_on_cross", type="ExitRule", params={"fast": "sma_10", "slow": "sma_50"})
+```
+
+| 类型 | 参数 | 说明 |
+|------|------|------|
+| `ExitRule` | `fast`, `slow` | 快线跌破慢线时全仓卖出 |
+
+#### 4.4.5 入场规则（Entry Rules）
+
+```
+strategy_add_rule(strategy="...", name="buy_on_cross", type="EntryRule", params={"signal": "golden_cross", "shares": 100})
+```
+
+| 类型 | 参数 | 说明 |
+|------|------|------|
+| `EntryRule` | `signal`, `shares` (默认 100) | 信号触发时固定股数买入 |
+| `TargetValueEntryRule` | `signal`, `target_value` | 信号触发时按目标市值买入 |
+| `FullPositionEntryRule` | `signal` | 信号触发时全仓买入 |
+| `SizedEntryRule` | `signal`, `shares`, `max_position`, `max_pct_equity` | 带仓位控制的买入（限制最大持股数或持仓占比） |
 
 ### 4.5 检查策略
 ```
@@ -162,9 +218,22 @@ strategy_inspect(strategy="sma_crossover")
 
 ### 5.1 执行回测
 ```
-engine_run(strategy="sma_crossover", symbols=["AAPL"], start="2023-01-01", end="2024-12-31")
+engine_run(
+    strategy="sma_crossover",
+    symbols=["AAPL"],
+    start="2023-01-01",
+    end="2024-12-31",
+    fee_rate=0.001,       # 可选：手续费率 0.1%
+    fee_min=5.0,          # 可选：最低手续费 5 元
+    slippage_rate=0.001,  # 可选：滑点率 0.1%
+)
 ```
 engine_run 返回 `run_id`、组合概况和交易数，但**不包含绩效指标**。
+
+**交易成本参数：**
+- `fee_rate`：手续费率（如 0.001 = 0.1%），不传则零费率
+- `fee_min`：最低手续费（如 5.0），需配合 fee_rate 使用
+- `slippage_rate`：滑点率（如 0.001 = 0.1%），BUY 价格偏高、SELL 价格偏低
 
 ### 5.2 查看绩效（必须调用）
 ```
@@ -181,7 +250,7 @@ engine_results(run_id="...")
 ```
 engine_trade_list(run_id="...")
 ```
-**必须用同一个 run_id 调用 engine_trade_list**，获取完整交易记录。
+**必须用同一个 run_id 调用 engine_trade_list**，获取完整交易记录（含订单类型和手续费）。
 
 ### 调用链示例
 ```
@@ -190,7 +259,7 @@ engine_trade_list(run_id="...")
 3. engine_trade_list(run_id=result["run_id"])
 ```
 
-向用户报告交易次数、买卖时间、价格。
+向用户报告交易次数、买卖时间、价格、手续费。
 
 ## 决策指南
 
@@ -201,6 +270,9 @@ engine_trade_list(run_id="...")
 | "查看策略定义" | 调用 strategy_inspect |
 | "查看回测结果" | 调用 engine_results |
 | "修改指标参数" | 重建策略（当前不支持原地修改） |
+| "加止损" | strategy_add_rule + StopLossRule |
+| "加风控" | strategy_add_rule + MaxDrawdownRisk / DailyLossLimitRisk |
+| "加交易成本" | engine_run 传入 fee_rate / slippage_rate |
 
 ## 红线
 

@@ -5,9 +5,12 @@ import json
 import sys
 from pathlib import Path
 
+import nest_asyncio
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+nest_asyncio.apply()
 
 PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 
@@ -54,6 +57,12 @@ def test_server_lists_factor_tools(server_params: StdioServerParameters) -> None
 def test_server_lists_mcp_only_tools(server_params: StdioServerParameters) -> None:
     tool_names = asyncio.run(_list_tools(server_params))
     assert "get_current_date" in tool_names
+
+
+def test_server_lists_skill_tools(server_params: StdioServerParameters) -> None:
+    tool_names = asyncio.run(_list_tools(server_params))
+    assert "skill_list" in tool_names
+    assert "skill_load" in tool_names
 
 
 async def _call_list_symbols(

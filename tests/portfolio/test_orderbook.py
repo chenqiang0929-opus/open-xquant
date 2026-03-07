@@ -80,3 +80,46 @@ def test_dedup_replaces_same_symbol_side_type() -> None:
     open_orders = book.get_open_orders(symbol="AAPL")
     assert len(open_orders) == 1
     assert open_orders[0].order.stop_price == Decimal("145")
+
+
+def test_cancel_orders_with_side_filter() -> None:
+    book = OrderBook()
+    book.add(Order(symbol="AAPL", side="BUY", shares=100), "2024-01-02")
+    book.add(
+        Order(
+            symbol="AAPL",
+            side="SELL",
+            shares=50,
+            order_type="stop",
+            stop_price=Decimal("140"),
+        ),
+        "2024-01-02",
+    )
+    canceled = book.cancel_orders("AAPL", side="SELL")
+    assert len(canceled) == 1
+    assert canceled[0].order.side == "SELL"
+    assert len(book.get_open_orders()) == 1
+    assert book.get_open_orders()[0].order.side == "BUY"
+
+
+def test_fill_with_fee() -> None:
+    book = OrderBook()
+    order = Order(symbol="AAPL", side="BUY", shares=100)
+    managed = book.add(order, "2024-01-02")
+    fill = book.fill(managed, price=Decimal("150"), date="2024-01-02", fee=Decimal("15"))
+    assert fill.fee == Decimal("15")
+
+
+def test_dedup_does_not_affect_market_orders() -> None:
+    book = OrderBook()
+    book.add(Order(symbol="AAPL", side="BUY", shares=100), "2024-01-02")
+    book.add(Order(symbol="AAPL", side="BUY", shares=200), "2024-01-02")
+    assert len(book.get_open_orders()) == 2
+
+
+def test_filled_order_not_in_open_orders() -> None:
+    book = OrderBook()
+    order = Order(symbol="AAPL", side="BUY", shares=100)
+    managed = book.add(order, "2024-01-02")
+    book.fill(managed, price=Decimal("150"), date="2024-01-02")
+    assert len(book.get_open_orders()) == 0

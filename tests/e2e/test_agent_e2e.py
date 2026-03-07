@@ -23,11 +23,14 @@ class TestStrategyBuilderE2E:
     """Test the strategy-builder skill through the agent demo UI."""
 
     def _setup_skill(self, page: Page) -> None:
-        """Fill API key and select strategy-builder skill."""
+        """Switch to Manual mode, select strategy-builder skill, then fill API key."""
         sidebar = page.locator('[data-testid="stSidebar"]')
-        sidebar.get_by_label("API Key").fill(API_KEY)
 
-        # Select strategy-builder skill from dropdown
+        # Switch to Manual skill mode first (triggers Streamlit rerun)
+        sidebar.get_by_text("Manual").click()
+        page.wait_for_selector('[data-testid="stChatInput"]', timeout=10000)
+
+        # Select strategy-builder skill from dropdown (triggers another rerun)
         skill_select = sidebar.locator('[data-testid="stSelectbox"]').first
         skill_select.click()
         page.locator('[data-testid="stSelectboxVirtualDropdown"]').get_by_text(
@@ -35,9 +38,12 @@ class TestStrategyBuilderE2E:
         ).click()
 
         # Verify skill loaded
-        expect(sidebar.locator(':has-text("strategy-builder")')).to_be_visible(
+        expect(sidebar.get_by_text("Loaded Skill: strategy-builder")).to_be_visible(
             timeout=5000,
         )
+
+        # Fill API key last so no subsequent rerun clears it
+        sidebar.get_by_label("API Key").fill(API_KEY)
 
     def test_sma_crossover_full_pipeline(self, app_page: Page) -> None:
         """Send a comprehensive message and verify the agent uses strategy + engine tools."""

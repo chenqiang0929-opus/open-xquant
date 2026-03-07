@@ -81,3 +81,123 @@ def test_daily_loss_limit_triggers() -> None:
     order, hold = rule.evaluate("AAPL", row2, portfolio)
     assert hold is True
     assert order is None  # Only freeze, no liquidation
+
+
+def test_max_drawdown_at_exact_boundary() -> None:
+    rule = MaxDrawdownRisk(max_drawdown=0.20)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("150"))},
+    )
+    # First eval: peak = 100 * 200 = 20000
+    row1 = pd.Series({"close": 200.0})
+    rule.evaluate("AAPL", row1, portfolio)
+
+    # Second eval: value = 100 * 160 = 16000, dd = 4000/20000 = 0.20 exactly
+    row2 = pd.Series({"close": 160.0})
+    order, hold = rule.evaluate("AAPL", row2, portfolio)
+    assert hold is True
+
+
+def test_max_drawdown_new_high_resets_peak() -> None:
+    rule = MaxDrawdownRisk(max_drawdown=0.20)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("150"))},
+    )
+    # Eval at close=200 → peak=20000
+    row1 = pd.Series({"close": 200.0})
+    rule.evaluate("AAPL", row1, portfolio)
+
+    # Eval at close=190 → dd=5% → no trigger
+    row2 = pd.Series({"close": 190.0})
+    _, hold = rule.evaluate("AAPL", row2, portfolio)
+    assert hold is False
+
+    # Eval at close=210 → new peak=21000
+    row3 = pd.Series({"close": 210.0})
+    rule.evaluate("AAPL", row3, portfolio)
+
+    # Eval at close=175 → dd=(21000-17500)/21000≈16.7% → no trigger (< 20%)
+    row4 = pd.Series({"close": 175.0})
+    _, hold = rule.evaluate("AAPL", row4, portfolio)
+    assert hold is False
+
+    # Eval at close=168 → dd=(21000-16800)/21000=20% → trigger
+    row5 = pd.Series({"close": 168.0})
+    _, hold = rule.evaluate("AAPL", row5, portfolio)
+    assert hold is True
+
+
+def test_max_drawdown_multiple_symbols() -> None:
+    rule = MaxDrawdownRisk(max_drawdown=0.15)
+    portfolio = Portfolio(
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("150"))},
+    )
+    # Eval("AAPL", close=200) → establishes peak
+    row_aapl = pd.Series({"close": 200.0})
+    rule.evaluate("AAPL", row_aapl, portfolio)
+
+    # Eval("MSFT", close=300) with no MSFT position → no order, check hold
+    row_msft = pd.Series({"close": 300.0})
+    order, hold = rule.evaluate("MSFT", row_msft, portfolio)
+    # Risk is portfolio-level; no drawdown occurred so no trigger
+    assert order is None
+
+
+def test_daily_loss_limit_at_exact_boundary() -> None:
+    rule = DailyLossLimitRisk(max_daily_loss=0.05)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("150"))},
+    )
+    # First eval day1 close=200 → day_start=20000
+    row1 = pd.Series({"close": 200.0}, name=pd.Timestamp("2024-01-02"))
+    rule.evaluate("AAPL", row1, portfolio)
+
+    # Second eval day1 close=190 → loss=1000/20000=5% exactly
+    row2 = pd.Series({"close": 190.0}, name=pd.Timestamp("2024-01-02"))
+    order, hold = rule.evaluate("AAPL", row2, portfolio)
+    assert hold is True
+
+
+def test_daily_loss_limit_resets_next_day() -> None:
+    rule = DailyLossLimitRisk(max_daily_loss=0.05)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("150"))},
+    )
+    # Day 1 close=200 → establishes start value=20000
+    row1 = pd.Series({"close": 200.0}, name=pd.Timestamp("2024-01-02"))
+    rule.evaluate("AAPL", row1, portfolio)
+
+    # Day 1 close=190 → loss=5% → triggers hold=True
+    row2 = pd.Series({"close": 190.0}, name=pd.Timestamp("2024-01-02"))
+    _, hold = rule.evaluate("AAPL", row2, portfolio)
+    assert hold is True
+
+    # Day 2 (new date) close=190 → new day_start=19000
+    row3 = pd.Series({"close": 190.0}, name=pd.Timestamp("2024-01-03"))
+    rule.evaluate("AAPL", row3, portfolio)
+
+    # Day 2 close=185 → loss=500/19000≈2.6% → should NOT trigger
+    row4 = pd.Series({"close": 185.0}, name=pd.Timestamp("2024-01-03"))
+    _, hold = rule.evaluate("AAPL", row4, portfolio)
+    assert hold is False
+
+
+def test_daily_loss_limit_no_trigger_with_gain() -> None:
+    rule = DailyLossLimitRisk(max_daily_loss=0.03)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("150"))},
+    )
+    # Day 1 close=200 → start=20000
+    row1 = pd.Series({"close": 200.0}, name=pd.Timestamp("2024-01-02"))
+    rule.evaluate("AAPL", row1, portfolio)
+
+    # Day 1 close=210 → gain, not loss → hold=False
+    row2 = pd.Series({"close": 210.0}, name=pd.Timestamp("2024-01-02"))
+    _, hold = rule.evaluate("AAPL", row2, portfolio)
+    assert hold is False

@@ -206,3 +206,206 @@ def test_stop_dedup_replaces_old() -> None:
     open_orders = broker.get_open_orders(symbol="AAPL")
     assert len(open_orders) == 1
     assert open_orders[0].order.stop_price == Decimal("145")
+
+
+def test_get_open_orders_filter_by_symbol() -> None:
+    broker = SimBroker()
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=100,
+        order_type="stop", stop_price=Decimal("140"),
+    ))
+    broker.submit_order(Order(
+        symbol="MSFT", side="SELL", shares=50,
+        order_type="stop", stop_price=Decimal("280"),
+    ))
+
+    assert len(broker.get_open_orders(symbol="AAPL")) == 1
+    assert len(broker.get_open_orders(symbol="MSFT")) == 1
+    assert len(broker.get_open_orders()) == 2
+
+
+def test_buy_stop_order_triggers() -> None:
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    mktdata = {
+        "AAPL": pd.DataFrame(
+            {"close": [150.0, 155.0, 165.0]}, index=dates,
+        ),
+    }
+    broker.submit_order(Order(
+        symbol="AAPL", side="BUY", shares=100,
+        order_type="stop", stop_price=Decimal("160"),
+    ))
+
+    # Day 1: close=150 < 160, no trigger
+    broker.process_pending_orders(mktdata, dates[0])
+    broker.fill_market_orders(mktdata, dates[0])
+    assert len(broker.get_fills()) == 0
+
+    # Day 2: close=155 < 160, no trigger
+    broker.process_pending_orders(mktdata, dates[1])
+    broker.fill_market_orders(mktdata, dates[1])
+    assert len(broker.get_fills()) == 0
+
+    # Day 3: close=165 >= 160, triggers
+    broker.process_pending_orders(mktdata, dates[2])
+    broker.fill_market_orders(mktdata, dates[2])
+    fills = broker.get_fills()
+    assert len(fills) == 1
+    assert fills[0].filled_price == Decimal("160")
+    assert fills[0].order.side == "BUY"
+
+
+def test_buy_limit_order_triggers() -> None:
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    mktdata = {
+        "AAPL": pd.DataFrame(
+            {"close": [150.0, 145.0, 135.0]}, index=dates,
+        ),
+    }
+    broker.submit_order(Order(
+        symbol="AAPL", side="BUY", shares=100,
+        order_type="limit", limit_price=Decimal("140"),
+    ))
+
+    # Day 1: close=150 > 140, no trigger
+    broker.process_pending_orders(mktdata, dates[0])
+    broker.fill_market_orders(mktdata, dates[0])
+    assert len(broker.get_fills()) == 0
+
+    # Day 2: close=145 > 140, no trigger
+    broker.process_pending_orders(mktdata, dates[1])
+    broker.fill_market_orders(mktdata, dates[1])
+    assert len(broker.get_fills()) == 0
+
+    # Day 3: close=135 <= 140, triggers
+    broker.process_pending_orders(mktdata, dates[2])
+    broker.fill_market_orders(mktdata, dates[2])
+    fills = broker.get_fills()
+    assert len(fills) == 1
+    assert fills[0].filled_price == Decimal("140")
+    assert fills[0].order.side == "BUY"
+
+
+def test_stop_order_with_slippage() -> None:
+    broker = SimBroker(slippage_model=PercentageSlippage(rate=Decimal("0.01")))
+    dates = pd.bdate_range("2024-01-01", periods=2)
+    mktdata = {
+        "AAPL": pd.DataFrame(
+            {"close": [150.0, 135.0]}, index=dates,
+        ),
+    }
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=100,
+        order_type="stop", stop_price=Decimal("140"),
+    ))
+
+    # Day 1: no trigger
+    broker.process_pending_orders(mktdata, dates[0])
+    broker.fill_market_orders(mktdata, dates[0])
+    assert len(broker.get_fills()) == 0
+
+    # Day 2: close=135 <= 140, triggers
+    broker.process_pending_orders(mktdata, dates[1])
+    broker.fill_market_orders(mktdata, dates[1])
+    fills = broker.get_fills()
+    assert len(fills) == 1
+    # SELL slippage: 140 * (1 - 0.01) = 138.6
+    assert fills[0].filled_price == Decimal("140") * (1 - Decimal("0.01"))
+
+
+def test_process_pending_skips_missing_symbol() -> None:
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=1)
+    mktdata = {
+        "MSFT": pd.DataFrame({"close": [300.0]}, index=dates),
+    }
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=100,
+        order_type="stop", stop_price=Decimal("140"),
+    ))
+
+    # Should not crash; no fills
+    broker.process_pending_orders(mktdata, dates[0])
+    broker.fill_market_orders(mktdata, dates[0])
+    assert len(broker.get_fills()) == 0
+
+
+def test_process_pending_skips_missing_date() -> None:
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=1)
+    other_date = pd.Timestamp("2024-06-01")
+    mktdata = {
+        "AAPL": pd.DataFrame({"close": [150.0]}, index=dates),
+    }
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=100,
+        order_type="stop", stop_price=Decimal("140"),
+    ))
+
+    # Should not crash; no fills
+    broker.process_pending_orders(mktdata, other_date)
+    broker.fill_market_orders(mktdata, other_date)
+    assert len(broker.get_fills()) == 0
+
+
+def test_no_fee_model_returns_zero_fee() -> None:
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=1)
+    mktdata = {"AAPL": pd.DataFrame({"close": [150.0]}, index=dates)}
+    broker.submit_order(Order(symbol="AAPL", side="BUY", shares=100))
+    broker.fill_pending_orders(mktdata, dates[0])
+
+    fill = broker.get_fills()[0]
+    assert fill.fee == Decimal("0")
+
+
+def test_fee_and_slippage_combined() -> None:
+    broker = SimBroker(
+        fee_model=PercentageFee(rate=Decimal("0.001"), min_fee=Decimal("0")),
+        slippage_model=PercentageSlippage(rate=Decimal("0.01")),
+    )
+    dates = pd.bdate_range("2024-01-01", periods=1)
+    mktdata = {"AAPL": pd.DataFrame({"close": [100.0]}, index=dates)}
+    broker.submit_order(Order(symbol="AAPL", side="BUY", shares=100))
+    broker.fill_pending_orders(mktdata, dates[0])
+
+    fill = broker.get_fills()[0]
+    # slippage first: 100 * 1.01 = 101
+    assert fill.filled_price == Decimal("100") * (1 + Decimal("0.01"))
+    # fee on slipped price: 101 * 100 * 0.001 = 10.1
+    expected_fee = Decimal("101") * 100 * Decimal("0.001")
+    assert fill.fee == expected_fee
+
+
+def test_fill_pending_orders_legacy() -> None:
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=2)
+    mktdata = {
+        "AAPL": pd.DataFrame(
+            {"close": [150.0, 135.0]}, index=dates,
+        ),
+    }
+    # Submit a market order
+    broker.submit_order(Order(symbol="AAPL", side="BUY", shares=100))
+    # Submit a stop order that will trigger on day 2
+    broker.submit_order(Order(
+        symbol="AAPL", side="SELL", shares=50,
+        order_type="stop", stop_price=Decimal("140"),
+    ))
+
+    # Day 1: market order fills, stop does not trigger (150 > 140)
+    broker.fill_pending_orders(mktdata, dates[0])
+    fills_day1 = broker.get_fills()
+    assert len(fills_day1) == 1
+    assert fills_day1[0].order.side == "BUY"
+    assert fills_day1[0].filled_price == Decimal("150")
+
+    # Day 2: stop triggers (135 <= 140)
+    broker.fill_pending_orders(mktdata, dates[1])
+    fills_day2 = broker.get_fills()
+    assert len(fills_day2) == 1
+    assert fills_day2[0].order.side == "SELL"
+    assert fills_day2[0].order.order_type == "stop"
+    assert fills_day2[0].filled_price == Decimal("140")

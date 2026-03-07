@@ -70,3 +70,53 @@ def test_trailing_stop_no_position() -> None:
     portfolio = Portfolio(cash=Decimal("100000"))
     row = pd.Series({"close": 155.0})
     assert rule.evaluate("AAPL", row, portfolio) is None
+
+
+def test_stop_loss_price_calculation() -> None:
+    rule = StopLossRule(threshold=0.10)
+    portfolio = Portfolio(
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("200"))},
+    )
+    row = pd.Series({"close": 195.0})
+    order = rule.evaluate("AAPL", row, portfolio)
+    assert order is not None
+    assert order.stop_price == Decimal("200") * (1 - Decimal("0.10"))
+    assert order.stop_price == Decimal("180")
+
+
+def test_take_profit_price_calculation() -> None:
+    rule = TakeProfitRule(threshold=0.20)
+    portfolio = Portfolio(
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("200"))},
+    )
+    row = pd.Series({"close": 220.0})
+    order = rule.evaluate("AAPL", row, portfolio)
+    assert order is not None
+    assert order.limit_price == Decimal("200") * (1 + Decimal("0.20"))
+    assert order.limit_price == Decimal("240")
+
+
+def test_stop_loss_uses_full_position_shares() -> None:
+    rule = StopLossRule(threshold=0.05)
+    portfolio = Portfolio(
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=250, avg_cost=Decimal("150"))},
+    )
+    row = pd.Series({"close": 145.0})
+    order = rule.evaluate("AAPL", row, portfolio)
+    assert order is not None
+    assert order.shares == 250
+
+
+def test_trailing_stop_uses_full_position_shares() -> None:
+    rule = TrailingStopRule(trail_pct=0.05)
+    portfolio = Portfolio(
+        cash=Decimal("50000"),
+        positions={"AAPL": Position(symbol="AAPL", shares=300, avg_cost=Decimal("150"))},
+    )
+    row = pd.Series({"close": 155.0})
+    order = rule.evaluate("AAPL", row, portfolio)
+    assert order is not None
+    assert order.shares == 300

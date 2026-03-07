@@ -26,6 +26,21 @@ MAX_TOOL_ROUNDS = 30
 
 st.set_page_config(page_title="open-xquant Agent", layout="wide")
 
+SKILL_AUTO_PROMPT = """\
+你是 open-xquant 量化交易框架的智能助手。
+
+**重要：在回答用户第一条消息之前，你必须先调用 skill_list 查看可用 Skill，然后根据用户意图调用 skill_load 加载最匹配的 Skill，并严格按照 Skill 的指导流程执行。**
+
+Skill 选择指南：
+- 用户想构建策略、回测 → strategy-builder
+- 用户想下载数据、查看数据 → data-explorer
+- 用户想构建投资域 → universe-builder
+- 用户想配置止损/止盈/交易成本 → trade-executor
+- 用户想配置风控/仓位控制 → risk-analyzer
+
+如果用户的请求不匹配任何 Skill，直接回答即可。"""
+
+
 with st.sidebar:
     st.title("open-xquant Agent")
     st.markdown("---")
@@ -36,18 +51,20 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Skill loader
-    skill_files = sorted(SKILLS_DIR.glob("*.md"))
-    skill_names = [f.stem for f in skill_files if f.stat().st_size > 0]
-    selected_skill = st.selectbox(
-        "Skill",
-        options=["(none)"] + skill_names,
-    )
-    if selected_skill != "(none)":
-        skill_content = (SKILLS_DIR / f"{selected_skill}.md").read_text()
-        st.success(f"Loaded Skill: {selected_skill}")
-    else:
-        skill_content = ""
+    # Skill mode: auto or manual override
+    skill_mode = st.radio("Skill Mode", options=["Auto", "Manual"], index=0, horizontal=True)
+
+    skill_content = ""
+    if skill_mode == "Manual":
+        skill_files = sorted(SKILLS_DIR.glob("*.md"))
+        skill_names = [f.stem for f in skill_files if f.stat().st_size > 0]
+        selected_skill = st.selectbox(
+            "Skill",
+            options=["(none)"] + skill_names,
+        )
+        if selected_skill != "(none)":
+            skill_content = (SKILLS_DIR / f"{selected_skill}.md").read_text()
+            st.success(f"Loaded Skill: {selected_skill}")
 
     if st.button("Clear Chat"):
         st.session_state.messages = []
@@ -304,8 +321,10 @@ if prompt := st.chat_input("Type a message..."):
     # Build messages for API call
     api_messages: list[dict[str, Any]] = []
     system_parts = [f"Today's date is {date.today().isoformat()}."]
-    if skill_content:
+    if skill_mode == "Manual" and skill_content:
         system_parts.append(skill_content)
+    else:
+        system_parts.append(SKILL_AUTO_PROMPT)
     api_messages.append({"role": "system", "content": "\n\n".join(system_parts)})
     api_messages.extend(st.session_state.messages)
 

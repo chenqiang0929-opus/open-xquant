@@ -7,6 +7,7 @@ import pytest
 from oxq.tools import session
 from oxq.tools.strategy import (
     INDICATOR_TYPES,
+    RULE_TYPES,
     indicator_describe,
     indicator_list,
     strategy_add_indicator,
@@ -249,3 +250,127 @@ def test_indicator_list_sorted() -> None:
     result = indicator_list()
     names = [i["name"] for i in result["indicators"]]
     assert names == sorted(names)
+
+
+# ---------------------------------------------------------------------------
+# strategy_add_rule — order / risk / sized entry rules
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_add_rule_stop_loss() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    strategy_add_rule(
+        strategy="s1",
+        name="sl",
+        type="StopLossRule",
+        params={"threshold": 0.05},
+    )
+    strat = session._strategies["s1"]
+    assert len(strat.order_rules) == 1
+    assert strat.order_rules[0].threshold == 0.05
+
+
+def test_strategy_add_rule_take_profit() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    strategy_add_rule(
+        strategy="s1",
+        name="tp",
+        type="TakeProfitRule",
+        params={"threshold": 0.15},
+    )
+    strat = session._strategies["s1"]
+    assert len(strat.order_rules) == 1
+
+
+def test_strategy_add_rule_trailing_stop() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    strategy_add_rule(
+        strategy="s1",
+        name="ts",
+        type="TrailingStopRule",
+        params={"trail_pct": 0.05},
+    )
+    strat = session._strategies["s1"]
+    assert len(strat.order_rules) == 1
+
+
+def test_strategy_add_rule_max_drawdown_risk() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    strategy_add_rule(
+        strategy="s1",
+        name="mdd",
+        type="MaxDrawdownRisk",
+        params={"max_drawdown": 0.15},
+    )
+    strat = session._strategies["s1"]
+    assert len(strat.risk_rules) == 1
+
+
+def test_strategy_add_rule_daily_loss_limit_risk() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    strategy_add_rule(
+        strategy="s1",
+        name="dll",
+        type="DailyLossLimitRisk",
+        params={"max_daily_loss": 0.03},
+    )
+    strat = session._strategies["s1"]
+    assert len(strat.risk_rules) == 1
+
+
+def test_strategy_add_rule_sized_entry() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    strategy_add_rule(
+        strategy="s1",
+        name="sized",
+        type="SizedEntryRule",
+        params={"signal": "sig", "shares": 100, "max_position": 500},
+    )
+    strat = session._strategies["s1"]
+    assert len(strat.entry_rules) == 1
+
+
+# ---------------------------------------------------------------------------
+# strategy_inspect — order_rules and risk_rules fields
+# ---------------------------------------------------------------------------
+
+
+def test_strategy_inspect_shows_order_and_risk_rules() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    strategy_add_rule(
+        strategy="s1",
+        name="sl",
+        type="StopLossRule",
+        params={"threshold": 0.05},
+    )
+    strategy_add_rule(
+        strategy="s1",
+        name="mdd",
+        type="MaxDrawdownRisk",
+        params={"max_drawdown": 0.15},
+    )
+    result = strategy_inspect("s1")
+    assert len(result["order_rules"]) == 1
+    assert len(result["risk_rules"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# RULE_TYPES registry completeness
+# ---------------------------------------------------------------------------
+
+
+def test_rule_types_registry_completeness() -> None:
+    expected = {
+        "EntryRule",
+        "TargetValueEntryRule",
+        "FullPositionEntryRule",
+        "SizedEntryRule",
+        "ExitRule",
+        "StopLossRule",
+        "TakeProfitRule",
+        "TrailingStopRule",
+        "RebalanceRule",
+        "MaxDrawdownRisk",
+        "DailyLossLimitRisk",
+    }
+    assert set(RULE_TYPES.keys()) == expected
