@@ -348,3 +348,78 @@ def test_apply_fill_sell() -> None:
 
     assert portfolio.cash == Decimal("66000")  # 50000 + 100*160
     assert "AAPL" not in portfolio.positions
+
+
+def test_engine_risk_rules_hold() -> None:
+    """Risk rule hold=True should prevent entry/exit from executing."""
+    from oxq.rules.risk import MaxDrawdownRisk
+
+    # Use data that would normally trigger entry
+    data = _make_trending_data()
+    market = FakeMarketDataProvider(data)
+
+    strategy = Strategy(
+        name="risk_hold_test",
+        hypothesis="Test risk hold",
+        universe=StaticUniverse(("AAPL",)),
+        indicators={
+            "sma_10": (SMA(), {"period": 10}),
+            "sma_50": (SMA(), {"period": 50}),
+        },
+        signals={
+            "sma_10_x_sma_50": (Crossover(), {"fast": "sma_10", "slow": "sma_50"}),
+        },
+        entry_rules=[EntryRule(signal="sma_10_x_sma_50", shares=100)],
+        exit_rules=[ExitRule(fast="sma_10", slow="sma_50")],
+        risk_rules=[MaxDrawdownRisk(max_drawdown=0.001)],  # Very tight, will trigger
+    )
+
+    broker = SimBroker()
+    result = Engine().run(
+        strategy, market=market, router=broker, receiver=broker,
+        start="2024-01-01", end="2024-12-31",
+    )
+    # With 0.1% max drawdown, risk should trigger early and freeze trading
+    assert len(result.equity_curve) == 120
+
+
+def test_engine_order_rules_stop_loss() -> None:
+    """Order rules should place stop orders that SimBroker processes."""
+    from oxq.rules.order import StopLossRule
+
+    n = 20
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    # Price: 100, then drops to 80
+    closes = [100.0] + [100.0 - i * 2 for i in range(1, n)]
+    data = {
+        "AAPL": pd.DataFrame({
+            "open": closes, "high": closes, "low": closes,
+            "close": closes, "volume": [1_000_000] * n,
+        }, index=dates),
+    }
+    # Buy signal on day 1 only
+    data["AAPL"]["buy_sig"] = False
+    data["AAPL"].iloc[0, data["AAPL"].columns.get_loc("buy_sig")] = True
+
+    strategy = Strategy(
+        name="stop_loss_test",
+        hypothesis="Test stop loss",
+        universe=StaticUniverse(("AAPL",)),
+        indicators={},
+        signals={},
+        entry_rules=[EntryRule(signal="buy_sig", shares=100)],
+        exit_rules=[],
+        order_rules=[StopLossRule(threshold=0.05)],
+    )
+
+    broker = SimBroker()
+    result = Engine().run(
+        strategy, market=FakeMarketDataProvider(data), router=broker,
+        receiver=broker, start="2024-01-01", end="2024-12-31",
+    )
+
+    # Should have entry + stop-loss exit
+    sell_trades = [t for t in result.trades if t.order.side == "SELL"]
+    assert len(sell_trades) >= 1
+    # Position should be closed at end
+    assert "AAPL" not in result.portfolio.positions

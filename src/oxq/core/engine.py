@@ -126,38 +126,72 @@ class Engine:
         last_known_price: dict[str, float] = {}
 
         for date in dates:
-            # Rebalance rules (priority 3)
-            for rule in strategy.rebalance_rules:
+            # ── Stage 1: Risk Rules ──────────────────────────────────────
+            hold = False
+            for rule in strategy.risk_rules:
                 for symbol in universe.symbols:
                     if date not in mktdata[symbol].index:
                         continue
                     row = mktdata[symbol].loc[date]
-                    order = rule.evaluate(symbol, row, portfolio)
+                    result_tuple = rule.evaluate(symbol, row, portfolio)
+                    order, should_hold = result_tuple
+                    if should_hold:
+                        hold = True
                     if order:
                         router.submit_order(order)
 
-            # Exit rules (priority 4)
-            for rule in strategy.exit_rules:
-                for symbol in universe.symbols:
-                    if date not in mktdata[symbol].index:
-                        continue
-                    row = mktdata[symbol].loc[date]
-                    order = rule.evaluate(symbol, row, portfolio)
-                    if order:
-                        router.submit_order(order)
+            # ── Stage 2a: Process pending orders (even if hold) ──────────
+            if hasattr(router, "process_pending_orders"):
+                router.process_pending_orders(mktdata, date)
 
-            # Entry rules (priority 5)
-            for rule in strategy.entry_rules:
-                for symbol in universe.symbols:
-                    if date not in mktdata[symbol].index:
-                        continue
-                    row = mktdata[symbol].loc[date]
-                    order = rule.evaluate(symbol, row, portfolio)
-                    if order:
-                        router.submit_order(order)
+            # ── Stage 2b: Order Rules (skip if hold) ─────────────────────
+            if not hold:
+                for rule in strategy.order_rules:
+                    for symbol in universe.symbols:
+                        if date not in mktdata[symbol].index:
+                            continue
+                        row = mktdata[symbol].loc[date]
+                        order = rule.evaluate(symbol, row, portfolio)
+                        if order:
+                            router.submit_order(order)
 
-            # Process fills
-            if hasattr(router, "fill_pending_orders"):
+            # ── Stage 3: Rebalance Rules (skip if hold) ──────────────────
+            if not hold:
+                for rule in strategy.rebalance_rules:
+                    for symbol in universe.symbols:
+                        if date not in mktdata[symbol].index:
+                            continue
+                        row = mktdata[symbol].loc[date]
+                        order = rule.evaluate(symbol, row, portfolio)
+                        if order:
+                            router.submit_order(order)
+
+            # ── Stage 4: Exit Rules (skip if hold) ───────────────────────
+            if not hold:
+                for rule in strategy.exit_rules:
+                    for symbol in universe.symbols:
+                        if date not in mktdata[symbol].index:
+                            continue
+                        row = mktdata[symbol].loc[date]
+                        order = rule.evaluate(symbol, row, portfolio)
+                        if order:
+                            router.submit_order(order)
+
+            # ── Stage 5: Entry Rules (skip if hold) ──────────────────────
+            if not hold:
+                for rule in strategy.entry_rules:
+                    for symbol in universe.symbols:
+                        if date not in mktdata[symbol].index:
+                            continue
+                        row = mktdata[symbol].loc[date]
+                        order = rule.evaluate(symbol, row, portfolio)
+                        if order:
+                            router.submit_order(order)
+
+            # ── Fill market orders + collect all fills ────────────────────
+            if hasattr(router, "fill_market_orders"):
+                router.fill_market_orders(mktdata, date)
+            elif hasattr(router, "fill_pending_orders"):
                 router.fill_pending_orders(mktdata, date)
 
             for fill in receiver.get_fills():
