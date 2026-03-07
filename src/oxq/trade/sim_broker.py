@@ -175,6 +175,25 @@ class SimBroker:
         """
         return self._order_book.get_open_orders(symbol)
 
+    def cancel_orders(
+        self, symbol: str, side: str | None = None,
+    ) -> list[ManagedOrder]:
+        """Cancel all open orders for a symbol.
+
+        Parameters
+        ----------
+        symbol : str
+            The symbol whose orders to cancel.
+        side : str or None
+            If provided, only cancel orders with this side.
+
+        Returns
+        -------
+        list[ManagedOrder]
+            The canceled orders.
+        """
+        return self._order_book.cancel_orders(symbol, side)
+
     # -- Backward Compatibility -----------------------------------------------
 
     def fill_pending_orders(

@@ -474,3 +474,57 @@ def test_stop_loss_no_double_sell() -> None:
     assert "AAPL" not in result.portfolio.positions
     # Cash should be positive (no short-selling artifacts)
     assert result.portfolio.cash > 0
+
+
+def test_rebalance_clears_stale_stop_orders() -> None:
+    """Regression: stop orders must be canceled when position is closed by rebalance.
+
+    Previously, when RebalanceRule sold all shares, the stop order submitted
+    by StopLossRule remained in SimBroker. If the price later dropped to
+    the stop price, it would trigger on a zero position, creating a short.
+    """
+    from oxq.rules.order import StopLossRule
+    from oxq.rules.rebalance import RebalanceRule
+
+    n = 40
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    # Price starts at 100, stays flat, then drops well below stop price
+    closes = [100.0] * 10 + [100.0] * 10 + [90.0] * 20
+    data = {
+        "AAPL": pd.DataFrame({
+            "open": closes, "high": closes, "low": closes,
+            "close": closes, "volume": [1_000_000] * n,
+            # Weight: 0.5 for first 10 bars, then 0.0 (forces sell-all)
+            "weight": [0.5] * 10 + [0.0] * 30,
+        }, index=dates),
+    }
+
+    strategy = Strategy(
+        name="rebalance_cancels_stop",
+        hypothesis="Rebalance sell-all must cancel stale stop orders",
+        universe=StaticUniverse(("AAPL",)),
+        indicators={},
+        signals={},
+        rebalance_rules=[RebalanceRule(weight_col="weight", frequency=10)],
+        order_rules=[StopLossRule(threshold=0.05)],
+        entry_rules=[],
+        exit_rules=[],
+    )
+
+    broker = SimBroker()
+    result = Engine().run(
+        strategy, market=FakeMarketDataProvider(data), router=broker,
+        receiver=broker, start="2024-01-01", end="2024-12-31",
+    )
+
+    # Position should never go negative
+    assert "AAPL" not in result.portfolio.positions
+    # No stop fills should occur after the rebalance sell-all
+    stop_fills = [t for t in result.trades if t.order.order_type == "stop"]
+    assert len(stop_fills) == 0, (
+        f"Expected 0 stop fills, got {len(stop_fills)}: "
+        f"{[(t.filled_at, t.order.shares) for t in stop_fills]}"
+    )
+    # Cash should be reasonable
+    assert result.portfolio.cash > 0
+    assert result.portfolio.cash < Decimal(str(100_000 * 3))

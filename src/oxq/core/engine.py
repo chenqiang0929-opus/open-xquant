@@ -141,6 +141,17 @@ class Engine:
                         router.submit_order(order)
 
             # ── Stage 2a: Process pending orders (even if hold) ──────────
+            # Cancel stale SELL orders for symbols with no position.
+            # This prevents stop/limit orders from triggering after the
+            # position has been closed by rebalance/exit/risk rules.
+            if hasattr(router, "cancel_orders") and hasattr(router, "get_open_orders"):
+                for sym in {
+                    m.order.symbol for m in router.get_open_orders()
+                    if m.order.side == "SELL" and m.order.order_type != "market"
+                    and m.order.symbol not in portfolio.positions
+                }:
+                    router.cancel_orders(sym, "SELL")
+
             if hasattr(router, "process_pending_orders"):
                 router.process_pending_orders(mktdata, date)
 
