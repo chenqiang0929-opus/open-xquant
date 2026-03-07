@@ -98,11 +98,11 @@ class SimBroker:
             if date not in mktdata[order.symbol].index:
                 continue
 
-            close = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))
+            close = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))  # type: ignore[arg-type]
 
             if order.order_type == "stop":
                 triggered = self._check_stop(order, close)
-                if triggered:
+                if triggered and order.stop_price is not None:
                     fill_price = self._apply_slippage(order, order.stop_price)
                     fee = self._calc_fee(order, fill_price)
                     fill = self._order_book.fill(managed, fill_price, str(date), fee)
@@ -110,7 +110,7 @@ class SimBroker:
 
             elif order.order_type == "limit":
                 triggered = self._check_limit(order, close)
-                if triggered:
+                if triggered and order.limit_price is not None:
                     fill_price = order.limit_price
                     fee = self._calc_fee(order, fill_price)
                     fill = self._order_book.fill(managed, fill_price, str(date), fee)
@@ -142,7 +142,7 @@ class SimBroker:
             Current bar date.
         """
         for order in self._pending_market:
-            raw_price = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))
+            raw_price = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))  # type: ignore[arg-type]
             fill_price = self._apply_slippage(order, raw_price)
             fee = self._calc_fee(order, fill_price)
             self._fills.append(
@@ -206,12 +206,16 @@ class SimBroker:
 
     @staticmethod
     def _check_stop(order: Order, close: Decimal) -> bool:
+        if order.stop_price is None:
+            return False
         if order.side == "SELL":
             return close <= order.stop_price
         return close >= order.stop_price
 
     @staticmethod
     def _check_limit(order: Order, close: Decimal) -> bool:
+        if order.limit_price is None:
+            return False
         if order.side == "SELL":
             return close >= order.limit_price
         return close <= order.limit_price

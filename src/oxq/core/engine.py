@@ -134,7 +134,7 @@ class Engine:
                         continue
                     row = mktdata[symbol].loc[date]
                     result_tuple = rule.evaluate(symbol, row, portfolio)
-                    order, should_hold = result_tuple
+                    order, should_hold = result_tuple  # type: ignore[misc]
                     if should_hold:
                         hold = True
                     if order:
