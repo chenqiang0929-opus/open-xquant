@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 from typing import Literal
 
@@ -143,6 +144,31 @@ class OrderBook:
             m.status = "canceled"
             canceled.append(m)
         return canceled
+
+    def cap_pending_sells(self, symbol: str, max_shares: int) -> None:
+        """Cap shares on open SELL orders to at most *max_shares*.
+
+        If *max_shares* is 0 or negative the order is canceled instead.
+        Order type, prices, and other fields are preserved.
+
+        Parameters
+        ----------
+        symbol : str
+            Symbol to cap.
+        max_shares : int
+            Maximum allowed sell shares (typically current position size).
+        """
+        for m in self._orders:
+            if (
+                m.status == "open"
+                and m.order.symbol == symbol
+                and m.order.side == "SELL"
+                and m.order.order_type != "market"
+            ):
+                if max_shares <= 0:
+                    m.status = "canceled"
+                elif m.order.shares > max_shares:
+                    m.order = replace(m.order, shares=max_shares)
 
     def fill(
         self,

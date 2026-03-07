@@ -709,3 +709,143 @@ def test_multi_symbol_rebalance_with_all_order_rules() -> None:
             f"{positions[sym]} ({fill.order.side} {fill.order.shares} "
             f"{fill.order.order_type})"
         )
+
+
+# ---------------------------------------------------------------------------
+# 16. Partial rebalance + TakeProfit: TP shares must be capped to position
+# ---------------------------------------------------------------------------
+
+def test_partial_rebalance_caps_take_profit_shares() -> None:
+    """Regression: after partial position reduction by rebalance, a pending
+    take-profit (or stop) must not sell more shares than currently held.
+
+    Scenario (mirrors the real-world bug):
+    1. Rebalance buys 500 shares at bar 10
+    2. TakeProfitRule submits limit SELL 500 @ 115 (15% above cost)
+    3. Rebalance at bar 20 sells 200 shares (weight drops), position = 300
+    4. Price rises above 115 after bar 20
+    5. Without fix: limit SELL 500 triggers → sells 200 more than held → short
+    6. With fix: limit SELL is capped to 300 → correct behavior
+    """
+    n = 40
+    # Weight: 0.5 for bars 0-19, drops to 0.3 at bar 20
+    weights = [0.5] * 10 + [0.5] * 10 + [0.3] * 20
+    # Price stays below TP level (115) until bar 25, then jumps above
+    closes = [100.0] * 10 + [101.0] * 10 + [101.0] * 5 + [120.0] * 15
+    data = {
+        "A": _make_bars(closes, weight=weights),
+    }
+
+    strategy = Strategy(
+        name="partial_rebal_tp",
+        universe=StaticUniverse(("A",)),
+        indicators={}, signals={},
+        rebalance_rules=[RebalanceRule(weight_col="weight", frequency=10)],
+        order_rules=[TakeProfitRule(threshold=0.15)],
+        entry_rules=[], exit_rules=[],
+    )
+
+    result = _run(strategy, data)
+
+    # Replay fills to verify no negative positions at any point
+    positions: dict[str, int] = {}
+    for fill in result.trades:
+        sym = fill.order.symbol
+        current = positions.get(sym, 0)
+        if fill.order.side == "BUY":
+            positions[sym] = current + fill.order.shares
+        else:
+            positions[sym] = current - fill.order.shares
+        assert positions[sym] >= 0, (
+            f"Negative position for {sym} at {fill.filled_at}: "
+            f"{positions[sym]} shares (order: {fill.order.side} "
+            f"{fill.order.shares} {fill.order.order_type})"
+        )
+    _assert_no_negative_positions(result)
+    _assert_reasonable_equity(result)
+
+
+def test_partial_rebalance_caps_stop_shares() -> None:
+    """Same as above but with StopLossRule instead of TakeProfitRule."""
+    n = 40
+    # Weight: 0.5 for bars 0-19, drops to 0.3 at bar 20
+    weights = [0.5] * 10 + [0.5] * 10 + [0.3] * 20
+    # Price stays above stop level until bar 25, then drops below
+    closes = [100.0] * 10 + [100.0] * 10 + [100.0] * 5 + [90.0] * 15
+    data = {
+        "A": _make_bars(closes, weight=weights),
+    }
+
+    strategy = Strategy(
+        name="partial_rebal_stop",
+        universe=StaticUniverse(("A",)),
+        indicators={}, signals={},
+        rebalance_rules=[RebalanceRule(weight_col="weight", frequency=10)],
+        order_rules=[StopLossRule(threshold=0.05)],
+        entry_rules=[], exit_rules=[],
+    )
+
+    result = _run(strategy, data)
+
+    # Replay fills — no negative positions
+    positions: dict[str, int] = {}
+    for fill in result.trades:
+        sym = fill.order.symbol
+        current = positions.get(sym, 0)
+        if fill.order.side == "BUY":
+            positions[sym] = current + fill.order.shares
+        else:
+            positions[sym] = current - fill.order.shares
+        assert positions[sym] >= 0, (
+            f"Negative position for {sym} at {fill.filled_at}: "
+            f"{positions[sym]} shares (order: {fill.order.side} "
+            f"{fill.order.shares} {fill.order.order_type})"
+        )
+    _assert_no_negative_positions(result)
+    _assert_reasonable_equity(result)
+
+
+def test_partial_exit_caps_trailing_stop_shares() -> None:
+    """Entry buys 200 shares, ExitRule sells 200 on death cross, but
+    only 100 shares remain (partial sell happened via another mechanism).
+    Trailing stop must not exceed remaining position.
+
+    This uses a multi-symbol setup where rebalance reduces one symbol
+    while trailing stop is active.
+    """
+    n = 40
+    weights = [0.5] * 10 + [0.5] * 10 + [0.25] * 20
+    # Price rises then retraces to trigger trailing stop
+    closes = ([100.0] * 10 + [100.0] * 10
+              + [105.0, 110.0, 108.0, 106.0, 104.0,
+                 102.0, 100.0, 98.0, 96.0, 94.0]
+              + [92.0] * 10)
+    data = {
+        "A": _make_bars(closes, weight=weights),
+    }
+
+    strategy = Strategy(
+        name="partial_trail",
+        universe=StaticUniverse(("A",)),
+        indicators={}, signals={},
+        rebalance_rules=[RebalanceRule(weight_col="weight", frequency=10)],
+        order_rules=[TrailingStopRule(trail_pct=0.05)],
+        entry_rules=[], exit_rules=[],
+    )
+
+    result = _run(strategy, data)
+
+    # Replay fills — no negative positions
+    positions: dict[str, int] = {}
+    for fill in result.trades:
+        sym = fill.order.symbol
+        current = positions.get(sym, 0)
+        if fill.order.side == "BUY":
+            positions[sym] = current + fill.order.shares
+        else:
+            positions[sym] = current - fill.order.shares
+        assert positions[sym] >= 0, (
+            f"Negative position for {sym} at {fill.filled_at}: "
+            f"{positions[sym]} shares (order: {fill.order.side} "
+            f"{fill.order.shares} {fill.order.order_type})"
+        )

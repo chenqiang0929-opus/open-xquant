@@ -175,6 +175,21 @@ class SimBroker:
         """
         return self._order_book.get_open_orders(symbol)
 
+    def cap_pending_sells(self, symbol: str, max_shares: int) -> None:
+        """Cap pending SELL order shares to current position size.
+
+        Prevents stop/limit/trailing_stop orders from selling more
+        shares than currently held after a partial position reduction.
+
+        Parameters
+        ----------
+        symbol : str
+            Symbol to cap.
+        max_shares : int
+            Maximum sell shares (current position size).
+        """
+        self._order_book.cap_pending_sells(symbol, max_shares)
+
     def cancel_orders(
         self, symbol: str, side: str | None = None,
     ) -> list[ManagedOrder]:
