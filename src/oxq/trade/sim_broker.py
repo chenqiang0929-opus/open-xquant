@@ -7,28 +7,148 @@ from decimal import Decimal
 import pandas as pd
 
 from oxq.core.types import Fill, Order
+from oxq.portfolio.orderbook import ManagedOrder, OrderBook
+from oxq.trade.fees import FeeModel
+from oxq.trade.slippage import SlippageModel
 
 
 class SimBroker:
-    """Simulated broker that fills orders at the current bar's close price.
+    """Simulated broker with order book, fee and slippage models.
 
     Implements both :class:`OrderRouter` and :class:`FillReceiver` protocols.
-    Orders are queued via :meth:`submit_order` and filled via
-    :meth:`fill_pending_orders` each bar.
+    Market orders are queued and filled at bar close via
+    :meth:`fill_market_orders`. Non-market orders (stop, limit,
+    trailing_stop) are held in an internal OrderBook and processed
+    each bar via :meth:`process_pending_orders`.
+
+    Parameters
+    ----------
+    fee_model : FeeModel or None
+        Fee calculation model. If None, no fees are charged.
+    slippage_model : SlippageModel or None
+        Slippage simulation model. If None, orders fill at raw price.
+
+    Examples
+    --------
+    >>> broker = SimBroker()
+    >>> broker = SimBroker(
+    ...     fee_model=PercentageFee(),
+    ...     slippage_model=PercentageSlippage(),
+    ... )
     """
 
-    def __init__(self) -> None:
-        self._pending: list[Order] = []
+    def __init__(
+        self,
+        fee_model: FeeModel | None = None,
+        slippage_model: SlippageModel | None = None,
+    ) -> None:
+        self._fee_model = fee_model
+        self._slippage_model = slippage_model
+        self._order_book = OrderBook()
+        self._pending_market: list[Order] = []
         self._fills: list[Fill] = []
-        self._order_count: int = 0
 
     # -- OrderRouter ----------------------------------------------------------
 
     def submit_order(self, order: Order) -> str:
-        """Queue an order for execution. Returns an order id."""
-        self._order_count += 1
-        self._pending.append(order)
-        return f"order_{self._order_count}"
+        """Submit an order.
+
+        Market orders are queued for end-of-bar fill.
+        Non-market orders are added to the order book.
+
+        Parameters
+        ----------
+        order : Order
+            The order to submit.
+
+        Returns
+        -------
+        str
+            Order ID.
+        """
+        if order.order_type == "market":
+            self._pending_market.append(order)
+            managed = self._order_book.add(order, created_at="")
+            return managed.id
+        managed = self._order_book.add(order, created_at="")
+        return managed.id
+
+    # -- Order Processing -----------------------------------------------------
+
+    def process_pending_orders(
+        self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
+    ) -> None:
+        """Check all pending stop/limit/trailing_stop orders for trigger.
+
+        Called by the Engine at the start of the Order stage.
+
+        Parameters
+        ----------
+        mktdata : dict[str, pd.DataFrame]
+            Market data keyed by symbol.
+        date : pd.Timestamp
+            Current bar date.
+        """
+        for managed in list(self._order_book.get_open_orders()):
+            order = managed.order
+            if order.order_type == "market":
+                continue
+            if order.symbol not in mktdata:
+                continue
+            if date not in mktdata[order.symbol].index:
+                continue
+
+            close = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))
+
+            if order.order_type == "stop":
+                triggered = self._check_stop(order, close)
+                if triggered:
+                    fill_price = self._apply_slippage(order, order.stop_price)
+                    fee = self._calc_fee(order, fill_price)
+                    fill = self._order_book.fill(managed, fill_price, str(date), fee)
+                    self._fills.append(fill)
+
+            elif order.order_type == "limit":
+                triggered = self._check_limit(order, close)
+                if triggered:
+                    fill_price = order.limit_price
+                    fee = self._calc_fee(order, fill_price)
+                    fill = self._order_book.fill(managed, fill_price, str(date), fee)
+                    self._fills.append(fill)
+
+            elif order.order_type == "trailing_stop":
+                if managed.trail_high_water is None:
+                    managed.trail_high_water = close
+                else:
+                    managed.trail_high_water = max(managed.trail_high_water, close)
+                hwm = managed.trail_high_water
+                stop_level = hwm * (1 - Decimal(str(order.trail_pct)))
+                if close <= stop_level:
+                    fill_price = self._apply_slippage(order, stop_level)
+                    fee = self._calc_fee(order, fill_price)
+                    fill = self._order_book.fill(managed, fill_price, str(date), fee)
+                    self._fills.append(fill)
+
+    def fill_market_orders(
+        self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
+    ) -> None:
+        """Fill all pending market orders at each symbol's close price.
+
+        Parameters
+        ----------
+        mktdata : dict[str, pd.DataFrame]
+            Market data keyed by symbol.
+        date : pd.Timestamp
+            Current bar date.
+        """
+        for order in self._pending_market:
+            raw_price = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))
+            fill_price = self._apply_slippage(order, raw_price)
+            fee = self._calc_fee(order, fill_price)
+            self._fills.append(
+                Fill(order=order, filled_price=fill_price, filled_at=str(date), fee=fee),
+            )
+        self._pending_market.clear()
 
     # -- FillReceiver ---------------------------------------------------------
 
@@ -38,15 +158,60 @@ class SimBroker:
         self._fills.clear()
         return fills
 
-    # -- Simulation step ------------------------------------------------------
+    # -- Query ----------------------------------------------------------------
+
+    def get_open_orders(self, symbol: str | None = None) -> list[ManagedOrder]:
+        """Return open orders from the order book.
+
+        Parameters
+        ----------
+        symbol : str or None
+            If provided, filter by symbol.
+
+        Returns
+        -------
+        list[ManagedOrder]
+            Open orders.
+        """
+        return self._order_book.get_open_orders(symbol)
+
+    # -- Backward Compatibility -----------------------------------------------
 
     def fill_pending_orders(
         self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
     ) -> None:
-        """Fill all pending orders at each symbol's close price for *date*."""
-        for order in self._pending:
-            price = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))
-            self._fills.append(
-                Fill(order=order, filled_price=price, filled_at=str(date)),
-            )
-        self._pending.clear()
+        """Legacy method: process pending + fill market in one call.
+
+        Parameters
+        ----------
+        mktdata : dict[str, pd.DataFrame]
+            Market data keyed by symbol.
+        date : pd.Timestamp
+            Current bar date.
+        """
+        self.process_pending_orders(mktdata, date)
+        self.fill_market_orders(mktdata, date)
+
+    # -- Private helpers ------------------------------------------------------
+
+    def _apply_slippage(self, order: Order, price: Decimal) -> Decimal:
+        if self._slippage_model:
+            return self._slippage_model.adjust(order, price)
+        return price
+
+    def _calc_fee(self, order: Order, fill_price: Decimal) -> Decimal:
+        if self._fee_model:
+            return self._fee_model.calculate(order, fill_price)
+        return Decimal("0")
+
+    @staticmethod
+    def _check_stop(order: Order, close: Decimal) -> bool:
+        if order.side == "SELL":
+            return close <= order.stop_price
+        return close >= order.stop_price
+
+    @staticmethod
+    def _check_limit(order: Order, close: Decimal) -> bool:
+        if order.side == "SELL":
+            return close >= order.limit_price
+        return close <= order.limit_price
