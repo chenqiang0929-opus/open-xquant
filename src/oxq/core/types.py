@@ -112,6 +112,7 @@ class Portfolio:
 
     cash: Decimal
     positions: dict[str, Position] = field(default_factory=dict)
+    bar_prices: dict[str, Decimal] = field(default_factory=dict)
 
     def total_value(self, prices: dict[str, Decimal]) -> Decimal:
         """Calculate total portfolio value (cash + positions)."""

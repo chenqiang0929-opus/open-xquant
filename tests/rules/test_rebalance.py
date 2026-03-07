@@ -5,7 +5,7 @@ from decimal import Decimal
 import pandas as pd
 
 from oxq.core.types import Portfolio, Position, Rule
-from oxq.rules.rebalance import RebalanceRule, _estimate_portfolio_value
+from oxq.rules.rebalance import RebalanceRule, _portfolio_value
 
 
 def _make_row(date: pd.Timestamp, target_weight: float, close: float) -> pd.Series:
@@ -109,7 +109,24 @@ def test_rebalance_rule_nan_weight_as_zero() -> None:
     assert order.shares == 100
 
 
-def test_estimate_portfolio_value() -> None:
+def test_portfolio_value_with_bar_prices() -> None:
+    portfolio = Portfolio(
+        cash=Decimal("10000"),
+        positions={
+            "AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("90")),
+            "MSFT": Position(symbol="MSFT", shares=50, avg_cost=Decimal("200")),
+        },
+        bar_prices={
+            "AAPL": Decimal("110"),
+            "MSFT": Decimal("300"),  # real-time price, not avg_cost
+        },
+    )
+    # AAPL: 100*110, MSFT: 50*300=15000, cash=10000 → total=36000
+    assert _portfolio_value(portfolio, "AAPL", Decimal("110")) == Decimal("36000")
+
+
+def test_portfolio_value_without_bar_prices() -> None:
+    """Without bar_prices, only current symbol gets a price; others → 0."""
     portfolio = Portfolio(
         cash=Decimal("10000"),
         positions={
@@ -117,8 +134,8 @@ def test_estimate_portfolio_value() -> None:
             "MSFT": Position(symbol="MSFT", shares=50, avg_cost=Decimal("200")),
         },
     )
-    # AAPL: 100*110 (market price), MSFT: 50*200 (avg_cost)
-    assert _estimate_portfolio_value(portfolio, "AAPL", 110.0) == 31_000.0
+    # Only AAPL gets a price: 100*110=11000 + cash=10000 + MSFT=0 → 21000
+    assert _portfolio_value(portfolio, "AAPL", Decimal("110")) == Decimal("21000")
 
 
 def test_rebalance_rule_has_name() -> None:

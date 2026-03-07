@@ -135,6 +135,7 @@ class Engine:
                     )
                 elif s in last_known_price:
                     bar_prices[s] = Decimal(str(last_known_price[s]))
+            portfolio.bar_prices = bar_prices
 
             # ── Stage 1: Risk Rules ──────────────────────────────────────
             hold = False
