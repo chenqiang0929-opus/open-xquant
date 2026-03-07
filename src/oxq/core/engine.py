@@ -144,6 +144,12 @@ class Engine:
             if hasattr(router, "process_pending_orders"):
                 router.process_pending_orders(mktdata, date)
 
+            # Apply fills from pending orders immediately so that
+            # subsequent rules see up-to-date portfolio state.
+            for fill in receiver.get_fills():
+                _apply_fill(portfolio, fill)
+                trades.append(fill)
+
             # ── Stage 2b: Order Rules (skip if hold) ─────────────────────
             if not hold:
                 for rule in strategy.order_rules:

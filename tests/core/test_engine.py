@@ -423,3 +423,54 @@ def test_engine_order_rules_stop_loss() -> None:
     assert len(sell_trades) >= 1
     # Position should be closed at end
     assert "AAPL" not in result.portfolio.positions
+
+
+def test_stop_loss_no_double_sell() -> None:
+    """Regression: stop-loss fill must be applied before order rules evaluate.
+
+    Previously, fills from process_pending_orders() were not applied until
+    end-of-bar, so StopLossRule would see stale positions and submit a
+    duplicate stop order, causing a double sell and negative holdings.
+    """
+    from oxq.rules.order import StopLossRule
+
+    n = 10
+    dates = pd.bdate_range("2024-01-01", periods=n)
+    # Day 0: buy at 100.  Days 1+: price drops to trigger 5% stop.
+    closes = [100.0, 96.0, 94.0, 92.0, 90.0, 88.0, 86.0, 84.0, 82.0, 80.0]
+    data = {
+        "AAPL": pd.DataFrame({
+            "open": closes, "high": closes, "low": closes,
+            "close": closes, "volume": [1_000_000] * n,
+        }, index=dates),
+    }
+    data["AAPL"]["buy_sig"] = False
+    data["AAPL"].iloc[0, data["AAPL"].columns.get_loc("buy_sig")] = True
+
+    strategy = Strategy(
+        name="no_double_sell",
+        hypothesis="Stop-loss must not sell the same position twice",
+        universe=StaticUniverse(("AAPL",)),
+        indicators={},
+        signals={},
+        entry_rules=[EntryRule(signal="buy_sig", shares=100)],
+        exit_rules=[],
+        order_rules=[StopLossRule(threshold=0.05)],
+    )
+
+    broker = SimBroker()
+    result = Engine().run(
+        strategy, market=FakeMarketDataProvider(data), router=broker,
+        receiver=broker, start="2024-01-01", end="2024-12-31",
+    )
+
+    sell_trades = [t for t in result.trades if t.order.side == "SELL"]
+    # Exactly one sell — not two
+    assert len(sell_trades) == 1, (
+        f"Expected 1 sell trade, got {len(sell_trades)}: "
+        f"{[(t.filled_at, t.order.shares) for t in sell_trades]}"
+    )
+    # No negative positions
+    assert "AAPL" not in result.portfolio.positions
+    # Cash should be positive (no short-selling artifacts)
+    assert result.portfolio.cash > 0
