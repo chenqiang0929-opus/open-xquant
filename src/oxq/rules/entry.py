@@ -69,3 +69,79 @@ class FullPositionEntryRule:
         if shares <= 0:
             return None
         return Order(symbol=symbol, side="BUY", shares=shares)
+
+
+class SizedEntryRule:
+    """Buy when a signal fires, with optional position sizing constraints.
+
+    Extends the basic EntryRule with two optional sizing guards:
+
+    - ``max_position``: caps the total number of shares held
+    - ``max_pct_equity``: caps the position value as a percentage
+      of total portfolio equity
+
+    Both constraints are applied sequentially — the final order size
+    is the minimum allowed by all active constraints. If the result
+    is zero or negative, no order is generated.
+
+    Parameters
+    ----------
+    signal : str
+        Name of the signal column to monitor (must be boolean).
+    shares : int
+        Base number of shares to buy (before sizing constraints).
+        Default is 100.
+    max_position : int or None
+        Maximum total shares allowed for this symbol.
+    max_pct_equity : float or None
+        Maximum position value as a fraction of total equity.
+
+    Attributes
+    ----------
+    name : str
+        Rule identifier, always ``"SizedEntryRule"``.
+
+    Examples
+    --------
+    >>> SizedEntryRule(signal="golden_cross", shares=100, max_position=500)
+    >>> SizedEntryRule(signal="golden_cross", shares=100, max_pct_equity=0.2)
+    """
+
+    name = "SizedEntryRule"
+
+    def __init__(
+        self,
+        signal: str,
+        shares: int = 100,
+        max_position: int | None = None,
+        max_pct_equity: float | None = None,
+    ) -> None:
+        self.signal = signal
+        self.shares = shares
+        self.max_position = max_position
+        self.max_pct_equity = max_pct_equity
+
+    def evaluate(
+        self, symbol: str, row: pd.Series, portfolio: Portfolio,
+    ) -> Order | None:
+        """Evaluate signal and apply sizing constraints."""
+        if not row.get(self.signal) or symbol in portfolio.positions:
+            return None
+
+        shares = self.shares
+
+        if self.max_position is not None:
+            from oxq.rules.sizing import clip_to_max_position
+            shares = clip_to_max_position(shares, symbol, portfolio, self.max_position)
+
+        if self.max_pct_equity is not None:
+            from oxq.rules.sizing import clip_to_pct_equity
+            price = Decimal(str(float(row["close"])))
+            prices = {symbol: price}
+            shares = clip_to_pct_equity(
+                shares, symbol, price, portfolio, prices, self.max_pct_equity,
+            )
+
+        if shares <= 0:
+            return None
+        return Order(symbol=symbol, side="BUY", shares=shares)
