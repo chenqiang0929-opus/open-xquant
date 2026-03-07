@@ -126,6 +126,16 @@ class Engine:
         last_known_price: dict[str, float] = {}
 
         for date in dates:
+            # Build bar-wide prices dict for portfolio valuation
+            bar_prices: dict[str, Decimal] = {}
+            for s in universe.symbols:
+                if date in mktdata[s].index:
+                    bar_prices[s] = Decimal(
+                        str(float(mktdata[s].loc[date, "close"])),
+                    )
+                elif s in last_known_price:
+                    bar_prices[s] = Decimal(str(last_known_price[s]))
+
             # ── Stage 1: Risk Rules ──────────────────────────────────────
             hold = False
             for rule in strategy.risk_rules:
@@ -133,7 +143,9 @@ class Engine:
                     if date not in mktdata[symbol].index:
                         continue
                     row = mktdata[symbol].loc[date]
-                    result_tuple = rule.evaluate(symbol, row, portfolio)
+                    result_tuple = rule.evaluate(  # type: ignore[call-arg]
+                        symbol, row, portfolio, prices=bar_prices,
+                    )
                     order, should_hold = result_tuple  # type: ignore[misc]
                     if should_hold:
                         hold = True

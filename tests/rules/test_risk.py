@@ -201,3 +201,99 @@ def test_daily_loss_limit_no_trigger_with_gain() -> None:
     row2 = pd.Series({"close": 210.0}, name=pd.Timestamp("2024-01-02"))
     _, hold = rule.evaluate("AAPL", row2, portfolio)
     assert hold is False
+
+
+# ---------------------------------------------------------------------------
+# Multi-asset prices tests (Bug 1 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_max_drawdown_uses_all_prices() -> None:
+    """With prices dict, other positions are valued correctly."""
+    rule = MaxDrawdownRisk(max_drawdown=0.15)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={
+            "AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("100")),
+            "MSFT": Position(symbol="MSFT", shares=100, avg_cost=Decimal("200")),
+        },
+    )
+    all_prices = {
+        "AAPL": Decimal("100"),
+        "MSFT": Decimal("200"),
+    }
+    # Peak = 100*100 + 100*200 = 30000
+    row = pd.Series({"close": 100.0})
+    rule.evaluate("AAPL", row, portfolio, prices=all_prices)
+
+    # AAPL drops to 80, MSFT stays at 200
+    # total = 8000 + 20000 = 28000, dd = 2000/30000 = 6.7% → no trigger
+    all_prices_drop = {"AAPL": Decimal("80"), "MSFT": Decimal("200")}
+    row_drop = pd.Series({"close": 80.0})
+    _, hold = rule.evaluate("AAPL", row_drop, portfolio, prices=all_prices_drop)
+    assert hold is False
+
+
+def test_max_drawdown_false_trigger_without_prices() -> None:
+    """Without prices dict (old behavior), MSFT valued at 0 → false trigger."""
+    rule = MaxDrawdownRisk(max_drawdown=0.15)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={
+            "AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("100")),
+            "MSFT": Position(symbol="MSFT", shares=100, avg_cost=Decimal("200")),
+        },
+    )
+    # Without prices: peak = cash(0) + AAPL(100*100) + MSFT(0) = 10000
+    row = pd.Series({"close": 100.0})
+    rule.evaluate("AAPL", row, portfolio)  # no prices → only AAPL counted
+
+    # AAPL drops to 80: value = 0 + 8000 + 0 = 8000, dd = 2000/10000 = 20% → trigger!
+    row_drop = pd.Series({"close": 80.0})
+    _, hold = rule.evaluate("AAPL", row_drop, portfolio)
+    # This IS a false trigger — with correct prices dd would be only 6.7%
+    assert hold is True
+
+
+def test_daily_loss_uses_all_prices() -> None:
+    """With prices dict, daily loss is computed on full portfolio."""
+    rule = DailyLossLimitRisk(max_daily_loss=0.05)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={
+            "AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("100")),
+            "MSFT": Position(symbol="MSFT", shares=100, avg_cost=Decimal("300")),
+        },
+    )
+    # Day start: AAPL=100, MSFT=300 → total = 10000 + 30000 = 40000
+    all_prices = {"AAPL": Decimal("100"), "MSFT": Decimal("300")}
+    row1 = pd.Series({"close": 100.0}, name=pd.Timestamp("2024-01-02"))
+    rule.evaluate("AAPL", row1, portfolio, prices=all_prices)
+
+    # AAPL drops to 90, MSFT stays → total = 9000 + 30000 = 39000
+    # daily loss = 1000/40000 = 2.5% → no trigger (< 5%)
+    prices_drop = {"AAPL": Decimal("90"), "MSFT": Decimal("300")}
+    row2 = pd.Series({"close": 90.0}, name=pd.Timestamp("2024-01-02"))
+    _, hold = rule.evaluate("AAPL", row2, portfolio, prices=prices_drop)
+    assert hold is False
+
+
+def test_daily_loss_false_trigger_without_prices() -> None:
+    """Without prices dict, MSFT valued at 0 → false trigger."""
+    rule = DailyLossLimitRisk(max_daily_loss=0.05)
+    portfolio = Portfolio(
+        cash=Decimal("0"),
+        positions={
+            "AAPL": Position(symbol="AAPL", shares=100, avg_cost=Decimal("100")),
+            "MSFT": Position(symbol="MSFT", shares=100, avg_cost=Decimal("300")),
+        },
+    )
+    # Without prices: day start = 0 + 10000 + 0 = 10000
+    row1 = pd.Series({"close": 100.0}, name=pd.Timestamp("2024-01-02"))
+    rule.evaluate("AAPL", row1, portfolio)
+
+    # AAPL drops to 90: value = 9000, loss = 1000/10000 = 10% → trigger!
+    row2 = pd.Series({"close": 90.0}, name=pd.Timestamp("2024-01-02"))
+    _, hold = rule.evaluate("AAPL", row2, portfolio)
+    # False trigger — with correct prices loss would be only 2.5%
+    assert hold is True

@@ -57,17 +57,28 @@ class MaxDrawdownRisk:
         self._peak_value: Decimal = Decimal("0")
 
     def evaluate(
-        self, symbol: str, row: pd.Series, portfolio: Portfolio,
+        self,
+        symbol: str,
+        row: pd.Series,
+        portfolio: Portfolio,
+        prices: dict[str, Decimal] | None = None,
     ) -> tuple[Order | None, bool]:
         """Evaluate drawdown risk.
+
+        Parameters
+        ----------
+        prices : dict[str, Decimal] or None
+            Current prices for all symbols. If None, falls back to
+            using only the current symbol's close price.
 
         Returns
         -------
         tuple[Order | None, bool]
             (sell order if position exists, whether to freeze trading)
         """
-        price = Decimal(str(float(row["close"])))
-        prices = {symbol: price}
+        if prices is None:
+            price = Decimal(str(float(row["close"])))
+            prices = {symbol: price}
         current_value = portfolio.total_value(prices)
 
         if current_value > self._peak_value:
@@ -129,9 +140,19 @@ class DailyLossLimitRisk:
         self._current_date: object = None
 
     def evaluate(
-        self, symbol: str, row: pd.Series, portfolio: Portfolio,
+        self,
+        symbol: str,
+        row: pd.Series,
+        portfolio: Portfolio,
+        prices: dict[str, Decimal] | None = None,
     ) -> tuple[Order | None, bool]:
         """Evaluate daily loss limit.
+
+        Parameters
+        ----------
+        prices : dict[str, Decimal] or None
+            Current prices for all symbols. If None, falls back to
+            using only the current symbol's close price.
 
         Returns
         -------
@@ -139,8 +160,9 @@ class DailyLossLimitRisk:
             (always None — no liquidation, whether to freeze trading)
         """
         bar_date = row.name if hasattr(row, "name") else None
-        price = Decimal(str(float(row["close"])))
-        prices = {symbol: price}
+        if prices is None:
+            price = Decimal(str(float(row["close"])))
+            prices = {symbol: price}
         current_value = portfolio.total_value(prices)
 
         if bar_date != self._current_date:

@@ -45,7 +45,7 @@ class SimBroker:
         self._fee_model = fee_model
         self._slippage_model = slippage_model
         self._order_book = OrderBook()
-        self._pending_market: list[Order] = []
+        self._pending_market: list[ManagedOrder] = []
         self._fills: list[Fill] = []
 
     # -- OrderRouter ----------------------------------------------------------
@@ -66,11 +66,9 @@ class SimBroker:
         str
             Order ID.
         """
-        if order.order_type == "market":
-            self._pending_market.append(order)
-            managed = self._order_book.add(order, created_at="")
-            return managed.id
         managed = self._order_book.add(order, created_at="")
+        if order.order_type == "market":
+            self._pending_market.append(managed)
         return managed.id
 
     # -- Order Processing -----------------------------------------------------
@@ -141,13 +139,13 @@ class SimBroker:
         date : pd.Timestamp
             Current bar date.
         """
-        for order in self._pending_market:
+        for managed in self._pending_market:
+            order = managed.order
             raw_price = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))  # type: ignore[arg-type]
             fill_price = self._apply_slippage(order, raw_price)
             fee = self._calc_fee(order, fill_price)
-            self._fills.append(
-                Fill(order=order, filled_price=fill_price, filled_at=str(date), fee=fee),
-            )
+            fill = self._order_book.fill(managed, fill_price, str(date), fee)
+            self._fills.append(fill)
         self._pending_market.clear()
 
     # -- FillReceiver ---------------------------------------------------------

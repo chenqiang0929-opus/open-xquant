@@ -462,3 +462,36 @@ def test_cap_pending_sells_then_trigger() -> None:
     fills = broker.get_fills()
     assert len(fills) == 1
     assert fills[0].order.shares == 300
+
+
+def test_market_order_marked_filled_in_orderbook() -> None:
+    """After fill_market_orders, market orders should no longer appear open."""
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=1)
+    mktdata = {"AAPL": pd.DataFrame({"close": [150.0]}, index=dates)}
+
+    broker.submit_order(Order(symbol="AAPL", side="BUY", shares=100))
+    # Before fill: order is open in OrderBook
+    assert len(broker.get_open_orders()) == 1
+
+    broker.fill_market_orders(mktdata, dates[0])
+    # After fill: order must be marked filled, not open
+    assert len(broker.get_open_orders()) == 0
+
+    fills = broker.get_fills()
+    assert len(fills) == 1
+    assert fills[0].filled_price == Decimal("150")
+
+
+def test_market_orders_do_not_accumulate() -> None:
+    """Multiple bars of market orders should not leave garbage in OrderBook."""
+    broker = SimBroker()
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    mktdata = {"AAPL": pd.DataFrame({"close": [100.0, 110.0, 120.0]}, index=dates)}
+
+    for i, d in enumerate(dates):
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=50))
+        broker.fill_market_orders(mktdata, d)
+        broker.get_fills()  # drain fills
+        # No open orders should remain after each fill
+        assert len(broker.get_open_orders()) == 0, f"Open orders remain after bar {i}"
