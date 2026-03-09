@@ -95,3 +95,43 @@ class RunResult:
         downside_dev = float(np.sqrt(np.mean(downside**2)) * np.sqrt(trading_days))
         ann_ret = float(np.mean(log_returns) * trading_days)
         return float((ann_ret - risk_free) / downside_dev)
+
+    # -- Series ----------------------------------------------------------------
+
+    def daily_returns(self) -> pd.Series:
+        """Daily simple returns as a Series with date index."""
+        if len(self.equity_curve) < 2:
+            return pd.Series(dtype=float)
+        dates = [d for d, _ in self.equity_curve]
+        values = np.array([v for _, v in self.equity_curve], dtype=float)
+        returns = np.diff(values) / values[:-1]
+        return pd.Series(returns, index=dates[1:])
+
+    def monthly_returns(self) -> pd.Series:
+        """Monthly simple returns as a Series with month-period index.
+
+        The first month's return is measured from the first data point.
+        Subsequent months are measured from the previous month-end value.
+        """
+        if len(self.equity_curve) < 2:
+            return pd.Series(dtype=float)
+        dates = [d for d, _ in self.equity_curve]
+        values = [v for _, v in self.equity_curve]
+        s = pd.Series(values, index=pd.DatetimeIndex(dates))
+        # Last value in each month
+        month_end = s.groupby(s.index.to_period("M")).last()
+        # Prepend first value as baseline so first month gets a return
+        first_val = values[0]
+        baseline = pd.Series([first_val], index=[s.index[0].to_period("M") - 1])
+        month_end = pd.concat([baseline, month_end])
+        return month_end.pct_change().dropna()
+
+    def drawdown_series(self) -> pd.Series:
+        """Daily drawdown from peak as a Series with date index."""
+        if len(self.equity_curve) == 0:
+            return pd.Series(dtype=float)
+        dates = [d for d, _ in self.equity_curve]
+        values = np.array([v for _, v in self.equity_curve], dtype=float)
+        peak = np.maximum.accumulate(values)
+        drawdown = (values - peak) / peak
+        return pd.Series(drawdown, index=dates)

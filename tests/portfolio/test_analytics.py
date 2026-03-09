@@ -192,3 +192,165 @@ def test_max_drawdown_returns_negative() -> None:
     values = [100, 110, 90, 95, 85]
     result = _make_result(values)
     assert result.max_drawdown() <= 0
+
+
+# -- daily_returns -------------------------------------------------------------
+
+def test_daily_returns_basic() -> None:
+    values = [100.0, 105.0, 102.0, 110.0]
+    result = _make_result(values)
+    dr = result.daily_returns()
+    assert isinstance(dr, pd.Series)
+    assert len(dr) == 3  # one fewer than values
+    # hand-calculated: 5/100, -3/105, 8/102
+    assert dr.iloc[0] == pytest.approx(0.05, rel=1e-6)
+    assert dr.iloc[1] == pytest.approx(-3.0 / 105.0, rel=1e-6)
+    assert dr.iloc[2] == pytest.approx(8.0 / 102.0, rel=1e-6)
+
+
+def test_daily_returns_preserves_date_index() -> None:
+    values = [100.0, 110.0, 105.0]
+    result = _make_result(values)
+    dr = result.daily_returns()
+    dates = [d for d, _ in result.equity_curve]
+    # index should be dates[1:] (return on each day relative to previous)
+    assert list(dr.index) == dates[1:]
+
+
+def test_daily_returns_empty() -> None:
+    result = _make_result([])
+    dr = result.daily_returns()
+    assert isinstance(dr, pd.Series)
+    assert len(dr) == 0
+
+
+def test_daily_returns_single_point() -> None:
+    result = _make_result([100.0])
+    dr = result.daily_returns()
+    assert len(dr) == 0
+
+
+# -- monthly_returns -----------------------------------------------------------
+
+def _make_result_monthly(
+    start: str, periods: int, values: list[float],
+) -> RunResult:
+    """Build a RunResult with explicit business-day dates for monthly tests."""
+    dates = pd.bdate_range(start, periods=periods)
+    equity_curve = [(d, v) for d, v in zip(dates, values)]
+    return RunResult(
+        portfolio=Portfolio(cash=Decimal(str(values[-1]))),
+        trades=[],
+        equity_curve=equity_curve,
+        mktdata={},
+    )
+
+
+def test_monthly_returns_basic() -> None:
+    # Jan: 22 business days, Feb: 19 business days  (2024)
+    # Use 3 months of data to get 2 full monthly returns
+    dates = pd.bdate_range("2024-01-02", "2024-03-29")
+    n = len(dates)
+    # Linear growth from 100 to 200
+    values = np.linspace(100, 200, n).tolist()
+    result = RunResult(
+        portfolio=Portfolio(cash=Decimal("200")),
+        trades=[],
+        equity_curve=[(d, v) for d, v in zip(dates, values)],
+        mktdata={},
+    )
+    mr = result.monthly_returns()
+    assert isinstance(mr, pd.Series)
+    # Should have one entry per month
+    assert len(mr) >= 2
+    # Each monthly return should be positive (linear growth)
+    assert (mr > 0).all()
+
+
+def test_monthly_returns_uses_last_day_of_month() -> None:
+    # 2024-01-02 to 2024-02-29: two months
+    dates = pd.bdate_range("2024-01-02", "2024-02-29")
+    n = len(dates)
+    values = [100.0] * n
+    # Make Jan end at 110 and Feb end at 99
+    jan_last_idx = None
+    for i, d in enumerate(dates):
+        if d.month == 1:
+            jan_last_idx = i
+    values[jan_last_idx] = 110.0  # type: ignore[index]
+    # Feb last day = last element
+    values[-1] = 99.0
+    result = RunResult(
+        portfolio=Portfolio(cash=Decimal("99")),
+        trades=[],
+        equity_curve=[(d, v) for d, v in zip(dates, values)],
+        mktdata={},
+    )
+    mr = result.monthly_returns()
+    # Jan return: (110 - 100) / 100 = 0.10
+    assert mr.iloc[0] == pytest.approx(0.10, rel=1e-6)
+    # Feb return: (99 - 110) / 110
+    assert mr.iloc[1] == pytest.approx((99.0 - 110.0) / 110.0, rel=1e-6)
+
+
+def test_monthly_returns_empty() -> None:
+    result = _make_result([])
+    mr = result.monthly_returns()
+    assert isinstance(mr, pd.Series)
+    assert len(mr) == 0
+
+
+# -- drawdown_series -----------------------------------------------------------
+
+def test_drawdown_series_basic() -> None:
+    values = [100.0, 110.0, 90.0, 95.0, 85.0]
+    result = _make_result(values)
+    dd = result.drawdown_series()
+    assert isinstance(dd, pd.Series)
+    assert len(dd) == 5
+    # hand-calculated:
+    # peak: 100, 110, 110, 110, 110
+    # dd:   0,   0,   (90-110)/110, (95-110)/110, (85-110)/110
+    assert dd.iloc[0] == pytest.approx(0.0)
+    assert dd.iloc[1] == pytest.approx(0.0)
+    assert dd.iloc[2] == pytest.approx(-20.0 / 110.0, rel=1e-6)
+    assert dd.iloc[3] == pytest.approx(-15.0 / 110.0, rel=1e-6)
+    assert dd.iloc[4] == pytest.approx(-25.0 / 110.0, rel=1e-6)
+
+
+def test_drawdown_series_preserves_date_index() -> None:
+    values = [100.0, 110.0, 90.0]
+    result = _make_result(values)
+    dd = result.drawdown_series()
+    dates = [d for d, _ in result.equity_curve]
+    assert list(dd.index) == dates
+
+
+def test_drawdown_series_no_drawdown() -> None:
+    values = [100.0, 110.0, 120.0, 130.0]
+    result = _make_result(values)
+    dd = result.drawdown_series()
+    assert (dd == 0.0).all()
+
+
+def test_drawdown_series_empty() -> None:
+    result = _make_result([])
+    dd = result.drawdown_series()
+    assert isinstance(dd, pd.Series)
+    assert len(dd) == 0
+
+
+def test_drawdown_series_single_point() -> None:
+    result = _make_result([100.0])
+    dd = result.drawdown_series()
+    assert len(dd) == 1
+    assert dd.iloc[0] == 0.0
+
+
+def test_drawdown_series_min_equals_max_drawdown() -> None:
+    """drawdown_series().min() should equal max_drawdown()."""
+    values = [100.0, 110.0, 90.0, 95.0, 85.0, 120.0]
+    result = _make_result(values)
+    assert result.drawdown_series().min() == pytest.approx(
+        result.max_drawdown(), rel=1e-6,
+    )
