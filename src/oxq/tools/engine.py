@@ -63,8 +63,7 @@ def engine_run(
         result = Engine().run(
             strat,
             market=market,
-            router=broker,
-            receiver=broker,
+            broker=broker,
             start=start,
             end=end,
             initial_cash=initial_cash,

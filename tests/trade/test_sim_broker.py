@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from oxq.core.types import FillReceiver, Order, OrderRouter
+from oxq.core.types import Broker, FillReceiver, Order, OrderRouter
 from oxq.trade.fees import PercentageFee
 from oxq.trade.sim_broker import SimBroker
 from oxq.trade.slippage import PercentageSlippage
@@ -16,6 +16,10 @@ def test_sim_broker_satisfies_order_router_protocol() -> None:
 
 def test_sim_broker_satisfies_fill_receiver_protocol() -> None:
     assert isinstance(SimBroker(), FillReceiver)
+
+
+def test_sim_broker_satisfies_broker_protocol() -> None:
+    assert isinstance(SimBroker(), Broker)
 
 
 def test_submit_order_returns_id() -> None:

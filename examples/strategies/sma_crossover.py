@@ -103,8 +103,7 @@ for label, strategy in STRATEGIES.items():
     result = Engine().run(
         strategy,
         market=LocalMarketDataProvider(),
-        router=broker,
-        receiver=broker,
+        broker=broker,
         start=START,
         end=END,
         initial_cash=INITIAL_CASH,

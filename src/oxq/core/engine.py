@@ -14,7 +14,7 @@ from typing import Literal
 import pandas as pd
 
 from oxq.core.strategy import Strategy
-from oxq.core.types import Fill, FillReceiver, OrderRouter, Portfolio, Position
+from oxq.core.types import Broker, Fill, Portfolio, Position
 from oxq.data.providers import MarketDataProvider
 from oxq.portfolio.analytics import RunResult
 
@@ -34,8 +34,7 @@ class Engine:
         result = engine.run(
             strategy,
             market=LocalMarketDataProvider(),
-            router=sim_broker,
-            receiver=sim_broker,
+            broker=sim_broker,
             start="2023-01-01",
             end="2024-12-31",
         )
@@ -45,8 +44,7 @@ class Engine:
         self,
         strategy: Strategy,
         market: MarketDataProvider,
-        router: OrderRouter,
-        receiver: FillReceiver,
+        broker: Broker,
         start: str,
         end: str,
         initial_cash: float = 100_000.0,
@@ -60,10 +58,8 @@ class Engine:
             The strategy definition.
         market : MarketDataProvider
             Data provider for loading bars.
-        router : OrderRouter
-            Order submission interface.
-        receiver : FillReceiver
-            Fill retrieval interface.
+        broker : Broker
+            Unified broker interface (order routing, fills, lifecycle).
         start, end : str
             Date range.
         initial_cash : float
@@ -151,26 +147,24 @@ class Engine:
                     if should_hold:
                         hold = True
                     if order:
-                        router.submit_order(order)
+                        broker.submit_order(order)
 
             # ── Stage 2a: Process pending orders (even if hold) ──────────
             # Sync pending SELL orders with current positions:
             # - No position → cancel all pending SELLs
             # - Position reduced → cap pending SELL shares to position size
-            if hasattr(router, "cap_pending_sells") and hasattr(router, "get_open_orders"):
-                for sym in {
-                    m.order.symbol for m in router.get_open_orders()
-                    if m.order.side == "SELL" and m.order.order_type != "market"
-                }:
-                    pos = portfolio.positions.get(sym)
-                    router.cap_pending_sells(sym, pos.shares if pos else 0)
+            for sym in {
+                m.order.symbol for m in broker.get_open_orders()
+                if m.order.side == "SELL" and m.order.order_type != "market"
+            }:
+                pos = portfolio.positions.get(sym)
+                broker.cap_pending_sells(sym, pos.shares if pos else 0)
 
-            if hasattr(router, "process_pending_orders"):
-                router.process_pending_orders(mktdata, date)
+            broker.on_bar_open(mktdata, date)
 
             # Apply fills from pending orders immediately so that
             # subsequent rules see up-to-date portfolio state.
-            for fill in receiver.get_fills():
+            for fill in broker.get_fills():
                 _apply_fill(portfolio, fill)
                 trades.append(fill)
 
@@ -183,7 +177,7 @@ class Engine:
                         row = mktdata[symbol].loc[date]
                         order = rule.evaluate(symbol, row, portfolio)
                         if order:
-                            router.submit_order(order)
+                            broker.submit_order(order)
 
             # ── Stage 3: Rebalance Rules (skip if hold) ──────────────────
             if not hold:
@@ -194,7 +188,7 @@ class Engine:
                         row = mktdata[symbol].loc[date]
                         order = rule.evaluate(symbol, row, portfolio)
                         if order:
-                            router.submit_order(order)
+                            broker.submit_order(order)
 
             # ── Stage 4: Exit Rules (skip if hold) ───────────────────────
             if not hold:
@@ -205,7 +199,7 @@ class Engine:
                         row = mktdata[symbol].loc[date]
                         order = rule.evaluate(symbol, row, portfolio)
                         if order:
-                            router.submit_order(order)
+                            broker.submit_order(order)
 
             # ── Stage 5: Entry Rules (skip if hold) ──────────────────────
             if not hold:
@@ -216,15 +210,12 @@ class Engine:
                         row = mktdata[symbol].loc[date]
                         order = rule.evaluate(symbol, row, portfolio)
                         if order:
-                            router.submit_order(order)
+                            broker.submit_order(order)
 
             # ── Fill market orders + collect all fills ────────────────────
-            if hasattr(router, "fill_market_orders"):
-                router.fill_market_orders(mktdata, date)
-            elif hasattr(router, "fill_pending_orders"):
-                router.fill_pending_orders(mktdata, date)
+            broker.on_bar_close(mktdata, date)
 
-            for fill in receiver.get_fills():
+            for fill in broker.get_fills():
                 _apply_fill(portfolio, fill)
                 trades.append(fill)
 

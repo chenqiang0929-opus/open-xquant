@@ -86,7 +86,7 @@ def test_engine_full_pipeline() -> None:
     sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, router=sim_broker, receiver=sim_broker,
+        strategy, market=market, broker=sim_broker,
         start="2024-01-01", end="2024-12-31",
     )
 
@@ -111,7 +111,7 @@ def test_engine_run_through_indicator() -> None:
     sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, router=sim_broker, receiver=sim_broker,
+        strategy, market=market, broker=sim_broker,
         start="2024-01-01", end="2024-12-31",
         run_through="indicator",
     )
@@ -133,7 +133,7 @@ def test_engine_run_through_signal() -> None:
     sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, router=sim_broker, receiver=sim_broker,
+        strategy, market=market, broker=sim_broker,
         start="2024-01-01", end="2024-12-31",
         run_through="signal",
     )
@@ -152,7 +152,7 @@ def test_engine_portfolio_cash_changes() -> None:
     sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, router=sim_broker, receiver=sim_broker,
+        strategy, market=market, broker=sim_broker,
         start="2024-01-01", end="2024-12-31",
         initial_cash=100_000.0,
     )
@@ -173,7 +173,7 @@ def test_engine_metrics() -> None:
     sim_broker = SimBroker()
 
     result = engine.run(
-        strategy, market=market, router=sim_broker, receiver=sim_broker,
+        strategy, market=market, broker=sim_broker,
         start="2024-01-01", end="2024-12-31",
     )
 
@@ -246,8 +246,7 @@ def test_engine_rebalance_rules() -> None:
     result = Engine().run(
         strategy,
         market=FakeMarketDataProvider(data),
-        router=broker,
-        receiver=broker,
+        broker=broker,
         start="2024-01-01",
         end="2024-12-31",
     )
@@ -321,8 +320,7 @@ def test_engine_missing_dates_uses_last_known_price() -> None:
     result = Engine().run(
         strategy,
         market=FakeMarketDataProvider(data),
-        router=broker,
-        receiver=broker,
+        broker=broker,
         start="2024-01-01",
         end="2024-12-31",
         initial_cash=100_000.0,
@@ -376,7 +374,7 @@ def test_engine_risk_rules_hold() -> None:
 
     broker = SimBroker()
     result = Engine().run(
-        strategy, market=market, router=broker, receiver=broker,
+        strategy, market=market, broker=broker,
         start="2024-01-01", end="2024-12-31",
     )
     # With 0.1% max drawdown, risk should trigger early and freeze trading
@@ -414,8 +412,7 @@ def test_engine_order_rules_stop_loss() -> None:
 
     broker = SimBroker()
     result = Engine().run(
-        strategy, market=FakeMarketDataProvider(data), router=broker,
-        receiver=broker, start="2024-01-01", end="2024-12-31",
+        strategy, market=FakeMarketDataProvider(data), broker=broker, start="2024-01-01", end="2024-12-31",
     )
 
     # Should have entry + stop-loss exit
@@ -460,8 +457,7 @@ def test_stop_loss_no_double_sell() -> None:
 
     broker = SimBroker()
     result = Engine().run(
-        strategy, market=FakeMarketDataProvider(data), router=broker,
-        receiver=broker, start="2024-01-01", end="2024-12-31",
+        strategy, market=FakeMarketDataProvider(data), broker=broker, start="2024-01-01", end="2024-12-31",
     )
 
     sell_trades = [t for t in result.trades if t.order.side == "SELL"]
@@ -513,8 +509,7 @@ def test_rebalance_clears_stale_stop_orders() -> None:
 
     broker = SimBroker()
     result = Engine().run(
-        strategy, market=FakeMarketDataProvider(data), router=broker,
-        receiver=broker, start="2024-01-01", end="2024-12-31",
+        strategy, market=FakeMarketDataProvider(data), broker=broker, start="2024-01-01", end="2024-12-31",
     )
 
     # Position should never go negative

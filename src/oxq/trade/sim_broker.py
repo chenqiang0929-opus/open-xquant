@@ -48,6 +48,20 @@ class SimBroker:
         self._pending_market: list[ManagedOrder] = []
         self._fills: list[Fill] = []
 
+    # -- Broker lifecycle hooks -----------------------------------------------
+
+    def on_bar_open(
+        self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
+    ) -> None:
+        """Process pending stop/limit/trailing_stop orders at bar open."""
+        self.process_pending_orders(mktdata, date)
+
+    def on_bar_close(
+        self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
+    ) -> None:
+        """Fill market orders at bar close."""
+        self.fill_market_orders(mktdata, date)
+
     # -- OrderRouter ----------------------------------------------------------
 
     def submit_order(self, order: Order) -> str:

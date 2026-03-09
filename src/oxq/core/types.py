@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from oxq.portfolio.orderbook import ManagedOrder
 
 import pandas as pd
 
@@ -140,6 +143,39 @@ class FillReceiver(Protocol):
     """Fill interface: the only entry point for fills to reach the portfolio."""
 
     def get_fills(self) -> list[Fill]: ...
+
+
+@runtime_checkable
+class Broker(OrderRouter, FillReceiver, Protocol):
+    """Unified broker protocol for Engine lifecycle management.
+
+    Extends OrderRouter + FillReceiver with bar lifecycle hooks and
+    order management methods. Engine depends only on this Protocol,
+    not on concrete broker implementations.
+
+    - ``on_bar_open`` — called at bar open (SimBroker: process pending orders)
+    - ``on_bar_close`` — called at bar close (SimBroker: fill market orders)
+    - ``get_open_orders`` / ``cancel_orders`` / ``cap_pending_sells`` —
+      order book queries used by Engine for stale-order cleanup.
+    """
+
+    def on_bar_open(
+        self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
+    ) -> None: ...
+
+    def on_bar_close(
+        self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
+    ) -> None: ...
+
+    def get_open_orders(
+        self, symbol: str | None = None,
+    ) -> list[ManagedOrder]: ...
+
+    def cancel_orders(
+        self, symbol: str, side: str | None = None,
+    ) -> list[ManagedOrder]: ...
+
+    def cap_pending_sells(self, symbol: str, max_shares: int) -> None: ...
 
 
 # ---------------------------------------------------------------------------

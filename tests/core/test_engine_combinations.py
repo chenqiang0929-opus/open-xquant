@@ -68,7 +68,7 @@ def _run(strategy: Strategy, data: dict[str, pd.DataFrame],
     return Engine().run(
         strategy,
         market=FakeMarket(data),
-        router=broker, receiver=broker,
+        broker=broker,
         start="2024-01-01", end="2024-12-31",
         initial_cash=initial_cash,
     )

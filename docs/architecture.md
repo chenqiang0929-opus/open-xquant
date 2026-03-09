@@ -125,8 +125,7 @@ strategy = Strategy(
 engine = Engine()
 result = engine.run(strategy,
     market=LocalMarketDataProvider(),
-    router=sim_broker,
-    receiver=sim_broker,
+    broker=sim_broker,
     start="2023-01-01", end="2024-12-31")
 ```
 
@@ -396,9 +395,9 @@ class RoundTripTrade:
 
 这种设计保证了引用在运行时总是可验证的——如果列名不存在，会立即抛出 KeyError，而非静默失败。
 
-### 4.6 三接口架构：策略与执行分离
+### 4.6 Broker Protocol 架构：策略与执行分离
 
-策略层（Universe → Indicator → Signal → Rule）只负责"在什么条件下下什么单"。策略自身包含 Universe，通过三个可替换 Protocol 与执行环境解耦：
+策略层（Universe → Indicator → Signal → Rule）只负责"在什么条件下下什么单"。策略自身包含 Universe，通过两个可替换 Protocol 与执行环境解耦：
 
 ```
 策略定义层（Universe → Indicator → Signal → Rule）
@@ -406,13 +405,14 @@ class RoundTripTrade:
          │  不关心下面是回测还是实盘
          │
     ┌────▼──────────────────────────────────────────┐
-    │           三个可替换 Protocol                   │
+    │           两个可替换 Protocol                    │
     │                                                │
     │  1. MarketDataProvider ── 数据从哪来？         │
-    │  2. OrderRouter        ── 订单往哪送？         │
-    │  3. FillReceiver       ── 成交怎么回来？       │
+    │  2. Broker             ── 订单/成交/生命周期    │
     └────────────────────────────────────────────────┘
 ```
+
+`Broker` Protocol 统一了订单提交、成交回报和 bar 生命周期管理，继承自 `OrderRouter` + `FillReceiver` 并添加生命周期钩子：
 
 ```python
 from typing import Protocol, runtime_checkable
@@ -432,43 +432,49 @@ class OrderRouter(Protocol):
 class FillReceiver(Protocol):
     """成交接口：成交回报回填到 portfolio 的唯一入口"""
     def get_fills(self) -> list[Fill]: ...
+
+@runtime_checkable
+class Broker(OrderRouter, FillReceiver, Protocol):
+    """统一 Broker 接口：Engine 的唯一执行依赖"""
+    def on_bar_open(self, mktdata, date) -> None: ...   # SimBroker: process pending orders
+    def on_bar_close(self, mktdata, date) -> None: ...  # SimBroker: fill market orders
+    def get_open_orders(self, symbol=None) -> list[ManagedOrder]: ...
+    def cancel_orders(self, symbol, side=None) -> list[ManagedOrder]: ...
+    def cap_pending_sells(self, symbol, max_shares) -> None: ...
 ```
 
-> **当前实现**：`SimBroker` 同时实现 OrderRouter 和 FillReceiver 两个 Protocol。`cancel_order`、`get_open_orders`、`on_fill` 等方法留给 Phase 3（交易执行）实现。
+> **设计动机**：Engine 之前通过 `hasattr` duck-typing 调用 SimBroker 特有的方法（如 `process_pending_orders`、`fill_market_orders`），这在引入 `LiveBroker` 时会导致问题。`Broker` Protocol 将这些方法抽象为 `on_bar_open` / `on_bar_close` 生命周期钩子，`SimBroker` 在钩子内委托给具体实现，`LiveBroker` 可以实现为轮询成交或 no-op。
 
 三种运行模式通过注入不同实现切换，策略代码零修改（Universe 在策略内部，不随运行模式变化）：
 
-| 模式 | MarketDataProvider | OrderRouter | FillReceiver |
-|---|---|---|---|
-| **回测** | `LocalMarketDataProvider` — 加载本地 Parquet | `SimBroker` — 模拟撮合 | `SimBroker` |
-| **Paper Trade（未来）** | `RealtimeDataProvider` — 实时行情 | `SimBroker` | `SimBroker` |
-| **实盘（未来）** | `RealtimeDataProvider` — 实时行情 | `BrokerAdapter` — 券商 API | `BrokerAdapter` |
+| 模式 | MarketDataProvider | Broker |
+|---|---|---|
+| **回测** | `LocalMarketDataProvider` — 加载本地 Parquet | `SimBroker` — 模拟撮合 |
+| **Paper Trade（未来）** | `RealtimeDataProvider` — 实时行情 | `SimBroker` |
+| **实盘（未来）** | `RealtimeDataProvider` — 实时行情 | `LiveBroker` — 券商 API |
 
-Strategy 的 `universe` 字段在构造时设定，`engine.run()` 通过关键字参数注入三个 Provider：
+Strategy 的 `universe` 字段在构造时设定，`engine.run()` 通过关键字参数注入 Provider：
 
 ```python
 # 回测模式
 engine.run(strategy,
     market=LocalMarketDataProvider(),
-    router=sim_broker,
-    receiver=sim_broker,
+    broker=sim_broker,
     start="2023-01-01", end="2024-12-31",
     initial_cash=100_000.0)
 
 # Paper trade（未来）：仅替换行情源
 engine.run(strategy,
     market=RealtimeDataProvider(source="websocket"),
-    router=sim_broker,
-    receiver=sim_broker, ...)
+    broker=sim_broker, ...)
 
-# 实盘（未来）：三个接口全部替换
+# 实盘（未来）：两个接口全部替换
 engine.run(strategy,
     market=RealtimeDataProvider(source="websocket"),
-    router=live_broker,
-    receiver=live_broker, ...)
+    broker=live_broker, ...)
 ```
 
-> **当前阶段**：已实现 `StaticUniverse` + `FilterUniverse`（策略组件）、`LocalMarketDataProvider`（历史数据）、`SimBroker`（模拟撮合，同时实现 OrderRouter + FillReceiver）。`IndexUniverse`（Point-in-Time）留给 Phase 2。Paper trade 和实盘的实现留给后续 Phase，但三个 Provider Protocol 从第一天就定义好，确保架构不需要重构。
+> **当前阶段**：已实现 `StaticUniverse` + `FilterUniverse`（策略组件）、`LocalMarketDataProvider`（历史数据）、`SimBroker`（模拟撮合，实现 `Broker` Protocol）。`IndexUniverse`（Point-in-Time）留给 Phase 2。Paper trade 和实盘的实现留给后续 Phase，但 `Broker` Protocol 从第一天就定义好，确保架构不需要重构。
 
 ---
 
@@ -707,21 +713,21 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 
 Engine 是通用策略执行引擎，执行 Universe → Indicator → Signal → Rule 四阶段管道。它是 **provider-agnostic** 的——不知道自己在运行回测、模拟盘还是实盘，区别仅在于接入的三个 Protocol 实现：
 
-| 模式 | MarketDataProvider | OrderRouter | FillReceiver |
-|------|-------------------|-------------|--------------|
-| 回测 | `LocalMarketDataProvider` | `SimBroker` | `SimBroker` |
-| 模拟盘（未来） | `RealtimeDataProvider` | `SimBroker` | `SimBroker` |
-| 实盘（未来） | `RealtimeDataProvider` | `BrokerAdapter` | `BrokerAdapter` |
+| 模式 | MarketDataProvider | Broker |
+|------|-------------------|--------|
+| 回测 | `LocalMarketDataProvider` | `SimBroker` |
+| 模拟盘（未来） | `RealtimeDataProvider` | `SimBroker` |
+| 实盘（未来） | `RealtimeDataProvider` | `LiveBroker` |
 
 **`Engine.run()` 签名**：
 
 ```python
-def run(self, strategy, market, router, receiver,
+def run(self, strategy, market, broker,
         start, end, initial_cash=100_000.0, run_through=None) -> RunResult
 ```
 
 - `run_through="indicator"` / `"signal"` 支持分阶段运行，用于逐组件评估
-- `SimBroker`（`oxq.trade`）同时实现 OrderRouter + FillReceiver，在每个 bar 的 close 价格模拟撮合
+- `SimBroker`（`oxq.trade`）实现 `Broker` Protocol，在每个 bar 的 close 价格模拟撮合
 - `RunResult`（`oxq.portfolio.analytics`）包含 portfolio、trades、equity_curve、mktdata，提供 `total_return()`、`sharpe_ratio()`、`max_drawdown()` 方法
 - 策略评估达标检查：通过 `engine_results` tool 自动与 `strategy.objectives` 对比，输出各指标的达标状态（pass/fail）
 
