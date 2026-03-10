@@ -4,15 +4,6 @@
 
 open-xquant is an Agent First quantitative trading framework. See `README.md` for motivation and `docs/architecture.md` for full design.
 
-## Tech Stack
-
-- Python 3.12+, pandas, numpy
-- Build: hatch / uv
-- Test: pytest
-- Lint: ruff
-- Type check: mypy
-- MCP SDK: mcp (Python)
-
 ## Project Structure
 
 - `src/oxq/` — main Python package (pip install open-xquant)
@@ -22,29 +13,22 @@ open-xquant is an Agent First quantitative trading framework. See `README.md` fo
 - `tests/` — mirrors src/oxq/ structure
 - `docs/` — documentation
 
-## Key Architecture
+## Bug Fixing
 
-- **Indicator → Signal → Rule** three-phase model
-- Single wide DataFrame (mktdata) shared across phases
-- Three Protocol interfaces decouple strategy from execution: MarketDataProvider, OrderRouter, FillReceiver
-- `dataclass(frozen=True)` for immutable data types, `Protocol` for interfaces
-- Use `Decimal` for financial precision
+Follow this strict TDD protocol for every bug fix:
 
-## Commands
+1. **Write a failing test first** — describe the expected behavior with hand-calculated values, not values copied from buggy code.
+2. **Run the test, confirm it fails for the right reason** — if it passes, your understanding of the bug is wrong.
+3. **Implement the smallest possible fix** — no refactoring, no drive-by improvements.
+4. **Run the new test** — confirm it passes.
+5. **Run the full test suite** (`uv run pytest`) — confirm no regressions.
+6. **Grep for the same pattern across the entire codebase** — fix ALL instances before declaring done. E.g., if `prices = {symbol: price}` is wrong in `risk.py`, check `entry.py`, `rebalance.py`, etc.
 
-```bash
-# Install in dev mode
-pip install -e ".[dev]"
+Never guess root causes — provide concrete evidence (specific line numbers, variable values) before proposing a fix.
 
-# Run tests
-pytest
+## Cross-File Sync
 
-# Lint
-ruff check src/ tests/
-
-# Type check
-mypy src/
-```
+When fixing a bug or updating logic in one module, always check and update all related modules that share the same pattern. Use `grep` to find all affected locations before editing any of them.
 
 ## Conventions
 

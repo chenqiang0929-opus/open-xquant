@@ -2,6 +2,7 @@
 
 from oxq.tools import data as _data_tools  # noqa: F401
 from oxq.tools import engine as _engine_tools  # noqa: F401
+from oxq.tools import optimize as _optimize_tools  # noqa: F401
 from oxq.tools import strategy as _strategy_tools  # noqa: F401
 from oxq.tools import universe as _universe_tools  # noqa: F401
 from oxq.tools.registry import ToolDef, ToolRegistry, registry

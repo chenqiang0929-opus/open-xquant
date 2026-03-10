@@ -112,21 +112,19 @@ def render_message(msg: dict[str, Any]) -> None:
         with st.chat_message("assistant"):
             if msg.get("tool_calls"):
                 for tc in msg["tool_calls"]:
-                    st.info(
-                        f"Tool call: **{tc['function']['name']}**\n"
-                        f"```json\n{tc['function']['arguments']}\n```"
-                    )
+                    with st.expander(f"Tool call: {tc['function']['name']}", expanded=False):
+                        st.code(tc["function"]["arguments"], language="json")
             if msg.get("content"):
                 st.markdown(msg["content"])
     elif msg["role"] == "tool":
         with st.chat_message("assistant"):
             try:
                 parsed = json.loads(msg["content"])
-                st.success(
-                    f"Tool result:\n```json\n{json.dumps(parsed, indent=2, ensure_ascii=False)}\n```"
-                )
+                display = json.dumps(parsed, indent=2, ensure_ascii=False)
             except json.JSONDecodeError:
-                st.success(f"Tool result: {msg['content']}")
+                display = msg["content"]
+            with st.expander("Tool result", expanded=False):
+                st.code(display, language="json")
 
 
 async def stream_agent_turn(
@@ -220,12 +218,10 @@ async def stream_agent_turn(
                             for idx in sorted(tool_calls_acc)
                         ]
 
-                        # Display tool calls
+                        # Display tool calls (collapsed)
                         for tc in tool_calls:
-                            st.info(
-                                f"Tool call: **{tc['function']['name']}**\n"
-                                f"```json\n{tc['function']['arguments']}\n```"
-                            )
+                            with st.expander(f"Tool call: {tc['function']['name']}", expanded=False):
+                                st.code(tc["function"]["arguments"], language="json")
 
                         # Store assistant message
                         assistant_msg: dict[str, Any] = {
@@ -269,13 +265,11 @@ async def stream_agent_turn(
 
                             try:
                                 parsed = json.loads(tool_content)
-                                st.success(
-                                    f"Tool result:\n```json\n"
-                                    f"{json.dumps(parsed, indent=2, ensure_ascii=False)}"
-                                    f"\n```"
-                                )
+                                display = json.dumps(parsed, indent=2, ensure_ascii=False)
                             except json.JSONDecodeError:
-                                st.success(f"Tool result: {tool_content}")
+                                display = tool_content
+                            with st.expander(f"Tool result: {tool_name}", expanded=False):
+                                st.code(display, language="json")
 
                         tool_msg = {
                             "role": "tool",
