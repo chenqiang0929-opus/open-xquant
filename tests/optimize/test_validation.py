@@ -20,6 +20,7 @@ from oxq.optimize.validation import (
 from oxq.portfolio.analytics import RunResult
 from oxq.rules.entry import EntryRule
 from oxq.rules.exit import ExitRule
+from oxq.rules.order import StopLossRule
 from oxq.signals.crossover import Crossover
 from oxq.trade.sim_broker import SimBroker
 from oxq.universe.static import StaticUniverse
@@ -382,3 +383,198 @@ def test_cross_validate_with_paramset() -> None:
         assert sr.best_params is not None
         assert sr.in_sample_metric is not None
         assert isinstance(sr.oos_result, RunResult)
+
+
+# ---------------------------------------------------------------------------
+# TimeSeriesCV.split — sliding mode with embargo
+# ---------------------------------------------------------------------------
+
+
+def test_sliding_embargo_creates_gap() -> None:
+    """Sliding mode also respects embargo gap."""
+    cv = TimeSeriesCV(n_splits=3, embargo_days=5, expanding=False)
+    splits = cv.split("2018-01-01", "2024-12-31")
+    for s in splits:
+        gap = (pd.Timestamp(s.test_start) - pd.Timestamp(s.train_end)).days
+        assert gap >= 6  # 5 embargo + 1 natural
+
+
+def test_sliding_test_size_constant() -> None:
+    """Sliding mode: all test windows have the same duration."""
+    cv = TimeSeriesCV(n_splits=4, expanding=False)
+    splits = cv.split("2018-01-01", "2024-12-31")
+    # Exclude last split which may be clipped
+    test_durations = [
+        (pd.Timestamp(s.test_end) - pd.Timestamp(s.test_start)).days
+        for s in splits[:-1]
+    ]
+    assert len(set(test_durations)) == 1
+
+
+# ---------------------------------------------------------------------------
+# TimeSeriesCV.split — temporal ordering
+# ---------------------------------------------------------------------------
+
+
+def test_expanding_splits_no_future_leakage() -> None:
+    """Each split's test period is strictly after all training data."""
+    cv = TimeSeriesCV(n_splits=5, expanding=True)
+    splits = cv.split("2018-01-01", "2024-12-31")
+    for s in splits:
+        assert pd.Timestamp(s.test_start) > pd.Timestamp(s.train_end)
+
+
+def test_expanding_later_folds_see_more_data() -> None:
+    """Later folds have strictly longer training periods."""
+    cv = TimeSeriesCV(n_splits=4, expanding=True)
+    splits = cv.split("2018-01-01", "2024-12-31")
+    train_durations = [
+        (pd.Timestamp(s.train_end) - pd.Timestamp(s.train_start)).days
+        for s in splits
+    ]
+    for i in range(1, len(train_durations)):
+        assert train_durations[i] > train_durations[i - 1]
+
+
+def test_splits_cover_full_range() -> None:
+    """The last test_end should be close to the overall end date."""
+    cv = TimeSeriesCV(n_splits=3, expanding=True)
+    splits = cv.split("2018-01-01", "2024-12-31")
+    last_test_end = pd.Timestamp(splits[-1].test_end)
+    overall_end = pd.Timestamp("2024-12-31")
+    # Should be within ~1 year of the end
+    assert (overall_end - last_test_end).days < 365
+
+
+# ---------------------------------------------------------------------------
+# TimeSeriesCV — n_splits edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_n_splits_2_produces_2_splits() -> None:
+    cv = TimeSeriesCV(n_splits=2, expanding=True)
+    splits = cv.split("2018-01-01", "2024-12-31")
+    assert len(splits) == 2
+
+
+def test_large_n_splits() -> None:
+    cv = TimeSeriesCV(n_splits=10, expanding=True)
+    splits = cv.split("2018-01-01", "2024-12-31")
+    assert len(splits) == 10
+
+
+# ---------------------------------------------------------------------------
+# CVResult — edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_cv_result_mean_oos_metric_single_split() -> None:
+    sr = _make_cv_split_result([100, 110])  # total_return = 0.10
+    cvr = CVResult(
+        splits=[sr], metric="total_return", metric_direction="maximize",
+    )
+    assert cvr.mean_oos_metric() == pytest.approx(0.10, rel=1e-4)
+
+
+def test_cv_result_to_dataframe_multiple_splits() -> None:
+    sr1 = _make_cv_split_result([100, 110])
+    sr2 = _make_cv_split_result([100, 120])
+    cvr = CVResult(
+        splits=[sr1, sr2], metric="total_return", metric_direction="maximize",
+    )
+    df = cvr.to_dataframe()
+    assert len(df) == 2
+    assert df["oos_total_return"].iloc[0] == pytest.approx(0.10, rel=1e-4)
+    assert df["oos_total_return"].iloc[1] == pytest.approx(0.20, rel=1e-4)
+
+
+def test_cv_result_to_dataframe_with_rule_params() -> None:
+    sr = CVSplitResult(
+        split=CVSplit("2020-01-01", "2021-12-31", "2022-01-01", "2022-12-31"),
+        best_params={
+            "sma_fast": {"period": 10},
+            "StopLossRule": {"threshold": 0.05},
+        },
+        in_sample_metric=0.5,
+        oos_result=_make_result([100, 110]),
+    )
+    cvr = CVResult(
+        splits=[sr], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    df = cvr.to_dataframe()
+    assert "sma_fast.period" in df.columns
+    assert "StopLossRule.threshold" in df.columns
+    assert df["StopLossRule.threshold"].iloc[0] == 0.05
+
+
+# ---------------------------------------------------------------------------
+# TimeSeriesCV.cross_validate — with rule paramset (integration)
+# ---------------------------------------------------------------------------
+
+
+def test_cross_validate_with_rule_paramset() -> None:
+    """cross_validate can optimize rule parameters per fold."""
+    data = _make_long_data("2018-01-01", "2024-12-31")
+    market = FakeMarketDataProvider(data)
+
+    ps = ParameterSet("rule_cv")
+    ps.add("StopLossRule", "threshold", values=[0.05, 0.10])
+
+    strategy = Strategy(
+        name="test_cv_rules",
+        hypothesis="CV with rule optimization",
+        universe=StaticUniverse(("AAPL",)),
+        indicators={
+            "sma_fast": (SMA(), {"period": 10}),
+            "sma_slow": (SMA(), {"period": 30}),
+        },
+        signals={
+            "sma_cross": (Crossover(), {"fast": "sma_fast", "slow": "sma_slow"}),
+        },
+        entry_rules=[EntryRule(signal="sma_cross", shares=100)],
+        exit_rules=[ExitRule(fast="sma_fast", slow="sma_slow")],
+        order_rules=[StopLossRule(threshold=0.05)],
+    )
+
+    cv = TimeSeriesCV(n_splits=2, expanding=True)
+    result = cv.cross_validate(
+        strategy=strategy,
+        market=market,
+        broker_factory=SimBroker,
+        start="2018-01-01",
+        end="2024-12-31",
+        paramset=ps,
+        metric="sharpe_ratio",
+    )
+
+    assert len(result.splits) == 2
+    for sr in result.splits:
+        assert sr.best_params is not None
+        assert "StopLossRule" in sr.best_params
+        assert sr.best_params["StopLossRule"]["threshold"] in (0.05, 0.10)
+
+
+# ---------------------------------------------------------------------------
+# TimeSeriesCV.cross_validate — sliding mode (integration)
+# ---------------------------------------------------------------------------
+
+
+def test_cross_validate_sliding_mode() -> None:
+    """cross_validate works in sliding (non-expanding) mode."""
+    data = _make_long_data("2018-01-01", "2024-12-31")
+    market = FakeMarketDataProvider(data)
+
+    cv = TimeSeriesCV(n_splits=3, expanding=False)
+    result = cv.cross_validate(
+        strategy=_make_strategy(),
+        market=market,
+        broker_factory=SimBroker,
+        start="2018-01-01",
+        end="2024-12-31",
+        metric="sharpe_ratio",
+    )
+
+    assert len(result.splits) == 3
+    # All OOS results should have data
+    for sr in result.splits:
+        assert len(sr.oos_result.equity_curve) > 0

@@ -66,11 +66,37 @@ def _resolve_direction(
     return "maximize"
 
 
+def _apply_rule_params(
+    rules: list[Any],
+    params: dict[str, dict[str, Any]],
+) -> list[Any]:
+    """Deep-copy a list of rules, overriding attributes for matched names.
+
+    Rules are matched by their ``name`` attribute. For each matched rule,
+    a deep copy is made and the specified attributes are set via setattr.
+    Unmatched rules are deep-copied unchanged.
+    """
+    result = []
+    for rule in rules:
+        rule_copy = copy.deepcopy(rule)
+        rule_name = getattr(rule, "name", None)
+        if rule_name and rule_name in params:
+            for attr, value in params[rule_name].items():
+                setattr(rule_copy, attr, value)
+        result.append(rule_copy)
+    return result
+
+
 def _apply_params(
     strategy: Strategy,
     params: dict[str, dict[str, Any]],
 ) -> Strategy:
-    """Create a copy of strategy with modified indicator/signal params.
+    """Create a copy of strategy with modified component params.
+
+    Supports indicators, signals, and all rule types (entry, exit,
+    risk, order, rebalance). Components are matched by name — for
+    indicators/signals the dict key is the name, for rules the
+    ``name`` attribute is used.
 
     Only modifies parameters for components that appear in ``params``.
     Other components keep their original parameters.
@@ -96,11 +122,11 @@ def _apply_params(
         universe=strategy.universe,
         indicators=new_indicators,
         signals=new_signals,
-        entry_rules=copy.deepcopy(strategy.entry_rules),
-        exit_rules=copy.deepcopy(strategy.exit_rules),
-        risk_rules=copy.deepcopy(strategy.risk_rules),
-        order_rules=copy.deepcopy(strategy.order_rules),
-        rebalance_rules=copy.deepcopy(strategy.rebalance_rules),
+        entry_rules=_apply_rule_params(strategy.entry_rules, params),
+        exit_rules=_apply_rule_params(strategy.exit_rules, params),
+        risk_rules=_apply_rule_params(strategy.risk_rules, params),
+        order_rules=_apply_rule_params(strategy.order_rules, params),
+        rebalance_rules=_apply_rule_params(strategy.rebalance_rules, params),
         hypothesis=strategy.hypothesis,
         objectives=dict(strategy.objectives),
         benchmarks=list(strategy.benchmarks),

@@ -268,3 +268,119 @@ def test_add_converts_range_to_tuple() -> None:
     dist = ps.distributions[0]
     assert dist.values == (10, 15, 20, 25)
     assert isinstance(dist.values, tuple)
+
+
+# ---------------------------------------------------------------------------
+# ParameterSet — Rule-named components
+# ---------------------------------------------------------------------------
+
+
+def test_rule_named_component_grid() -> None:
+    """ParameterSet works with Rule class names as component names."""
+    ps = ParameterSet("rule_tuning")
+    ps.add("StopLossRule", "threshold", values=[0.03, 0.05, 0.10])
+    ps.add("TakeProfitRule", "threshold", values=[0.10, 0.20])
+    grid = ps.grid()
+    # 3 × 2 = 6
+    assert len(grid) == 6
+    assert {"StopLossRule": {"threshold": 0.03}, "TakeProfitRule": {"threshold": 0.10}} in grid
+
+
+def test_mixed_indicator_and_rule_grid() -> None:
+    """Grid supports indicator and rule params together with constraints."""
+    ps = ParameterSet("mixed")
+    ps.add("sma_fast", "period", values=[5, 10, 20])
+    ps.add("sma_slow", "period", values=[20, 50])
+    ps.add("StopLossRule", "threshold", values=[0.05, 0.10])
+    ps.add_constraint("sma_fast.period < sma_slow.period")
+    grid = ps.grid()
+
+    # Without constraint: 3 × 2 × 2 = 12
+    # Invalid: (20, 20) — 2 combos removed → (3×2 - 1) × 2 = 10
+    assert len(grid) == 10
+    for combo in grid:
+        assert combo["sma_fast"]["period"] < combo["sma_slow"]["period"]
+
+
+def test_rule_param_single_value() -> None:
+    """Single-value grid (just fix a rule param) produces one combo."""
+    ps = ParameterSet("fixed")
+    ps.add("StopLossRule", "threshold", values=[0.05])
+    grid = ps.grid()
+    assert len(grid) == 1
+    assert grid[0] == {"StopLossRule": {"threshold": 0.05}}
+
+
+def test_rule_float_values_preserved() -> None:
+    """Float precision in rule param values is preserved through grid()."""
+    ps = ParameterSet("test")
+    ps.add("StopLossRule", "threshold", values=[0.03, 0.05, 0.08])
+    grid = ps.grid()
+    thresholds = [c["StopLossRule"]["threshold"] for c in grid]
+    assert thresholds == [0.03, 0.05, 0.08]
+
+
+# ---------------------------------------------------------------------------
+# ParameterSet — grid ordering
+# ---------------------------------------------------------------------------
+
+
+def test_grid_preserves_value_order() -> None:
+    """Grid combinations maintain the order of values as added."""
+    ps = ParameterSet("test")
+    ps.add("sma", "period", values=[30, 10, 20])
+    grid = ps.grid()
+    periods = [c["sma"]["period"] for c in grid]
+    assert periods == [30, 10, 20]
+
+
+def test_grid_three_components_cartesian() -> None:
+    """Three components produce correct cartesian product size."""
+    ps = ParameterSet("test")
+    ps.add("a", "x", values=[1, 2])
+    ps.add("b", "y", values=[10, 20, 30])
+    ps.add("c", "z", values=[100, 200])
+    grid = ps.grid()
+    # 2 × 3 × 2 = 12
+    assert len(grid) == 12
+
+
+# ---------------------------------------------------------------------------
+# Constraint edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_constraint_both_numeric_literals() -> None:
+    """Constraint with two numeric literals (degenerate but valid)."""
+    ps = ParameterSet("test")
+    ps.add("sma", "period", values=[10])
+    ps.add_constraint("5 < 10")
+    grid = ps.grid()
+    assert len(grid) == 1  # constraint always true
+
+
+def test_constraint_both_numeric_literals_false() -> None:
+    ps = ParameterSet("test")
+    ps.add("sma", "period", values=[10])
+    ps.add_constraint("10 < 5")
+    grid = ps.grid()
+    assert len(grid) == 0  # constraint always false
+
+
+def test_distributions_returns_copy() -> None:
+    """distributions property returns a copy, not internal list."""
+    ps = ParameterSet("test")
+    ps.add("sma", "period", values=[10])
+    dists = ps.distributions
+    dists.clear()
+    assert len(ps.distributions) == 1  # internal list unchanged
+
+
+def test_constraints_returns_copy() -> None:
+    """constraints property returns a copy, not internal list."""
+    ps = ParameterSet("test")
+    ps.add("sma", "period", values=[10])
+    ps.add_constraint("sma.period > 0")
+    constraints = ps.constraints
+    constraints.clear()
+    assert len(ps.constraints) == 1

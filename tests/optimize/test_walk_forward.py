@@ -19,6 +19,7 @@ from oxq.optimize.walk_forward import (
 from oxq.portfolio.analytics import RunResult
 from oxq.rules.entry import EntryRule
 from oxq.rules.exit import ExitRule
+from oxq.rules.order import StopLossRule
 from oxq.signals.crossover import Crossover
 from oxq.trade.sim_broker import SimBroker
 from oxq.universe.static import StaticUniverse
@@ -476,3 +477,202 @@ def test_walk_forward_run_empty_range() -> None:
     )
 
     assert len(result.windows) == 0
+
+
+# ---------------------------------------------------------------------------
+# WalkForwardResult — stitched metrics (multi-window)
+# ---------------------------------------------------------------------------
+
+
+def test_oos_sharpe_ratio_multi_window() -> None:
+    """Stitched sharpe across multiple windows uses combined equity curve."""
+    w1 = _make_window_result([100, 105, 110])
+    w2 = _make_window_result([110, 108, 115])
+    wfr = WalkForwardResult(
+        windows=[w1, w2], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    # Stitched: [100, 105, 110, 110, 108, 115]
+    combined = np.array([100, 105, 110, 110, 108, 115], dtype=float)
+    returns = np.diff(combined) / combined[:-1]
+    expected = float(np.mean(returns) / np.std(returns) * np.sqrt(252))
+    assert wfr.oos_sharpe_ratio() == pytest.approx(expected, rel=1e-4)
+
+
+def test_oos_max_drawdown_multi_window() -> None:
+    """Max drawdown spans across window boundaries."""
+    # Window 1 peaks at 120, Window 2 drops to 90
+    w1 = _make_window_result([100, 120])
+    w2 = _make_window_result([115, 90])
+    wfr = WalkForwardResult(
+        windows=[w1, w2], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    combined = np.array([100, 120, 115, 90], dtype=float)
+    peak = np.maximum.accumulate(combined)
+    expected = float(np.min((combined - peak) / peak))
+    assert wfr.oos_max_drawdown() == pytest.approx(expected, rel=1e-4)
+
+
+def test_oos_total_return_zero_start() -> None:
+    w = _make_window_result([0.0, 100.0])
+    wfr = WalkForwardResult(
+        windows=[w], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    assert wfr.oos_total_return() == 0.0
+
+
+def test_oos_sharpe_ratio_constant_values() -> None:
+    w = _make_window_result([100.0, 100.0, 100.0])
+    wfr = WalkForwardResult(
+        windows=[w], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    assert wfr.oos_sharpe_ratio() == 0.0
+
+
+def test_oos_max_drawdown_no_drawdown() -> None:
+    w = _make_window_result([100.0, 110.0, 120.0])
+    wfr = WalkForwardResult(
+        windows=[w], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    assert wfr.oos_max_drawdown() == 0.0
+
+
+# ---------------------------------------------------------------------------
+# WalkForwardResult — deterioration (multi-window)
+# ---------------------------------------------------------------------------
+
+
+def test_deterioration_multi_window() -> None:
+    """Deterioration averages IS and OOS metrics across multiple windows."""
+    w1 = _make_window_result([100, 110, 120], in_sample_metric=2.0)
+    w2 = _make_window_result([100, 105, 108], in_sample_metric=1.0)
+    wfr = WalkForwardResult(
+        windows=[w1, w2], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    det = wfr.deterioration()
+    if "sharpe_ratio" in det:
+        mean_is = (2.0 + 1.0) / 2
+        oos1 = w1.oos_result.sharpe_ratio()
+        oos2 = w2.oos_result.sharpe_ratio()
+        mean_oos = (oos1 + oos2) / 2
+        expected = (mean_oos - mean_is) / abs(mean_is)
+        assert det["sharpe_ratio"] == pytest.approx(expected, rel=1e-4)
+
+
+def test_deterioration_zero_is_metric() -> None:
+    """When IS metric is ~0, deterioration should be 0.0 (not division error)."""
+    w = _make_window_result([100, 110], in_sample_metric=0.0)
+    wfr = WalkForwardResult(
+        windows=[w], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    det = wfr.deterioration()
+    if "sharpe_ratio" in det:
+        assert det["sharpe_ratio"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# WalkForwardResult — to_dataframe with rule params
+# ---------------------------------------------------------------------------
+
+
+def test_to_dataframe_with_rule_params() -> None:
+    w = WindowResult(
+        train_start="2020-01-01",
+        train_end="2021-12-31",
+        test_start="2022-01-01",
+        test_end="2022-12-31",
+        best_params={
+            "sma_fast": {"period": 10},
+            "StopLossRule": {"threshold": 0.05},
+        },
+        in_sample_metric=0.8,
+        oos_result=_make_result([100, 105, 110]),
+    )
+    wfr = WalkForwardResult(
+        windows=[w], metric="sharpe_ratio", metric_direction="maximize",
+    )
+    df = wfr.to_dataframe()
+    assert "sma_fast.period" in df.columns
+    assert "StopLossRule.threshold" in df.columns
+    assert df["StopLossRule.threshold"].iloc[0] == 0.05
+
+
+# ---------------------------------------------------------------------------
+# WalkForward.run — with rule params (integration)
+# ---------------------------------------------------------------------------
+
+
+def test_walk_forward_run_with_rule_params() -> None:
+    """WalkForward.run can optimize rule parameters."""
+    data = _make_long_data("2018-01-01", "2022-12-31")
+    market = FakeMarketDataProvider(data)
+
+    ps = ParameterSet("rule_opt")
+    ps.add("StopLossRule", "threshold", values=[0.05, 0.10])
+
+    strategy = Strategy(
+        name="test_wf_rules",
+        hypothesis="WF with rule optimization",
+        universe=StaticUniverse(("AAPL",)),
+        indicators={
+            "sma_fast": (SMA(), {"period": 10}),
+            "sma_slow": (SMA(), {"period": 30}),
+        },
+        signals={
+            "sma_cross": (Crossover(), {"fast": "sma_fast", "slow": "sma_slow"}),
+        },
+        entry_rules=[EntryRule(signal="sma_cross", shares=100)],
+        exit_rules=[ExitRule(fast="sma_fast", slow="sma_slow")],
+        order_rules=[StopLossRule(threshold=0.05)],
+    )
+
+    wf = WalkForward(ps, train_period="2Y", test_period="1Y")
+    result = wf.run(
+        strategy=strategy,
+        market=market,
+        broker_factory=SimBroker,
+        start="2018-01-01",
+        end="2022-12-31",
+        metric="sharpe_ratio",
+    )
+
+    assert len(result.windows) > 0
+    for w in result.windows:
+        assert "StopLossRule" in w.best_params
+        assert w.best_params["StopLossRule"]["threshold"] in (0.05, 0.10)
+
+
+# ---------------------------------------------------------------------------
+# _generate_windows — anchored with custom step
+# ---------------------------------------------------------------------------
+
+
+def test_anchored_with_custom_step() -> None:
+    """Anchored mode with a custom step that differs from test_period."""
+    ps = ParameterSet("test")
+    ps.add("sma", "period", values=[10])
+    wf = WalkForward(
+        ps, train_period="2Y", test_period="6M", step="3M", anchored=True,
+    )
+    windows = wf._generate_windows("2018-01-01", "2024-12-31")
+
+    # All train_starts anchored
+    for ts, _, _, _ in windows:
+        assert ts == "2018-01-01"
+
+    # More windows than default (step=3M < test=6M)
+    wf_default = WalkForward(
+        ps, train_period="2Y", test_period="6M", anchored=True,
+    )
+    default_windows = wf_default._generate_windows("2018-01-01", "2024-12-31")
+    assert len(windows) > len(default_windows)
+
+
+def test_rolling_single_window() -> None:
+    """Range that fits exactly one train + test window."""
+    ps = ParameterSet("test")
+    ps.add("sma", "period", values=[10])
+    wf = WalkForward(ps, train_period="1Y", test_period="6M")
+    # 1Y train + 6M test = 1.5Y; range is exactly 1.5Y so only 1 window
+    windows = wf._generate_windows("2020-01-01", "2021-06-30")
+    assert len(windows) == 1
+    assert windows[0][0] == "2020-01-01"
