@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
 from oxq.core.types import Order
@@ -173,3 +174,65 @@ class TestClose:
         broker, client = mock_client
         broker.close()
         client.stop_trade_stream.assert_called_once()
+
+
+class TestCancelOrders:
+    def test_cancel_orders_calls_alpaca(self, mock_client):
+        broker, client = mock_client
+        order = Order(symbol="AAPL", side="SELL", shares=50, order_type="stop", stop_price=Decimal("140.00"))
+        broker.submit_order(order)
+        canceled = broker.cancel_orders("AAPL")
+        assert len(canceled) == 1
+        assert canceled[0].status == "canceled"
+        client.cancel_order.assert_called_once_with("alpaca-001")
+
+    def test_cancel_orders_with_side_filter(self, mock_client):
+        broker, client = mock_client
+        client.submit_order.side_effect = [
+            {"id": "a1", "status": "accepted"},
+            {"id": "a2", "status": "accepted"},
+        ]
+        broker.submit_order(Order(
+            symbol="AAPL", side="BUY", shares=50, order_type="limit", limit_price=Decimal("140.00"),
+        ))
+        broker.submit_order(Order(
+            symbol="AAPL", side="SELL", shares=50, order_type="stop", stop_price=Decimal("130.00"),
+        ))
+        canceled = broker.cancel_orders("AAPL", side="SELL")
+        assert len(canceled) == 1
+        assert canceled[0].order.side == "SELL"
+
+
+class TestCapPendingSells:
+    def test_cap_reduces_shares(self, mock_client):
+        broker, client = mock_client
+        client.submit_order.side_effect = [
+            {"id": "a1", "status": "accepted"},
+            {"id": "a2", "status": "accepted"},
+        ]
+        order = Order(symbol="AAPL", side="SELL", shares=100, order_type="stop", stop_price=Decimal("140.00"))
+        broker.submit_order(order)
+        broker.cap_pending_sells("AAPL", max_shares=50)
+        open_orders = broker.get_open_orders("AAPL")
+        assert len(open_orders) == 1
+        assert open_orders[0].order.shares == 50
+
+    def test_cap_zero_cancels(self, mock_client):
+        broker, client = mock_client
+        order = Order(symbol="AAPL", side="SELL", shares=100, order_type="stop", stop_price=Decimal("140.00"))
+        broker.submit_order(order)
+        broker.cap_pending_sells("AAPL", max_shares=0)
+        open_orders = broker.get_open_orders("AAPL")
+        assert len(open_orders) == 0
+
+
+class TestLifecycleHooks:
+    def test_on_bar_open_is_noop(self, mock_client):
+        broker, client = mock_client
+        broker.on_bar_open({}, pd.Timestamp("2026-03-11"))
+        client.submit_order.assert_not_called()
+
+    def test_on_bar_close_is_noop(self, mock_client):
+        broker, client = mock_client
+        broker.on_bar_close({}, pd.Timestamp("2026-03-11"))
+        client.submit_order.assert_not_called()
