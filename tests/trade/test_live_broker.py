@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
-import queue
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pandas as pd
 import pytest
 
-from oxq.core.types import Fill, Order
+from oxq.core.types import Order
 from oxq.trade.live_broker import LiveBroker
 
 
 @pytest.fixture
 def mock_client():
     """Return a LiveBroker with mocked AlpacaClient."""
-    with patch("oxq.trade.live_broker.AlpacaClient") as MockClient:
-        instance = MockClient.return_value
+    with patch("oxq.trade.live_broker.AlpacaClient") as mock_cls:
+        instance = mock_cls.return_value
         instance.submit_order.return_value = {"id": "alpaca-001", "status": "accepted"}
         instance.start_trade_stream.return_value = None
         instance.stop_trade_stream.return_value = None
@@ -56,7 +54,10 @@ class TestSubmitOrder:
 
     def test_stop_limit_order_mapping(self, mock_client):
         broker, client = mock_client
-        order = Order(symbol="MSFT", side="BUY", shares=25, order_type="stop_limit", stop_price=Decimal("300.00"), limit_price=Decimal("305.00"))
+        order = Order(
+            symbol="MSFT", side="BUY", shares=25, order_type="stop_limit",
+            stop_price=Decimal("300.00"), limit_price=Decimal("305.00"),
+        )
         broker.submit_order(order)
         call_args = client.submit_order.call_args[0][0]
         assert call_args["type"] == "stop_limit"
@@ -121,3 +122,54 @@ class TestGetFills:
         })
         broker.get_fills()
         assert broker.get_fills() == []
+
+
+class TestOnWsMessage:
+    def test_full_message_envelope_routes_to_fill(self, mock_client):
+        """_on_ws_message unwraps {"data": {"event": "fill", ...}} correctly."""
+        broker, _ = mock_client
+        order = Order(symbol="AAPL", side="BUY", shares=100)
+        broker.submit_order(order)
+        broker._on_ws_message({
+            "data": {
+                "event": "fill",
+                "order": {
+                    "id": "alpaca-001",
+                    "symbol": "AAPL",
+                    "side": "buy",
+                    "qty": "100",
+                    "type": "market",
+                    "filled_avg_price": "152.00",
+                    "filled_at": "2026-03-11T14:30:00Z",
+                },
+            },
+        })
+        fills = broker.get_fills()
+        assert len(fills) == 1
+        assert fills[0].filled_price == Decimal("152.00")
+        assert fills[0].filled_at == "2026-03-11T14:30:00Z"
+
+    def test_non_fill_event_ignored(self, mock_client):
+        """_on_ws_message ignores events that are not 'fill'."""
+        broker, _ = mock_client
+        order = Order(symbol="AAPL", side="BUY", shares=100)
+        broker.submit_order(order)
+        broker._on_ws_message({
+            "data": {
+                "event": "partial_fill",
+                "order": {
+                    "id": "alpaca-001",
+                    "filled_avg_price": "150.00",
+                    "filled_at": "2026-03-11T14:30:00Z",
+                },
+            },
+        })
+        assert broker.get_fills() == []
+
+
+class TestClose:
+    def test_close_stops_trade_stream(self, mock_client):
+        """close() delegates to client.stop_trade_stream()."""
+        broker, client = mock_client
+        broker.close()
+        client.stop_trade_stream.assert_called_once()
