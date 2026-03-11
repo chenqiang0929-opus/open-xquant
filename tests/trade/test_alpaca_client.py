@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -148,6 +149,40 @@ class TestGetAccount:
             result = client.get_account()
         assert result["status"] == "ACTIVE"
         assert result["equity"] == "100000.00"
+
+
+class TestTradeStream:
+    def test_start_and_stop(self):
+        """Verify start_trade_stream launches a thread and stop cleans up."""
+        client = AlpacaClient(api_key="k", secret_key="s")
+        fills: list = []
+        gate = threading.Event()
+
+        def _blocking_run(*args, **kwargs):
+            gate.wait()
+
+        with patch("oxq.trade.alpaca_client._run_stream", side_effect=_blocking_run):
+            client.start_trade_stream(lambda msg: fills.append(msg))
+            assert client._stream_thread is not None
+            assert client._stream_thread.is_alive()
+            client.stop_trade_stream()
+            assert not client._stream_running
+            gate.set()  # unblock so thread exits cleanly
+
+    def test_callback_receives_fill(self):
+        """Verify the callback is invoked with parsed trade update."""
+        client = AlpacaClient(api_key="k", secret_key="s")
+        fills: list = []
+        fill_msg = {
+            "stream": "trade_updates",
+            "data": {
+                "event": "fill",
+                "order": {"id": "abc", "filled_avg_price": "150.00"},
+            },
+        }
+        client._on_trade_update(fill_msg, lambda msg: fills.append(msg))
+        assert len(fills) == 1
+        assert fills[0]["data"]["event"] == "fill"
 
 
 class TestHandleError:

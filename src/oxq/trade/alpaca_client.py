@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import os
-from typing import Any
+import threading
+import time
+from typing import Any, Callable
 
 import httpx
+import websockets.asyncio.client
 
 
 class AlpacaAPIError(Exception):
@@ -19,6 +25,10 @@ class AlpacaAPIError(Exception):
 
 _PAPER_REST = "https://paper-api.alpaca.markets"
 _LIVE_REST = "https://api.alpaca.markets"
+_PAPER_WS = "wss://paper-api.alpaca.markets/stream"
+_LIVE_WS = "wss://api.alpaca.markets/stream"
+
+logger = logging.getLogger(__name__)
 
 
 class AlpacaClient:
@@ -97,6 +107,35 @@ class AlpacaClient:
         resp = self._http.get("/v2/account")
         return self._handle(resp)
 
+    # -- WebSocket streaming ---------------------------------------------------
+
+    def start_trade_stream(self, callback: Callable[[dict[str, Any]], None]) -> None:
+        """Start a daemon thread that streams trade updates via WebSocket.
+
+        Parameters
+        ----------
+        callback : callable
+            Called with each parsed trade-update message dict.
+        """
+        ws_url = _PAPER_WS if self._paper else _LIVE_WS
+        self._stream_running = True
+        self._stream_thread = threading.Thread(
+            target=_run_stream,
+            args=(ws_url, self._api_key, self._secret_key, callback, self),
+            daemon=True,
+        )
+        self._stream_thread.start()
+
+    def stop_trade_stream(self) -> None:
+        """Signal the streaming thread to stop."""
+        self._stream_running = False
+
+    @staticmethod
+    def _on_trade_update(msg: dict[str, Any], callback: Callable[[dict[str, Any]], None]) -> None:
+        """Route trade_updates messages to *callback*."""
+        if msg.get("stream") == "trade_updates":
+            callback(msg)
+
     # -- Helpers ---------------------------------------------------------------
 
     def _handle(self, resp: httpx.Response) -> Any:
@@ -108,3 +147,44 @@ class AlpacaClient:
                 detail = resp.text
             raise AlpacaAPIError(resp.status_code, detail)
         return resp.json()
+
+
+def _run_stream(
+    ws_url: str,
+    api_key: str,
+    secret_key: str,
+    callback: Callable[[dict[str, Any]], None],
+    client: AlpacaClient,
+) -> None:
+    """Connect to Alpaca WebSocket and stream trade updates.
+
+    Reconnects with exponential backoff (1 s -> 30 s max) on failure.
+    """
+    backoff = 1.0
+    max_backoff = 30.0
+
+    async def _stream() -> None:
+        nonlocal backoff
+        async with websockets.asyncio.client.connect(ws_url) as ws:
+            # Authenticate
+            await ws.send(json.dumps({"action": "auth", "key": api_key, "secret": secret_key}))
+            await ws.recv()  # auth response
+
+            # Subscribe to trade_updates
+            await ws.send(json.dumps({"action": "listen", "data": {"streams": ["trade_updates"]}}))
+
+            backoff = 1.0  # reset on successful connection
+            while client._stream_running:
+                raw = await ws.recv()
+                msg = json.loads(raw)
+                AlpacaClient._on_trade_update(msg, callback)
+
+    while client._stream_running:
+        try:
+            asyncio.run(_stream())
+        except Exception:
+            if not client._stream_running:
+                break
+            logger.warning("WebSocket disconnected, reconnecting in %.1fs", backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
