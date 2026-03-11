@@ -90,7 +90,8 @@ warn_unused_configs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v -m 'not e2e'"
+addopts = "-v -m 'not e2e and not integration'"
 markers = [
     "e2e: end-to-end tests requiring live LLM API (deselected by default)",
+    "integration: integration tests requiring external API (deselected by default)",
 ]
