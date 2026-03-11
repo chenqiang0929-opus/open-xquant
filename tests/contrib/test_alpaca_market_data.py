@@ -26,17 +26,18 @@ _LATEST_RESPONSE = {
 
 
 class TestGetBars:
-    def test_returns_dict_of_dataframes(self):
+    """get_bars(symbol, ...) returns a single DataFrame (protocol-compatible)."""
+
+    def test_returns_dataframe(self):
         provider = AlpacaMarketDataProvider(api_key="k", secret_key="s")
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = _BARS_RESPONSE
         with patch.object(provider._http, "get", return_value=mock_resp):
-            result = provider.get_bars(["AAPL"], "2024-01-02", "2024-01-03")
-        assert "AAPL" in result
-        assert isinstance(result["AAPL"], pd.DataFrame)
-        assert list(result["AAPL"].columns) == ["open", "high", "low", "close", "volume"]
-        assert len(result["AAPL"]) == 2
+            result = provider.get_bars("AAPL", "2024-01-02", "2024-01-03")
+        assert isinstance(result, pd.DataFrame)
+        assert list(result.columns) == ["open", "high", "low", "close", "volume"]
+        assert len(result) == 2
 
     def test_datetime_index(self):
         provider = AlpacaMarketDataProvider(api_key="k", secret_key="s")
@@ -44,21 +45,52 @@ class TestGetBars:
         mock_resp.status_code = 200
         mock_resp.json.return_value = _BARS_RESPONSE
         with patch.object(provider._http, "get", return_value=mock_resp):
-            result = provider.get_bars(["AAPL"], "2024-01-02", "2024-01-03")
-        assert isinstance(result["AAPL"].index, pd.DatetimeIndex)
+            result = provider.get_bars("AAPL", "2024-01-02", "2024-01-03")
+        assert isinstance(result.index, pd.DatetimeIndex)
 
 
 class TestGetLatest:
-    def test_returns_single_row_dataframe(self):
+    """get_latest(symbol) returns a single Series (protocol-compatible)."""
+
+    def test_returns_series(self):
         provider = AlpacaMarketDataProvider(api_key="k", secret_key="s")
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = _LATEST_RESPONSE
         with patch.object(provider._http, "get", return_value=mock_resp):
-            result = provider.get_latest(["AAPL"])
+            result = provider.get_latest("AAPL")
+        assert isinstance(result, pd.Series)
+        assert result["close"] == 155.0
+
+
+class TestGetBarsMulti:
+    """get_bars_multi(symbols, ...) returns dict[str, DataFrame]."""
+
+    def test_returns_dict_of_dataframes(self):
+        provider = AlpacaMarketDataProvider(api_key="k", secret_key="s")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _BARS_RESPONSE
+        with patch.object(provider._http, "get", return_value=mock_resp):
+            result = provider.get_bars_multi(["AAPL"], "2024-01-02", "2024-01-03")
         assert "AAPL" in result
-        assert len(result["AAPL"]) == 1
-        assert result["AAPL"].iloc[0]["close"] == 155.0
+        assert isinstance(result["AAPL"], pd.DataFrame)
+        assert len(result["AAPL"]) == 2
+
+
+class TestGetLatestMulti:
+    """get_latest_multi(symbols) returns dict[str, Series]."""
+
+    def test_returns_dict_of_series(self):
+        provider = AlpacaMarketDataProvider(api_key="k", secret_key="s")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _LATEST_RESPONSE
+        with patch.object(provider._http, "get", return_value=mock_resp):
+            result = provider.get_latest_multi(["AAPL"])
+        assert "AAPL" in result
+        assert isinstance(result["AAPL"], pd.Series)
+        assert result["AAPL"]["close"] == 155.0
 
 
 class TestInit:
@@ -88,7 +120,7 @@ class TestFeedParam:
         mock_resp.status_code = 200
         mock_resp.json.return_value = _BARS_RESPONSE
         with patch.object(provider._http, "get", return_value=mock_resp) as mock_get:
-            provider.get_bars(["AAPL"], "2024-01-02", "2024-01-03")
+            provider.get_bars("AAPL", "2024-01-02", "2024-01-03")
         call_params = mock_get.call_args[1]["params"]
         assert call_params["feed"] == "sip"
 
@@ -98,6 +130,6 @@ class TestFeedParam:
         mock_resp.status_code = 200
         mock_resp.json.return_value = _LATEST_RESPONSE
         with patch.object(provider._http, "get", return_value=mock_resp) as mock_get:
-            provider.get_latest(["AAPL"])
+            provider.get_latest("AAPL")
         call_params = mock_get.call_args[1]["params"]
         assert call_params["feed"] == "iex"
