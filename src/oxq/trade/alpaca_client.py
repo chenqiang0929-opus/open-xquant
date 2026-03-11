@@ -62,6 +62,8 @@ class AlpacaClient:
 
         self._base_url = _PAPER_REST if paper else _LIVE_REST
         self._paper = paper
+        self._stream_running = False
+        self._stream_thread: threading.Thread | None = None
         self._http = httpx.Client(
             base_url=self._base_url,
             headers={
@@ -137,6 +139,10 @@ class AlpacaClient:
         if msg.get("stream") == "trade_updates":
             callback(msg)
 
+    def close(self) -> None:
+        """Close the HTTP client."""
+        self._http.close()
+
     # -- Helpers ---------------------------------------------------------------
 
     def _handle(self, resp: httpx.Response) -> Any:
@@ -169,14 +175,19 @@ def _run_stream(
         async with websockets.asyncio.client.connect(ws_url) as ws:
             # Authenticate
             await ws.send(json.dumps({"action": "auth", "key": api_key, "secret": secret_key}))
-            await ws.recv()  # auth response
+            auth_resp = json.loads(await ws.recv())
+            if auth_resp.get("data", {}).get("status") != "authorized":
+                raise ConnectionError(f"Alpaca auth failed: {auth_resp}")
 
             # Subscribe to trade_updates
             await ws.send(json.dumps({"action": "listen", "data": {"streams": ["trade_updates"]}}))
 
             backoff = 1.0  # reset on successful connection
             while client._stream_running:
-                raw = await ws.recv()
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                except TimeoutError:
+                    continue
                 msg = json.loads(raw)
                 AlpacaClient._on_trade_update(msg, callback)
 

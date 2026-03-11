@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from decimal import Decimal
 from typing import Any
 
@@ -34,6 +35,7 @@ class LiveBroker:
         self._client = AlpacaClient(api_key=api_key, secret_key=secret_key, paper=paper)
         self._order_book = OrderBook()
         self._fills: list[Fill] = []
+        self._lock = threading.Lock()
         self._id_map: dict[str, ManagedOrder] = {}
         self._client.start_trade_stream(self._on_ws_message)
 
@@ -70,9 +72,10 @@ class LiveBroker:
         list[Fill]
             Fills received since the last call.
         """
-        fills = list(self._fills)
-        self._fills.clear()
-        return fills
+        with self._lock:
+            fills = self._fills
+            self._fills = []
+            return fills
 
     # -- Broker lifecycle hooks ------------------------------------------------
 
@@ -172,11 +175,13 @@ class LiveBroker:
         filled_price = Decimal(order_data.get("filled_avg_price", "0"))
         filled_at = order_data.get("filled_at", "")
         fill = self._order_book.fill(managed, filled_price, filled_at, fee=Decimal("0"))
-        self._fills.append(fill)
+        with self._lock:
+            self._fills.append(fill)
 
     def close(self) -> None:
-        """Stop the WebSocket stream."""
+        """Stop the WebSocket stream and close the HTTP client."""
         self._client.stop_trade_stream()
+        self._client.close()
 
 
 def _order_to_alpaca(order: Order) -> dict[str, str]:

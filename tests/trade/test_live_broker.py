@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from oxq.core.types import Order
+from oxq.core.types import Broker, Order
 from oxq.trade.live_broker import LiveBroker
 
 
@@ -168,12 +168,19 @@ class TestOnWsMessage:
         assert broker.get_fills() == []
 
 
+class TestProtocolCompliance:
+    def test_satisfies_broker_protocol(self, mock_client):
+        broker, _ = mock_client
+        assert isinstance(broker, Broker)
+
+
 class TestClose:
     def test_close_stops_trade_stream(self, mock_client):
-        """close() delegates to client.stop_trade_stream()."""
+        """close() delegates to client.stop_trade_stream() and client.close()."""
         broker, client = mock_client
         broker.close()
         client.stop_trade_stream.assert_called_once()
+        client.close.assert_called_once()
 
 
 class TestCancelOrders:
