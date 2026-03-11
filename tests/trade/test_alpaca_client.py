@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from oxq.trade.alpaca_client import AlpacaClient, AlpacaAPIError
+from oxq.trade.alpaca_client import AlpacaAPIError, AlpacaClient
 
 
 class TestAlpacaClientInit:
