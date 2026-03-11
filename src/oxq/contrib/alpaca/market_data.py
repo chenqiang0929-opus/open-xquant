@@ -23,12 +23,15 @@ class AlpacaMarketDataProvider:
         Alpaca API key. Falls back to ALPACA_API_KEY env var.
     secret_key : str or None
         Alpaca secret key. Falls back to ALPACA_SECRET_KEY env var.
+    feed : str
+        Data feed. ``"iex"`` (default, free) or ``"sip"`` (paid, all exchanges).
     """
 
     def __init__(
         self,
         api_key: str | None = None,
         secret_key: str | None = None,
+        feed: str = "iex",
     ) -> None:
         self._api_key = api_key or os.environ.get("ALPACA_API_KEY", "")
         self._secret_key = secret_key or os.environ.get("ALPACA_SECRET_KEY", "")
@@ -36,6 +39,7 @@ class AlpacaMarketDataProvider:
             msg = "API key and secret key required. Set ALPACA_API_KEY/ALPACA_SECRET_KEY or pass explicitly."
             raise ValueError(msg)
 
+        self._feed = feed
         self._http = httpx.Client(
             base_url=_DATA_BASE_URL,
             headers={
@@ -75,6 +79,7 @@ class AlpacaMarketDataProvider:
             "end": end,
             "limit": "10000",
             "adjustment": "raw",
+            "feed": self._feed,
         }
         resp = self._http.get("/v2/stocks/bars", params=params)
         data = self._handle(resp)
@@ -96,7 +101,7 @@ class AlpacaMarketDataProvider:
         dict[str, pd.DataFrame]
             Single-row DataFrames per symbol.
         """
-        params: dict[str, str] = {"symbols": ",".join(symbols)}
+        params: dict[str, str] = {"symbols": ",".join(symbols), "feed": self._feed}
         resp = self._http.get("/v2/stocks/bars/latest", params=params)
         data = self._handle(resp)
         result: dict[str, pd.DataFrame] = {}

@@ -71,3 +71,33 @@ class TestInit:
         monkeypatch.setenv("ALPACA_SECRET_KEY", "env_secret")
         provider = AlpacaMarketDataProvider()
         assert provider._api_key == "env_key"
+
+    def test_default_feed_is_iex(self):
+        provider = AlpacaMarketDataProvider(api_key="k", secret_key="s")
+        assert provider._feed == "iex"
+
+    def test_custom_feed(self):
+        provider = AlpacaMarketDataProvider(api_key="k", secret_key="s", feed="sip")
+        assert provider._feed == "sip"
+
+
+class TestFeedParam:
+    def test_get_bars_passes_feed(self):
+        provider = AlpacaMarketDataProvider(api_key="k", secret_key="s", feed="sip")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _BARS_RESPONSE
+        with patch.object(provider._http, "get", return_value=mock_resp) as mock_get:
+            provider.get_bars(["AAPL"], "2024-01-02", "2024-01-03")
+        call_params = mock_get.call_args[1]["params"]
+        assert call_params["feed"] == "sip"
+
+    def test_get_latest_passes_feed(self):
+        provider = AlpacaMarketDataProvider(api_key="k", secret_key="s")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _LATEST_RESPONSE
+        with patch.object(provider._http, "get", return_value=mock_resp) as mock_get:
+            provider.get_latest(["AAPL"])
+        call_params = mock_get.call_args[1]["params"]
+        assert call_params["feed"] == "iex"
