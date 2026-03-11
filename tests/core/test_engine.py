@@ -523,3 +523,36 @@ def test_rebalance_clears_stale_stop_orders() -> None:
     # Cash should be reasonable
     assert result.portfolio.cash > 0
     assert result.portfolio.cash < Decimal(str(100_000 * 3))
+
+
+class TestEngineStep:
+    def test_step_matches_run(self):
+        """step() called for each date should produce same result as run()."""
+        data = _make_trending_data()
+        strategy = _make_strategy()
+
+        # Run via run()
+        engine1 = Engine()
+        result1 = engine1.run(
+            strategy, market=FakeMarketDataProvider(data), broker=SimBroker(),
+            start="2024-01-01", end="2024-12-31",
+        )
+
+        # Run via setup() + step()
+        engine2 = Engine()
+        engine2.setup(
+            strategy=strategy,
+            market=FakeMarketDataProvider(data),
+            broker=SimBroker(),
+            start="2024-01-01",
+            end="2024-12-31",
+        )
+        for date in engine2.dates:
+            engine2.step(date)
+        result2 = engine2.result
+
+        # Equity curves should match
+        assert len(result1.equity_curve) == len(result2.equity_curve)
+        for (d1, v1), (d2, v2) in zip(result1.equity_curve, result2.equity_curve):
+            assert d1 == d2
+            assert abs(v1 - v2) < 0.01
