@@ -1,0 +1,115 @@
+"""Tests for AlpacaClient REST methods."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from oxq.trade.alpaca_client import AlpacaClient, AlpacaAPIError
+
+
+class TestAlpacaClientInit:
+    def test_paper_base_url(self):
+        client = AlpacaClient(api_key="test", secret_key="secret", paper=True)
+        assert "paper-api" in client._base_url
+
+    def test_live_base_url(self):
+        client = AlpacaClient(api_key="test", secret_key="secret", paper=False)
+        assert "paper-api" not in client._base_url
+
+    def test_env_vars_fallback(self, monkeypatch):
+        monkeypatch.setenv("ALPACA_API_KEY", "env_key")
+        monkeypatch.setenv("ALPACA_SECRET_KEY", "env_secret")
+        client = AlpacaClient()
+        assert client._api_key == "env_key"
+        assert client._secret_key == "env_secret"
+
+    def test_constructor_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("ALPACA_API_KEY", "env_key")
+        client = AlpacaClient(api_key="explicit", secret_key="explicit_s")
+        assert client._api_key == "explicit"
+
+    def test_missing_credentials_raises(self, monkeypatch):
+        monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+        monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+        with pytest.raises(ValueError, match="API key"):
+            AlpacaClient()
+
+
+class TestSubmitOrder:
+    def test_submit_market_order(self):
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "alpaca-order-1",
+            "status": "accepted",
+        }
+        with patch.object(client._http, "post", return_value=mock_response):
+            result = client.submit_order({
+                "symbol": "AAPL",
+                "side": "buy",
+                "qty": "100",
+                "type": "market",
+                "time_in_force": "day",
+            })
+        assert result["id"] == "alpaca-order-1"
+
+    def test_submit_order_api_error(self):
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 422
+        mock_response.json.return_value = {"message": "invalid qty"}
+        mock_response.raise_for_status.side_effect = Exception("422")
+        with patch.object(client._http, "post", return_value=mock_response):
+            with pytest.raises(AlpacaAPIError):
+                client.submit_order({"symbol": "AAPL"})
+
+
+class TestGetOrder:
+    def test_get_order(self):
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "abc123",
+            "status": "filled",
+            "filled_avg_price": "150.25",
+        }
+        with patch.object(client._http, "get", return_value=mock_response):
+            result = client.get_order("abc123")
+        assert result["status"] == "filled"
+
+
+class TestCancelOrder:
+    def test_cancel_order(self):
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 204
+        mock_response.json.return_value = {}
+        with patch.object(client._http, "delete", return_value=mock_response):
+            client.cancel_order("abc123")
+
+
+class TestListOpenOrders:
+    def test_list_all(self):
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {"id": "o1", "symbol": "AAPL"},
+            {"id": "o2", "symbol": "GOOG"},
+        ]
+        with patch.object(client._http, "get", return_value=mock_response):
+            result = client.list_open_orders()
+        assert len(result) == 2
+
+    def test_list_by_symbol(self):
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [{"id": "o1", "symbol": "AAPL"}]
+        with patch.object(client._http, "get", return_value=mock_response):
+            result = client.list_open_orders(symbol="AAPL")
+        assert len(result) == 1
