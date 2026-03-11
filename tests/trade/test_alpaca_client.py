@@ -89,7 +89,8 @@ class TestCancelOrder:
         mock_response.status_code = 204
         mock_response.json.return_value = {}
         with patch.object(client._http, "delete", return_value=mock_response):
-            client.cancel_order("abc123")
+            result = client.cancel_order("abc123")
+        assert result == {}
 
 
 class TestListOpenOrders:
@@ -110,6 +111,52 @@ class TestListOpenOrders:
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = [{"id": "o1", "symbol": "AAPL"}]
-        with patch.object(client._http, "get", return_value=mock_response):
+        with patch.object(client._http, "get", return_value=mock_response) as mock_get:
             result = client.list_open_orders(symbol="AAPL")
         assert len(result) == 1
+        mock_get.assert_called_once_with(
+            "/v2/orders", params={"status": "open", "symbols": "AAPL"},
+        )
+
+
+class TestGetPositions:
+    def test_get_positions(self):
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {"symbol": "AAPL", "qty": "10", "avg_entry_price": "150.00"},
+            {"symbol": "GOOG", "qty": "5", "avg_entry_price": "2800.00"},
+        ]
+        with patch.object(client._http, "get", return_value=mock_response):
+            result = client.get_positions()
+        assert len(result) == 2
+        assert result[0]["symbol"] == "AAPL"
+
+
+class TestGetAccount:
+    def test_get_account(self):
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "account-1",
+            "status": "ACTIVE",
+            "equity": "100000.00",
+        }
+        with patch.object(client._http, "get", return_value=mock_response):
+            result = client.get_account()
+        assert result["status"] == "ACTIVE"
+        assert result["equity"] == "100000.00"
+
+
+class TestHandleError:
+    def test_non_json_error_response(self):
+        """When resp.json() raises (e.g. HTML 502), _handle falls back to resp.text."""
+        client = AlpacaClient(api_key="k", secret_key="s")
+        mock_response = MagicMock()
+        mock_response.status_code = 502
+        mock_response.json.side_effect = ValueError("No JSON")
+        mock_response.text = "<html>Bad Gateway</html>"
+        with pytest.raises(AlpacaAPIError, match="Bad Gateway"):
+            client._handle(mock_response)

@@ -1200,6 +1200,7 @@ akshare = [
     { name = "akshare" },
 ]
 dev = [
+    { name = "httpx" },
     { name = "mcp" },
     { name = "mypy" },
     { name = "pandas-stubs" },
@@ -1207,9 +1208,14 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "websockets" },
 ]
 docs = [
     { name = "mkdocs-material" },
+]
+live = [
+    { name = "httpx" },
+    { name = "websockets" },
 ]
 mcp = [
     { name = "mcp" },
@@ -1224,6 +1230,8 @@ yfinance = [
 [package.metadata]
 requires-dist = [
     { name = "akshare", marker = "extra == 'akshare'", specifier = ">=1.10" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'live'", specifier = ">=0.27" },
     { name = "mcp", marker = "extra == 'agent'", specifier = ">=1.0" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.0" },
     { name = "mcp", marker = "extra == 'mcp'" },
@@ -1241,9 +1249,11 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "streamlit", marker = "extra == 'agent'", specifier = ">=1.30" },
     { name = "ta-lib", marker = "extra == 'talib'" },
+    { name = "websockets", marker = "extra == 'dev'", specifier = ">=13.0" },
+    { name = "websockets", marker = "extra == 'live'", specifier = ">=13.0" },
     { name = "yfinance", marker = "extra == 'yfinance'", specifier = ">=0.2" },
 ]
-provides-extras = ["mcp", "yfinance", "akshare", "talib", "agent", "dev", "docs"]
+provides-extras = ["mcp", "yfinance", "akshare", "talib", "live", "agent", "dev", "docs"]
 
 [[package]]
 name = "openai"
