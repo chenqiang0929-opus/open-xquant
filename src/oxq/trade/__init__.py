@@ -1,4 +1,5 @@
 from oxq.trade.fees import FeeModel, PercentageFee
+from oxq.trade.order_generator import PlannedOrder, generate_orders
 from oxq.trade.sim_broker import FillPriceMode, SimBroker
 from oxq.trade.slippage import PercentageSlippage, SlippageModel
 
@@ -7,8 +8,10 @@ __all__ = [
     "FillPriceMode",
     "PercentageFee",
     "PercentageSlippage",
+    "PlannedOrder",
     "SimBroker",
     "SlippageModel",
+    "generate_orders",
 ]
 
 # LiveBroker is only available when httpx + websockets are installed
