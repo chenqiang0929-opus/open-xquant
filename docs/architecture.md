@@ -32,7 +32,9 @@ open-xquant/
 │   ├── rules/                      # 交易规则（入场、出场、仓位管理、风控、再平衡）
 │   ├── portfolio/                  # 组合管理（持仓、订单簿、记账、绩效分析）
 │   ├── optimize/                   # 参数优化（网格/随机/贝叶斯搜索、滚动前推、统计检验）
-│   ├── trade/                      # 交易执行（SimBroker、费率、滑点、交易所配置）
+│   ├── trade/                      # 交易执行（SimBroker、LiveBroker、费率、滑点、OrderGenerator）
+│   ├── contrib/                    # 第三方券商/数据源集成（按券商组织）
+│   │   └── alpaca/                # Alpaca 集成（AlpacaClient、AlpacaMarketDataProvider）
 │   ├── universe/                   # Universe 构建（静态池、指数成分、条件过滤）
 │   ├── data/                       # 数据层（Provider 协议、行情/因子数据、数据加载）
 │   ├── observe/                    # 可观测性（追踪、日志、事件总线、审计）
@@ -450,8 +452,8 @@ class Broker(OrderRouter, FillReceiver, Protocol):
 | 模式 | MarketDataProvider | Broker |
 |---|---|---|
 | **回测** | `LocalMarketDataProvider` — 加载本地 Parquet | `SimBroker` — 模拟撮合 |
-| **Paper Trade（未来）** | `RealtimeDataProvider` — 实时行情 | `SimBroker` |
-| **实盘（未来）** | `RealtimeDataProvider` — 实时行情 | `LiveBroker` — 券商 API |
+| **Paper Trade** | `AlpacaMarketDataProvider` — Alpaca 行情 | `SimBroker` |
+| **实盘** | `AlpacaMarketDataProvider` — Alpaca 行情 | `LiveBroker` — Alpaca API |
 
 Strategy 的 `universe` 字段在构造时设定，`engine.run()` 通过关键字参数注入 Provider：
 
@@ -716,8 +718,8 @@ Engine 是通用策略执行引擎，执行 Universe → Indicator → Signal �
 | 模式 | MarketDataProvider | Broker |
 |------|-------------------|--------|
 | 回测 | `LocalMarketDataProvider` | `SimBroker` |
-| 模拟盘（未来） | `RealtimeDataProvider` | `SimBroker` |
-| 实盘（未来） | `RealtimeDataProvider` | `LiveBroker` |
+| 模拟盘 | `AlpacaMarketDataProvider` | `SimBroker` |
+| 实盘 | `AlpacaMarketDataProvider` | `LiveBroker` |
 
 **`Engine.run()` 签名**：
 
