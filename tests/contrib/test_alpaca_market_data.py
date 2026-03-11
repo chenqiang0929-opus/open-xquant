@@ -48,6 +48,15 @@ class TestGetBars:
             result = provider.get_bars("AAPL", "2024-01-02", "2024-01-03")
         assert isinstance(result.index, pd.DatetimeIndex)
 
+    def test_index_is_tz_naive(self):
+        provider = AlpacaMarketDataProvider(api_key="k", secret_key="s")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = _BARS_RESPONSE
+        with patch.object(provider._http, "get", return_value=mock_resp):
+            result = provider.get_bars("AAPL", "2024-01-02", "2024-01-03")
+        assert result.index.tz is None
+
 
 class TestGetLatest:
     """get_latest(symbol) returns a single Series (protocol-compatible)."""

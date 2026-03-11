@@ -195,4 +195,5 @@ def _bar_to_df(bars: list[dict[str, Any]]) -> pd.DataFrame:
     df = pd.DataFrame(records)
     df = df.set_index("timestamp")
     df.index = df.index.normalize()  # strip time, keep date
+    df.index = df.index.tz_localize(None)  # tz-naive to match LocalMarketDataProvider
     return df
