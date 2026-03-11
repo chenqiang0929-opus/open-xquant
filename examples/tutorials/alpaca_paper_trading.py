@@ -348,7 +348,7 @@ def section_4_execution_report() -> None:
 
     # 汇总统计
     s = report.summary()
-    print(f"\n  汇总:")
+    print("\n  汇总:")
     print(f"    总交易笔数:   {s['total_trades']}")
     print(f"    匹配交易:     {s['matched_trades']}")
     print(f"    仅回测有:     {s['sim_only_trades']}")
@@ -470,7 +470,7 @@ def main() -> None:
     print("  从回测到模拟交易的完整工作流")
     print()
 
-    fills_by_mode = section_1_fill_price_modes()
+    section_1_fill_price_modes()
     section_2_order_generator()
     section_3_engine_step()
     section_4_execution_report()
