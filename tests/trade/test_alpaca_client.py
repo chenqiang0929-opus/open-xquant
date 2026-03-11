@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from oxq.trade.alpaca_client import AlpacaAPIError, AlpacaClient
+from oxq.contrib.alpaca.client import AlpacaAPIError, AlpacaClient
 
 
 class TestAlpacaClientInit:
@@ -161,7 +161,7 @@ class TestTradeStream:
         def _blocking_run(*args, **kwargs):
             gate.wait()
 
-        with patch("oxq.trade.alpaca_client._run_stream", side_effect=_blocking_run):
+        with patch("oxq.contrib.alpaca.client._run_stream", side_effect=_blocking_run):
             client.start_trade_stream(lambda msg: fills.append(msg))
             assert client._stream_thread is not None
             assert client._stream_thread.is_alive()

@@ -266,7 +266,7 @@ def _order_to_my_broker(order: Order) -> dict[str, str]:
 
 For a complete working example, see:
 
-- **`src/oxq/trade/alpaca_client.py`** — Client layer (REST + WebSocket)
+- **`src/oxq/contrib/alpaca/client.py`** — Client layer (REST + WebSocket)
 - **`src/oxq/trade/live_broker.py`** — Broker layer (Protocol implementation)
 - **`src/oxq/portfolio/orderbook.py`** — Reusable order lifecycle management
 - **`src/oxq/core/types.py`** — `Order`, `Fill`, `Position`, `Broker` Protocol

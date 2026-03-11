@@ -8,9 +8,9 @@ from typing import Any
 
 import pandas as pd
 
+from oxq.contrib.alpaca.client import AlpacaClient
 from oxq.core.types import Fill, Order
 from oxq.portfolio.orderbook import ManagedOrder, OrderBook
-from oxq.trade.alpaca_client import AlpacaClient
 
 
 class LiveBroker:

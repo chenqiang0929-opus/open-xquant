@@ -13,7 +13,7 @@ __all__ = [
 
 # LiveBroker is only available when httpx + websockets are installed
 try:
-    from oxq.trade.alpaca_client import AlpacaAPIError, AlpacaClient
+    from oxq.contrib.alpaca.client import AlpacaAPIError, AlpacaClient
     from oxq.trade.live_broker import LiveBroker
 
     __all__ += ["AlpacaAPIError", "AlpacaClient", "LiveBroker"]
