@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from enum import Enum
 
 import pandas as pd
 
@@ -10,6 +11,15 @@ from oxq.core.types import Fill, Order
 from oxq.portfolio.orderbook import ManagedOrder, OrderBook
 from oxq.trade.fees import FeeModel
 from oxq.trade.slippage import SlippageModel
+
+
+class FillPriceMode(Enum):
+    """Fill price mode for market orders."""
+
+    CLOSE = "close"
+    NEXT_OPEN = "next_open"
+    NEXT_HIGH = "next_high"
+    NEXT_LOW = "next_low"
 
 
 class SimBroker:
@@ -41,9 +51,11 @@ class SimBroker:
         self,
         fee_model: FeeModel | None = None,
         slippage_model: SlippageModel | None = None,
+        fill_price_mode: FillPriceMode = FillPriceMode.CLOSE,
     ) -> None:
         self._fee_model = fee_model
         self._slippage_model = slippage_model
+        self._fill_price_mode = fill_price_mode
         self._order_book = OrderBook()
         self._pending_market: list[ManagedOrder] = []
         self._fills: list[Fill] = []
@@ -144,7 +156,7 @@ class SimBroker:
     def fill_market_orders(
         self, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
     ) -> None:
-        """Fill all pending market orders at each symbol's close price.
+        """Fill all pending market orders at the configured fill price.
 
         Parameters
         ----------
@@ -153,14 +165,18 @@ class SimBroker:
         date : pd.Timestamp
             Current bar date.
         """
+        still_pending: list[ManagedOrder] = []
         for managed in self._pending_market:
             order = managed.order
-            raw_price = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))  # type: ignore[arg-type]
+            raw_price = self._get_fill_price(order.symbol, mktdata, date)
+            if raw_price is None:
+                still_pending.append(managed)
+                continue
             fill_price = self._apply_slippage(order, raw_price)
             fee = self._calc_fee(order, fill_price)
             fill = self._order_book.fill(managed, fill_price, str(date), fee)
             self._fills.append(fill)
-        self._pending_market.clear()
+        self._pending_market = still_pending
 
     # -- FillReceiver ---------------------------------------------------------
 
@@ -239,6 +255,26 @@ class SimBroker:
         self.fill_market_orders(mktdata, date)
 
     # -- Private helpers ------------------------------------------------------
+
+    def _get_fill_price(
+        self, symbol: str, mktdata: dict[str, pd.DataFrame], date: pd.Timestamp,
+    ) -> Decimal | None:
+        """Get fill price based on fill_price_mode."""
+        df = mktdata[symbol]
+        if self._fill_price_mode == FillPriceMode.CLOSE:
+            return Decimal(str(float(df.loc[date, "close"])))  # type: ignore[arg-type]
+
+        # NEXT_* modes: find next bar
+        idx = df.index.get_loc(date)
+        if idx + 1 >= len(df):
+            return None  # no next bar
+        next_date = df.index[idx + 1]
+        col = {
+            FillPriceMode.NEXT_OPEN: "open",
+            FillPriceMode.NEXT_HIGH: "high",
+            FillPriceMode.NEXT_LOW: "low",
+        }[self._fill_price_mode]
+        return Decimal(str(float(df.loc[next_date, col])))  # type: ignore[arg-type]
 
     def _apply_slippage(self, order: Order, price: Decimal) -> Decimal:
         if self._slippage_model:

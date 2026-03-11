@@ -6,7 +6,7 @@ import pandas as pd
 
 from oxq.core.types import Broker, FillReceiver, Order, OrderRouter
 from oxq.trade.fees import PercentageFee
-from oxq.trade.sim_broker import SimBroker
+from oxq.trade.sim_broker import FillPriceMode, SimBroker
 from oxq.trade.slippage import PercentageSlippage
 
 
@@ -499,3 +499,62 @@ def test_market_orders_do_not_accumulate() -> None:
         broker.get_fills()  # drain fills
         # No open orders should remain after each fill
         assert len(broker.get_open_orders()) == 0, f"Open orders remain after bar {i}"
+
+
+class TestFillPriceMode:
+    def _make_mktdata(self):
+        """Two-bar dataset: bar0 close=100, bar1 open=102 high=105 low=98 close=101."""
+        dates = pd.date_range("2024-01-01", periods=2)
+        df = pd.DataFrame({
+            "open": [100.0, 102.0],
+            "high": [101.0, 105.0],
+            "low": [99.0, 98.0],
+            "close": [100.0, 101.0],
+            "volume": [1000, 1000],
+        }, index=dates)
+        return {"AAPL": df}, dates
+
+    def test_close_mode(self):
+        """Default mode fills at current bar close."""
+        mktdata, dates = self._make_mktdata()
+        broker = SimBroker(fill_price_mode=FillPriceMode.CLOSE)
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=10))
+        broker.on_bar_close(mktdata, dates[0])
+        fills = broker.get_fills()
+        assert fills[0].filled_price == Decimal("100")
+
+    def test_next_open_mode(self):
+        """NEXT_OPEN fills at next bar's open price."""
+        mktdata, dates = self._make_mktdata()
+        broker = SimBroker(fill_price_mode=FillPriceMode.NEXT_OPEN)
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=10))
+        broker.on_bar_close(mktdata, dates[0])
+        fills = broker.get_fills()
+        assert fills[0].filled_price == Decimal("102")
+
+    def test_next_high_mode(self):
+        """NEXT_HIGH fills at next bar's high price."""
+        mktdata, dates = self._make_mktdata()
+        broker = SimBroker(fill_price_mode=FillPriceMode.NEXT_HIGH)
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=10))
+        broker.on_bar_close(mktdata, dates[0])
+        fills = broker.get_fills()
+        assert fills[0].filled_price == Decimal("105")
+
+    def test_next_low_mode(self):
+        """NEXT_LOW fills at next bar's low price."""
+        mktdata, dates = self._make_mktdata()
+        broker = SimBroker(fill_price_mode=FillPriceMode.NEXT_LOW)
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=10))
+        broker.on_bar_close(mktdata, dates[0])
+        fills = broker.get_fills()
+        assert fills[0].filled_price == Decimal("98")
+
+    def test_next_mode_last_bar_skips(self):
+        """NEXT_OPEN on last bar -> no fill (no next bar)."""
+        mktdata, dates = self._make_mktdata()
+        broker = SimBroker(fill_price_mode=FillPriceMode.NEXT_OPEN)
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=10))
+        broker.on_bar_close(mktdata, dates[1])  # last bar
+        fills = broker.get_fills()
+        assert len(fills) == 0
