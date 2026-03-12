@@ -33,6 +33,9 @@ Thumbs.db
 # Worktrees
 .worktrees/
 
+# Secrets
+.env
+
 # Project specific
 *.h5
 *.hdf5

@@ -168,6 +168,30 @@ class TestOnWsMessage:
         assert broker.get_fills() == []
 
 
+class TestAccountAndPositions:
+    def test_get_account_delegates(self, mock_client):
+        broker, client = mock_client
+        client.get_account.return_value = {"status": "ACTIVE", "equity": "100000"}
+        result = broker.get_account()
+        assert result["status"] == "ACTIVE"
+        client.get_account.assert_called_once()
+
+    def test_get_positions_detail_delegates(self, mock_client):
+        broker, client = mock_client
+        client.get_positions.return_value = [{"symbol": "AAPL", "qty": "50"}]
+        result = broker.get_positions_detail()
+        assert len(result) == 1
+        assert result[0]["symbol"] == "AAPL"
+        client.get_positions.assert_called_once()
+
+    def test_get_order_status_delegates(self, mock_client):
+        broker, client = mock_client
+        client.get_order.return_value = {"id": "abc", "status": "filled"}
+        result = broker.get_order_status("abc")
+        assert result["status"] == "filled"
+        client.get_order.assert_called_once_with("abc")
+
+
 class TestProtocolCompliance:
     def test_satisfies_broker_protocol(self, mock_client):
         broker, _ = mock_client

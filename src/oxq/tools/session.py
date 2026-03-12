@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from oxq.contrib.alpaca.market_data import AlpacaMarketDataProvider
     from oxq.core.strategy import Strategy
     from oxq.optimize.paramset import ParameterSet
     from oxq.optimize.search import SearchResult
     from oxq.optimize.validation import CVResult
     from oxq.optimize.walk_forward import WalkForwardResult
     from oxq.portfolio.analytics import RunResult
+    from oxq.trade.live_broker import LiveBroker
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,10 @@ _paramsets: dict[str, ParameterSet] = {}
 _search_results: dict[str, SearchResult] = {}
 _wf_results: dict[str, WalkForwardResult] = {}
 _cv_results: dict[str, CVResult] = {}
+
+# Live trading state (not persisted — requires fresh connect each session)
+_live_broker: LiveBroker | None = None
+_live_market: AlpacaMarketDataProvider | None = None
 
 
 def _save() -> None:
@@ -70,12 +76,17 @@ def _load() -> None:
 
 def clear() -> None:
     """Reset session state (for testing and Clear Chat)."""
+    global _live_broker, _live_market
     _strategies.clear()
     _run_results.clear()
     _paramsets.clear()
     _search_results.clear()
     _wf_results.clear()
     _cv_results.clear()
+    if _live_broker is not None:
+        _live_broker.close()
+        _live_broker = None
+    _live_market = None
     _SESSION_FILE.unlink(missing_ok=True)
 
 

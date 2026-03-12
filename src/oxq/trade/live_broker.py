@@ -39,6 +39,20 @@ class LiveBroker:
         self._id_map: dict[str, ManagedOrder] = {}
         self._client.start_trade_stream(self._on_ws_message)
 
+    # -- Account & Positions ---------------------------------------------------
+
+    def get_account(self) -> dict[str, Any]:
+        """Get account info (status, equity, buying power, etc.)."""
+        return self._client.get_account()
+
+    def get_positions_detail(self) -> list[dict[str, Any]]:
+        """Get current positions from the brokerage."""
+        return self._client.get_positions()
+
+    def get_order_status(self, order_id: str) -> dict[str, Any]:
+        """Get the status of a specific order by its Alpaca ID."""
+        return self._client.get_order(order_id)
+
     # -- OrderRouter -----------------------------------------------------------
 
     def submit_order(self, order: Order) -> str:
