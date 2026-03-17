@@ -254,6 +254,10 @@ class Engine:
         for s in universe.symbols:
             if date in mktdata[s].index:
                 close = Decimal(str(float(mktdata[s].loc[date, "close"])))
+                if not close.is_finite():
+                    if s in self._last_known_price:
+                        prices[s] = Decimal(str(self._last_known_price[s]))
+                    continue
                 self._last_known_price[s] = float(close)
                 prices[s] = close
             elif s in self._last_known_price:

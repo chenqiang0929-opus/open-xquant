@@ -137,6 +137,8 @@ class SizedEntryRule:
         if self.max_pct_equity is not None:
             from oxq.rules.sizing import clip_to_pct_equity
             price = Decimal(str(float(row["close"])))
+            if not price.is_finite():
+                return None
             prices = dict(portfolio.bar_prices) if portfolio.bar_prices else {}
             prices[symbol] = price  # ensure current symbol has latest price
             shares = clip_to_pct_equity(

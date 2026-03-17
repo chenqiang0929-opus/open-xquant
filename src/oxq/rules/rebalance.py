@@ -45,7 +45,7 @@ class RebalanceRule:
             target_weight = 0.0
 
         price = Decimal(str(float(row["close"])))
-        if price <= 0:
+        if not price.is_finite() or price <= 0:
             return None
 
         portfolio_value = _portfolio_value(portfolio, symbol, price)

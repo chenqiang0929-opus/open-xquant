@@ -558,3 +558,103 @@ class TestFillPriceMode:
         broker.on_bar_close(mktdata, dates[1])  # last bar
         fills = broker.get_fills()
         assert len(fills) == 0
+
+
+class TestNaNAndInfinityPrices:
+    """close price may be NaN or Infinity — broker must skip, not crash."""
+
+    def test_stop_order_nan_close_skips(self):
+        """NaN close should not trigger stop order or raise InvalidOperation."""
+        broker = SimBroker()
+        dates = pd.bdate_range("2024-01-01", periods=2)
+        mktdata = {
+            "AAPL": pd.DataFrame(
+                {"close": [float("nan"), 135.0]}, index=dates,
+            ),
+        }
+        broker.submit_order(Order(
+            symbol="AAPL", side="SELL", shares=100,
+            order_type="stop", stop_price=Decimal("140"),
+        ))
+        # Day 1: close=NaN, should skip gracefully (no fill, no crash)
+        broker.process_pending_orders(mktdata, dates[0])
+        assert len(broker.get_fills()) == 0
+        # Order still open
+        assert len(broker.get_open_orders()) == 1
+
+        # Day 2: close=135 <= 140, triggers normally
+        broker.process_pending_orders(mktdata, dates[1])
+        fills = broker.get_fills()
+        assert len(fills) == 1
+
+    def test_limit_order_nan_close_skips(self):
+        """NaN close should not trigger limit order or raise InvalidOperation."""
+        broker = SimBroker()
+        dates = pd.bdate_range("2024-01-01", periods=1)
+        mktdata = {
+            "AAPL": pd.DataFrame({"close": [float("nan")]}, index=dates),
+        }
+        broker.submit_order(Order(
+            symbol="AAPL", side="SELL", shares=100,
+            order_type="limit", limit_price=Decimal("180"),
+        ))
+        broker.process_pending_orders(mktdata, dates[0])
+        assert len(broker.get_fills()) == 0
+        assert len(broker.get_open_orders()) == 1
+
+    def test_trailing_stop_nan_close_skips(self):
+        """NaN close should not trigger trailing stop or corrupt high-water mark."""
+        broker = SimBroker()
+        dates = pd.bdate_range("2024-01-01", periods=2)
+        mktdata = {
+            "AAPL": pd.DataFrame(
+                {"close": [float("nan"), 100.0]}, index=dates,
+            ),
+        }
+        broker.submit_order(Order(
+            symbol="AAPL", side="SELL", shares=100,
+            order_type="trailing_stop", trail_pct=0.05,
+        ))
+        # Day 1: NaN should be skipped, high-water mark should NOT be set
+        broker.process_pending_orders(mktdata, dates[0])
+        assert len(broker.get_fills()) == 0
+
+        # Day 2: valid price, should initialize high-water mark normally
+        broker.process_pending_orders(mktdata, dates[1])
+        assert len(broker.get_fills()) == 0
+        managed = broker.get_open_orders()[0]
+        assert managed.trail_high_water == Decimal("100")
+
+    def test_market_order_nan_close_skips(self):
+        """NaN close should not fill market order."""
+        broker = SimBroker()
+        dates = pd.bdate_range("2024-01-01", periods=2)
+        mktdata = {
+            "AAPL": pd.DataFrame(
+                {"close": [float("nan"), 150.0]}, index=dates,
+            ),
+        }
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=100))
+        # Day 1: NaN close, should not fill
+        broker.fill_market_orders(mktdata, dates[0])
+        assert len(broker.get_fills()) == 0
+        # Order still pending, fills on day 2
+        broker.fill_market_orders(mktdata, dates[1])
+        fills = broker.get_fills()
+        assert len(fills) == 1
+        assert fills[0].filled_price == Decimal("150")
+
+    def test_stop_order_inf_close_skips(self):
+        """Infinity close should not trigger stop order."""
+        broker = SimBroker()
+        dates = pd.bdate_range("2024-01-01", periods=1)
+        mktdata = {
+            "AAPL": pd.DataFrame({"close": [float("inf")]}, index=dates),
+        }
+        broker.submit_order(Order(
+            symbol="AAPL", side="SELL", shares=100,
+            order_type="stop", stop_price=Decimal("140"),
+        ))
+        broker.process_pending_orders(mktdata, dates[0])
+        assert len(broker.get_fills()) == 0
+        assert len(broker.get_open_orders()) == 1

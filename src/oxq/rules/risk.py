@@ -78,6 +78,8 @@ class MaxDrawdownRisk:
         """
         if prices is None:
             price = Decimal(str(float(row["close"])))
+            if not price.is_finite():
+                return None, False
             prices = {symbol: price}
         current_value = portfolio.total_value(prices)
 
@@ -162,6 +164,8 @@ class DailyLossLimitRisk:
         bar_date = row.name if hasattr(row, "name") else None
         if prices is None:
             price = Decimal(str(float(row["close"])))
+            if not price.is_finite():
+                return None, False
             prices = {symbol: price}
         current_value = portfolio.total_value(prices)
 

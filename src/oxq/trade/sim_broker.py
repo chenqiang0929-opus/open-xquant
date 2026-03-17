@@ -123,6 +123,8 @@ class SimBroker:
                 continue
 
             close = Decimal(str(float(mktdata[order.symbol].loc[date, "close"])))  # type: ignore[arg-type]
+            if not close.is_finite():
+                continue
 
             if order.order_type == "stop":
                 triggered = self._check_stop(order, close)
@@ -262,7 +264,8 @@ class SimBroker:
         """Get fill price based on fill_price_mode."""
         df = mktdata[symbol]
         if self._fill_price_mode == FillPriceMode.CLOSE:
-            return Decimal(str(float(df.loc[date, "close"])))  # type: ignore[arg-type]
+            price = Decimal(str(float(df.loc[date, "close"])))  # type: ignore[arg-type]
+            return price if price.is_finite() else None
 
         # NEXT_* modes: find next bar
         idx = df.index.get_loc(date)
@@ -274,7 +277,8 @@ class SimBroker:
             FillPriceMode.NEXT_HIGH: "high",
             FillPriceMode.NEXT_LOW: "low",
         }[self._fill_price_mode]
-        return Decimal(str(float(df.loc[next_date, col])))  # type: ignore[arg-type]
+        price = Decimal(str(float(df.loc[next_date, col])))  # type: ignore[arg-type]
+        return price if price.is_finite() else None
 
     def _apply_slippage(self, order: Order, price: Decimal) -> Decimal:
         if self._slippage_model:
