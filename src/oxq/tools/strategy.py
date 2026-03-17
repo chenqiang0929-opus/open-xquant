@@ -355,3 +355,95 @@ def indicator_list() -> dict[str, Any]:
             for name, cls in sorted(INDICATOR_TYPES.items())
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Signal metadata tools
+# ---------------------------------------------------------------------------
+
+
+@registry.tool(
+    name="signal_describe",
+    description="Describe a signal type: show its parameters and usage",
+)
+def signal_describe(type: str) -> dict[str, Any]:
+    """Return signal metadata including parameters."""
+    cls = SIGNAL_TYPES.get(type)
+    if cls is None:
+        return {"error": f"Unknown signal '{type}'. Available: {sorted(SIGNAL_TYPES)}"}
+
+    sig = inspect.signature(cls().compute)
+    params = {
+        k: str(v.default) if v.default is not v.empty else "(required)"
+        for k, v in sig.parameters.items()
+        if k not in ("self", "mktdata")
+    }
+
+    return {
+        "name": getattr(cls, "name", type),
+        "description": (cls.__doc__ or "").strip(),
+        "params": params,
+    }
+
+
+@registry.tool(
+    name="signal_list",
+    description="List all available signal types with descriptions",
+)
+def signal_list() -> dict[str, Any]:
+    """Return all signal types with names and descriptions."""
+    return {
+        "signals": [
+            {
+                "name": name,
+                "description": (cls.__doc__ or "").split("\n")[0].strip(),
+            }
+            for name, cls in sorted(SIGNAL_TYPES.items())
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Rule metadata tools
+# ---------------------------------------------------------------------------
+
+
+@registry.tool(
+    name="rule_describe",
+    description="Describe a rule type: show its parameters and usage",
+)
+def rule_describe(type: str) -> dict[str, Any]:
+    """Return rule metadata including constructor parameters."""
+    cls = RULE_TYPES.get(type)
+    if cls is None:
+        return {"error": f"Unknown rule '{type}'. Available: {sorted(RULE_TYPES)}"}
+
+    sig = inspect.signature(cls.__init__)
+    params = {
+        k: str(v.default) if v.default is not v.empty else "(required)"
+        for k, v in sig.parameters.items()
+        if k != "self"
+    }
+
+    return {
+        "name": getattr(cls, "name", type),
+        "description": (cls.__doc__ or "").strip(),
+        "params": params,
+    }
+
+
+@registry.tool(
+    name="rule_list",
+    description="List all available rule types with descriptions",
+)
+def rule_list() -> dict[str, Any]:
+    """Return all rule types with names and descriptions."""
+    return {
+        "rules": [
+            {
+                "name": name,
+                "description": (cls.__doc__ or "").split("\n")[0].strip(),
+            }
+            for name, cls in sorted(RULE_TYPES.items())
+        ],
+    }
