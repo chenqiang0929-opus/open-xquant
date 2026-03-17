@@ -212,3 +212,68 @@ class TestSerialization:
         assert "experiments" in d
         assert isinstance(d["experiments"], list)
         assert d["experiments"][0]["name"] == "e1"
+
+
+class TestRunIdLinkage:
+    def test_experiment_has_run_id(self) -> None:
+        from oxq.observe.experiment import Experiment
+
+        exp = Experiment(
+            name="test", observation="obs", hypothesis="hyp",
+            criteria={}, result={}, conclusion="confirmed",
+            notes="", timestamp="2024-01-01T00:00:00",
+            run_id="run_abc123",
+        )
+        assert exp.run_id == "run_abc123"
+
+    def test_experiment_run_id_default_none(self) -> None:
+        from oxq.observe.experiment import Experiment
+
+        exp = Experiment(
+            name="test", observation="obs", hypothesis="hyp",
+            criteria={}, result={}, conclusion="confirmed",
+            notes="", timestamp="2024-01-01T00:00:00",
+        )
+        assert exp.run_id is None
+
+    def test_add_with_run_id(self) -> None:
+        from oxq.observe.experiment import ExperimentLog
+
+        log = ExperimentLog()
+        log.add(
+            name="e1", observation="o", hypothesis="h",
+            criteria={}, result={}, conclusion="confirmed",
+            run_id="run_xyz",
+        )
+        assert log.experiments[0].run_id == "run_xyz"
+
+    def test_add_from_strategy_with_run_id(self) -> None:
+        from oxq.core.strategy import Strategy
+        from oxq.observe.experiment import ExperimentLog
+        from oxq.universe.static import StaticUniverse
+
+        strategy = Strategy(
+            name="test", universe=StaticUniverse(("A",)),
+            indicators={}, signals={},
+            entry_rules=[], exit_rules=[],
+            hypothesis="test hyp",
+        )
+        result = _make_result([100, 105, 110])
+        log = ExperimentLog()
+        log.add_from_strategy(
+            strategy=strategy, result=result,
+            observation="test", conclusion="confirmed",
+            run_id="run_audit_001",
+        )
+        assert log.experiments[0].run_id == "run_audit_001"
+
+    def test_serialization_preserves_run_id(self) -> None:
+        from oxq.observe.experiment import ExperimentLog
+
+        log = ExperimentLog(name="test")
+        log.add(name="e1", observation="o", hypothesis="h",
+                criteria={}, result={}, conclusion="ok",
+                run_id="run_123")
+        d = log.to_dict()
+        restored = ExperimentLog.from_dict(d)
+        assert restored.experiments[0].run_id == "run_123"

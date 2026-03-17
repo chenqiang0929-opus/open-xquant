@@ -37,6 +37,7 @@ class Experiment:
     conclusion: str
     notes: str
     timestamp: str
+    run_id: str | None = None
 
 
 class ExperimentLog:
@@ -59,6 +60,7 @@ class ExperimentLog:
         result: dict[str, Any],
         conclusion: str,
         notes: str = "",
+        run_id: str | None = None,
     ) -> None:
         self._experiments.append(
             Experiment(
@@ -70,6 +72,7 @@ class ExperimentLog:
                 conclusion=conclusion,
                 notes=notes,
                 timestamp=datetime.now(tz=UTC).isoformat(),
+                run_id=run_id,
             ),
         )
 
@@ -80,6 +83,7 @@ class ExperimentLog:
         observation: str,
         conclusion: str,
         notes: str = "",
+        run_id: str | None = None,
     ) -> None:
         extracted: dict[str, Any] = {
             "total_return": result.total_return(),
@@ -102,6 +106,7 @@ class ExperimentLog:
             result=extracted,
             conclusion=conclusion,
             notes=notes,
+            run_id=run_id,
         )
 
     def to_dataframe(self) -> pd.DataFrame:
