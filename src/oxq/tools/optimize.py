@@ -124,8 +124,25 @@ def paramset_create(
 
 
 # ---------------------------------------------------------------------------
-# paramset_inspect
+# paramset_list / paramset_inspect
 # ---------------------------------------------------------------------------
+
+
+@registry.tool(
+    name="paramset_list",
+    description="List all parameter sets created in the current session",
+)
+def paramset_list() -> dict[str, Any]:
+    """Return names and summaries of all parameter sets in session state."""
+    items = []
+    for name, ps in sorted(session._paramsets.items()):
+        items.append({
+            "name": name,
+            "distributions": len(ps.distributions),
+            "constraints": len(ps.constraints),
+            "total_combinations": ps.total_combinations(),
+        })
+    return {"paramsets": items}
 
 
 @registry.tool(

@@ -109,6 +109,24 @@ def engine_run(
 
 
 @registry.tool(
+    name="run_list",
+    description="List all strategy runs in the current session with key metrics",
+)
+def run_list() -> dict[str, Any]:
+    """Return run IDs with summary metrics for all runs in session state."""
+    runs = []
+    for run_id, result in sorted(session._run_results.items()):
+        runs.append({
+            "run_id": run_id,
+            "total_return": round(result.total_return(), 4),
+            "sharpe_ratio": round(result.sharpe_ratio(), 4),
+            "max_drawdown": round(result.max_drawdown(), 4),
+            "total_trades": len(result.trades),
+        })
+    return {"runs": runs}
+
+
+@registry.tool(
     name="engine_results",
     description="Get performance metrics and objectives check for a run",
 )

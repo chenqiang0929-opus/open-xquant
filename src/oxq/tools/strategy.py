@@ -157,6 +157,32 @@ def strategy_create(
 
 
 @registry.tool(
+    name="strategy_list",
+    description="List all strategies created in the current session",
+)
+def strategy_list() -> dict[str, Any]:
+    """Return names and summaries of all strategies in session state."""
+    return {
+        "strategies": [
+            {
+                "name": name,
+                "hypothesis": strat.hypothesis,
+                "indicators": len(strat.indicators),
+                "signals": len(strat.signals),
+                "rules": (
+                    len(strat.entry_rules)
+                    + len(strat.exit_rules)
+                    + len(strat.order_rules)
+                    + len(strat.rebalance_rules)
+                    + len(strat.risk_rules)
+                ),
+            }
+            for name, strat in sorted(session._strategies.items())
+        ],
+    }
+
+
+@registry.tool(
     name="strategy_add_indicator",
     description="Add an indicator (e.g. SMA) to a strategy",
 )
