@@ -15,14 +15,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from oxq.contrib.alpaca.market_data import AlpacaMarketDataProvider
     from oxq.core.strategy import Strategy
+    from oxq.observe.detector import MarketStateDetector
+    from oxq.observe.experiment import ExperimentLog
+    from oxq.observe.monitor import StrategyMonitor
     from oxq.optimize.paramset import ParameterSet
     from oxq.optimize.search import SearchResult
     from oxq.optimize.validation import CVResult
     from oxq.optimize.walk_forward import WalkForwardResult
     from oxq.portfolio.analytics import RunResult
-    from oxq.observe.detector import MarketStateDetector
-    from oxq.observe.experiment import ExperimentLog
-    from oxq.observe.monitor import StrategyMonitor
     from oxq.trade.live_broker import LiveBroker
 
 logger = logging.getLogger(__name__)
