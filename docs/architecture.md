@@ -305,41 +305,44 @@ while cur_index <= total_bars:
 SparseVector = Dict[str, float]           # 权重/分数向量
 
 @dataclass(frozen=True)
-class Position:                           # 单个持仓
-    symbol: str
-    shares: Decimal
-    price: float
-    cost_basis: Decimal                   # 成本基础
-
-@dataclass
-class Portfolio:                          # 组合状态
-    positions: Dict[str, Position]
-    cash: Decimal
-    # total_value / get_actual_weights 等方法
-
-@dataclass(frozen=True)
-class RunContext:                          # 执行上下文
-    as_of_date: str
-    effective_date: str
-    data_version: str
-    portfolio: Portfolio
-    trace_id: str                         # 追踪 ID（可观测性）
-
-@dataclass(frozen=True)
-class Order:                              # 订单
-    id: str
+class Order:                              # 不可变订单请求
     symbol: str
     side: Literal["BUY", "SELL"]
-    order_type: Literal["market", "limit", "stop", "stop_limit", "trailing_stop"]
     shares: int
-    limit_price: Optional[Decimal]
-    stop_price: Optional[Decimal]
-    trail_pct: Optional[float]
+    order_type: Literal["market", "limit", "stop", "stop_limit", "trailing_stop"] = "market"
+    limit_price: Decimal | None = None
+    stop_price: Decimal | None = None
+    trail_pct: float | None = None
+
+@dataclass(frozen=True)
+class Fill:                               # 成交回报
+    order: Order
+    filled_price: Decimal                 # 实际成交价（含滑点）
+    filled_at: str                        # ISO 日期
+    fee: Decimal = Decimal("0")
+
+class ManagedOrder:                       # 订单生命周期状态（OrderBook 管理）
+    order: Order                          # 不可变订单请求
+    id: str                               # 唯一标识，由 OrderBook 分配
     status: Literal["open", "filled", "partial", "canceled", "expired"]
     created_at: str
-    filled_at: Optional[str]
-    filled_price: Optional[Decimal]
-    filled_shares: Optional[int]
+    filled_at: str | None
+    filled_price: Decimal | None
+    filled_shares: int | None
+    trail_high_water: Decimal | None      # 追踪止损高水位
+
+@dataclass(frozen=True)
+class Position:                           # 单个持仓
+    symbol: str
+    shares: int
+    avg_cost: Decimal                     # 加权平均成本
+
+@dataclass
+class Portfolio:                          # 组合状态（可变，Rule 阶段逐 bar 更新）
+    cash: Decimal
+    positions: dict[str, Position]
+    bar_prices: dict[str, Decimal]
+    # total_value(prices) 方法
 
 @dataclass(frozen=True)
 class UniverseSnapshot:                   # 某时间截面的标的池快照
@@ -353,37 +356,21 @@ class ParamDistribution:                  # 参数分布（用于参数优化）
     component: str                        # "sma_fast" (indicator name)
     param: str                            # "period"
     values: list                          # [5, 10, 15, 20, 25, 30]
-    distribution: Optional[str]           # "uniform", "log_uniform"
-    low: Optional[float]
-    high: Optional[float]
+    distribution: str | None              # "uniform", "log_uniform"
+    low: float | None
+    high: float | None
 
 @dataclass(frozen=True)
 class ParamConstraint:                    # 参数约束
     expr: str                             # "sma_fast.period < sma_slow.period"
-
-class TradeMethod(str, Enum):
-    """Round-trip trade 的计算方式"""
-    FLAT_TO_FLAT = "flat_to_flat"           # 从零到零
-    FLAT_TO_REDUCED = "flat_to_reduced"     # 从增仓到减仓（默认）
-    INCREASED_TO_REDUCED = "increased_to_reduced"  # 增减配对
-
-@dataclass(frozen=True)
-class RoundTripTrade:
-    """一笔完整交易（开仓到平仓）"""
-    symbol: str
-    side: Literal["LONG", "SHORT"]
-    entry_time: str
-    exit_time: str
-    entry_price: Decimal
-    exit_price: Decimal
-    shares: int
-    pnl: Decimal
-    pnl_pct: float
-    mae: float                             # Maximum Adverse Excursion（最大不利偏移）
-    mfe: float                             # Maximum Favorable Excursion（最大有利偏移）
-    duration_bars: int
-    method: TradeMethod
 ```
+
+> **Order vs ManagedOrder 分离**：Order 是冻结的值对象，Rule 只负责生成意图；
+> ManagedOrder 由 OrderBook 持有，跟踪 open → filled/canceled/expired 生命周期。
+> 这一分离遵循不可变性原则——策略代码永远无法篡改已提交的订单字段。
+
+> **未实现类型**：`RunContext`（执行上下文，含 as_of_date / trace_id 等）计划在 Phase 3+ 实现；
+> `TradeMethod` / `RoundTripTrade`（完整交易统计）计划在 Phase 2+ 实现。
 
 ### 4.5 列名引用
 
@@ -565,7 +552,7 @@ class Indicator(Protocol):
 class SMA:
     name = "SMA"
 
-    def compute(self, mktdata: pd.DataFrame, column: str = "Close", period: int = 20) -> pd.Series:
+    def compute(self, mktdata: pd.DataFrame, column: str = "close", period: int = 20) -> pd.Series:
         return mktdata[column].rolling(period).mean()
 
 # 接入第三方库（如 ta-lib）需要写 adapter
@@ -573,7 +560,7 @@ class TalibSMA:
     """ta-lib SMA 的适配器"""
     name = "SMA_talib"
 
-    def compute(self, mktdata: pd.DataFrame, column: str = "Close", timeperiod: int = 20) -> pd.Series:
+    def compute(self, mktdata: pd.DataFrame, column: str = "close", timeperiod: int = 20) -> pd.Series:
         import talib
         return pd.Series(talib.SMA(mktdata[column].values, timeperiod=timeperiod), index=mktdata.index)
 ```
@@ -584,15 +571,19 @@ class TalibSMA:
 
 如果 indicator 无法通过独立评估，应在此阶段淘汰，而非等到完整回测后才发现问题。引擎的分阶段执行能力（`run_through="indicator"`）为此提供了架构支持。
 
-**内置指标**（首批）：
+**内置指标**：
 
 | 类别 | 指标 | 说明 |
 |------|------|------|
-| 趋势 | SMA, EMA, WMA, DEMA | 移动平均系列 |
-| 动量 | RSI, MACD, ROC, MOM | 动量指标 |
-| 波动 | BBands, ATR, StdDev | 波动率指标 |
-| 成交量 | OBV, VWAP | 量价指标 |
-| 自定义 | Formula | 用户自定义公式 |
+| 趋势 | SMA, EMA, WMA, DEMA, TEMA | 移动平均系列 |
+| 动量 | RSI, ROC, PPO, Momentum, NdayReturn, LogReturn | 动量与收益指标 |
+| MACD | MACDLine, MACDSignal, MACDHistogram | MACD 拆分为三个独立指标（各返回一列） |
+| 波动 | BollingerUpper, BollingerLower, ATR, RollingVolatility, RollingMDD | 波动率指标 |
+| 成交量 | OBV, VWAP, MFI | 量价指标 |
+| 方向 | ADX, AROON, StochK, CCI | 趋势强度与方向指标 |
+| 因子 | Ratio | 比率因子 |
+
+> **指标拆分原则**：Indicator Protocol 约束 `compute()` 返回单个 `pd.Series`（一列）。多输出指标必须拆分为独立类：BBands 拆为 `BollingerUpper` + `BollingerLower`，MACD 拆为 `MACDLine` + `MACDSignal` + `MACDHistogram`。这不是妥协，而是 Protocol 约束的必然结果——每个指标对应宽表中的一列。
 
 **Agent 体验**：Agent 不需要知道具体实现，只需说"给这个策略加一个 20 日 RSI 指标"，Tool 处理其余一切。
 
@@ -649,17 +640,22 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 
 **信号的本质**：Signal 是对某个时间点的**方向性预测**（directional prediction），而非交易指令。信号描述"交易的欲望"——策略可能因仓位限制、风控规则或再平衡周期等原因选择不执行信号。将信号与行动分离，使得信号的预测力可以独立于执行假设进行评估。
 
-提供 7 种内置信号类型：
+提供 10 种内置信号类型：
 
-| 信号类型 | 说明 |
-|----------|------|
-| `Crossover` | 两条线交叉 |
-| `Threshold` | 超过/低于阈值 |
-| `Comparison` | 两个值比较 |
-| `Formula` | 自定义布尔公式 |
-| `Peak` | 峰值/谷值检测 |
-| `Timestamp` | 时间条件触发 |
-| `Composite` | 多信号 AND/OR 组合 |
+| 信号类型 | 说明 | 状态 |
+|----------|------|------|
+| `Crossover` | 两条线交叉（上穿检测） | ✅ 已实现 |
+| `EqualWeight` | 等权 1/N 分配 | ✅ 已实现 |
+| `TopNRanking` | 按得分排名，选 top N 并归一化权重 | ✅ 已实现 |
+| `RiskParity` | 逆波动率加权分配 | ✅ 已实现 |
+| `Threshold` | 超过/低于阈值 | 🔲 待实现 |
+| `Comparison` | 两个值比较 | 🔲 待实现 |
+| `Formula` | 自定义布尔公式 | 🔲 待实现 |
+| `Peak` | 峰值/谷值检测 | 🔲 待实现 |
+| `Timestamp` | 时间条件触发 | 🔲 待实现 |
+| `Composite` | 多信号 AND/OR 组合 | 🔲 待实现 |
+
+已实现的信号分为两类：**布尔信号**（`Crossover`，生成 True/False 触发列）和**权重信号**（`EqualWeight`、`TopNRanking`、`RiskParity`，生成截面权重分配）。权重信号是再平衡策略的核心——它们实现了 Signal 层的截面操作能力。
 
 **信号评估**：信号触发后的前瞻收益分布（forward return distribution）是评估信号质量的核心工具。以信号触发时刻 t₀ 为锚点，统计 t₁...tₙ 期间的收益分布——无需任何执行假设即可判断信号是否具有预测力。引擎的分阶段执行能力（`run_through="signal"`）为此提供了架构支持。稳健的信号应在相邻参数组合中呈现"稳定区域"（stable region）：相似的参数产生相似的正向或负向预期。如果正向预期在参数空间中随机散布，说明假设本身可能有问题。
 
@@ -669,11 +665,27 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 
 ```
 执行顺序（每个时间步）：
-1. Risk Rules     → 熔断检查、全局风控     （最高优先级）
-2. Order Rules    → 处理挂单（止损/止盈触发）
-3. Rebalance      → 再平衡检查
-4. Exit Rules     → 平仓信号
-5. Entry Rules    → 建仓信号              （最低优先级）
+1. Risk Rules     → 熔断检查、全局风控     （RiskRule Protocol，最高优先级）
+2. Order Rules    → 处理挂单（止损/止盈触发）（Rule Protocol）
+3. Rebalance      → 再平衡检查              （Rule Protocol）
+4. Exit Rules     → 平仓信号                （Rule Protocol）
+5. Entry Rules    → 建仓信号                （Rule Protocol，最低优先级）
+```
+
+**RiskRule Protocol**：风控规则与普通 Rule 有本质区别——它不仅决定"要不要下单"，还决定"是否熔断后续所有规则"。因此独立为单独的 Protocol：
+
+```python
+@runtime_checkable
+class RiskRule(Protocol):
+    """风控规则：可中断后续规则执行"""
+    name: str
+
+    def evaluate(
+        self, symbol: str, row: pd.Series, portfolio: Portfolio,
+        prices: dict[str, Decimal] | None = None,
+    ) -> tuple[Order | None, bool]:
+        """返回 (订单, 是否熔断)。bool=True 时停止后续所有规则执行。"""
+        ...
 ```
 
 **已实现的入场规则**：
@@ -683,12 +695,41 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 | `EntryRule` | signal, shares | 信号触发时固定股数买入 |
 | `TargetValueEntryRule` | signal, target_value | 信号触发时按目标市值买入（自动算股数） |
 | `FullPositionEntryRule` | signal | 信号触发时全仓买入（用全部可用现金） |
+| `SizedEntryRule` | signal, shares, max_position, max_pct_equity | 带仓位约束的固定股数买入 |
 
 **已实现的出场规则**：
 
 | 规则 | 参数 | 卖出逻辑 |
 |------|------|----------|
 | `ExitRule` | fast, slow | 快线跌破慢线时全仓卖出 |
+
+**已实现的订单规则**（挂单触发）：
+
+| 规则 | 参数 | 逻辑 |
+|------|------|------|
+| `StopLossRule` | threshold | 亏损超阈值时止损卖出 |
+| `TakeProfitRule` | threshold | 盈利超阈值时止盈卖出 |
+| `TrailingStopRule` | trail_pct | 追踪止损 |
+
+**已实现的风控规则**（实现 `RiskRule` Protocol）：
+
+| 规则 | 参数 | 逻辑 |
+|------|------|------|
+| `MaxDrawdownRisk` | max_drawdown | 组合回撤超阈值时熔断 |
+| `DailyLossLimitRisk` | max_daily_loss | 日内亏损超阈值时熔断 |
+
+**已实现的再平衡规则**：
+
+| 规则 | 参数 | 逻辑 |
+|------|------|------|
+| `RebalanceRule` | weight_col, frequency | 按权重信号列定期再平衡 |
+
+**仓位约束函数**：
+
+| 函数 | 说明 |
+|------|------|
+| `clip_to_max_position(shares, symbol, portfolio, max_shares)` | 裁剪到最大持仓股数 |
+| `clip_to_pct_equity(shares, symbol, price, portfolio, prices, max_pct)` | 裁剪到权益占比上限 |
 
 **仓位管理函数**（Phase 2+）：
 - `osMaxPos` - 最大仓位限制
@@ -705,9 +746,11 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 
 ### 5.6 组合管理 (oxq.portfolio)
 
-- **订单簿（OrderBook）**：支持 market/limit/stop/stop_limit/trailing_stop 订单类型，追踪订单全生命周期（open → filled/partial/canceled/expired）
-- **Portfolio**：管理持仓状态、现金余额、组合总值、实际权重
-- **交易记账（Accounting）**：记录每笔交易的成交价、手续费、滑点，维护成本基础
+- **订单请求与生命周期分离**：`Order`（frozen 值对象）→ 提交给 Broker → `ManagedOrder`（OrderBook 管理生命周期：open → filled/partial/canceled/expired）
+- **订单簿（OrderBook）**：管理 `ManagedOrder` 集合，支持 market/limit/stop/stop_limit/trailing_stop 订单类型，提供 `add()`、`fill()`、`get_open_orders()`、`cancel_orders()`、`cap_pending_sells()` 方法
+- **Portfolio**：管理持仓状态（`positions: dict[str, Position]`）、现金余额（`cash`）、当前价格快照（`bar_prices`）、组合总值（`total_value(prices)`）
+- **成交记账**：`Fill`（frozen）记录每笔成交的价格和手续费，引擎通过 `_apply_fill()` 更新 Portfolio 状态
+- **执行报告（ExecutionReport）**：对比模拟成交与实盘成交（`FillComparison`），计算价格滑点和费用差异
 
 **Round-trip Trade 定义**：交易统计（胜率、盈亏比、MAE/MFE 等）的计算结果取决于如何定义一笔"交易"的起止。框架默认使用 **flat-to-reduced** 方法——从首次增仓标记交易开始，任何减仓标记交易结束。该方法与券商对账单一致，便于回测与实盘结果对照。支持的方法见 `TradeMethod` 枚举。
 
@@ -725,12 +768,14 @@ Engine 是通用策略执行引擎，执行 Universe → Indicator → Signal �
 
 ```python
 def run(self, strategy, market, broker,
-        start, end, initial_cash=100_000.0, run_through=None) -> RunResult
+        start, end, initial_cash=100_000.0,
+        run_through=None, tracer=None) -> RunResult
 ```
 
 - `run_through="indicator"` / `"signal"` 支持分阶段运行，用于逐组件评估
+- `tracer: DefaultTracer | None` — 可选追踪器，传入后自动记录每个阶段的 TraceSpan
 - `SimBroker`（`oxq.trade`）实现 `Broker` Protocol，在每个 bar 的 close 价格模拟撮合
-- `RunResult`（`oxq.portfolio.analytics`）包含 portfolio、trades、equity_curve、mktdata，提供 `total_return()`、`sharpe_ratio()`、`max_drawdown()` 方法
+- `RunResult`（`oxq.portfolio.analytics`）包含 portfolio、trades（`list[Fill]`）、equity_curve、mktdata、benchmark_prices，提供 `total_return()`、`sharpe_ratio()`、`max_drawdown()`、`annualized_return()`、`annualized_volatility()`、`calmar_ratio()`、`sortino_ratio()`、`daily_returns()`、`monthly_returns()`、`drawdown_series()` 方法
 - 策略评估达标检查：通过 `engine_results` tool 自动与 `strategy.objectives` 对比，输出各指标的达标状态（pass/fail）
 
 ### 5.8 参数优化 (oxq.optimize)
@@ -802,36 +847,55 @@ result = orchestrator.run(context, providers)
 
 ```python
 # 执行追踪：每步自动记录输入/输出/耗时
-@dataclass
+@dataclass(frozen=True)
 class TraceSpan:
     trace_id: str
     span_id: str
-    parent_id: Optional[str]
+    parent_id: str | None
     component: str          # "indicator:sma_fast", "signal:golden_cross", "rule:enter"
-    inputs: Dict[str, Any]  # 快照
-    output: Any             # 快照
-    params: Dict[str, Any]
-    started_at: datetime
-    ended_at: datetime
-    status: Literal["ok", "error", "skipped"]
+    inputs: dict[str, Any]  # 输入快照
+    output_summary: dict[str, Any]  # 输出摘要（便于序列化和审计）
+    started_at: str
+    ended_at: str
+    duration_ms: float      # 耗时（毫秒）
+    status: str             # "ok" | "error" | "skipped"
+    error: str | None       # 错误信息（status="error" 时）
 
 # 审计日志：保证可复现
-@dataclass
+@dataclass(frozen=True)
 class AuditRecord:
     run_id: str
-    strategy_code: str
-    strategy_version: str
-    as_of_date: str
-    data_version: str
-    param_snapshot: Dict     # 完整参数快照
-    result_hash: str         # 结果哈希（验证确定性）
+    strategy_name: str
+    strategy_config: dict[str, Any]   # 完整策略配置快照
+    start_date: str
+    end_date: str
+    initial_cash: float
+    trace_spans: tuple[TraceSpan, ...]  # 完整执行追踪
+    mktdata_hash: str                   # 行情数据哈希
+    trades_hash: str                    # 交易记录哈希
+    equity_hash: str                    # 权益曲线哈希
+    result_hash: str                    # 综合结果哈希（验证确定性）
+    created_at: str
 ```
+
+`DefaultTracer` 提供生命周期钩子：`on_run_start()`、`on_indicator()`、`on_signal()`、`on_rule()`、`on_run_end()`。传入 `Engine.run(tracer=tracer)` 后，引擎在执行各阶段时自动调用对应钩子，生成 TraceSpan。`AuditRecord.build()` 从 tracer 和 RunResult 自动构建审计记录，包含四个维度的哈希用于确定性验证。
+
+**策略监控与分析**：
+
+- **StrategyMonitor**：监控策略运行状态，检测绩效偏离和异常期（`BadPeriod`）
+- **MarketStateDetector**：基于波动率检测市场状态（高波/低波/正常），分析策略在不同市场状态下的表现差异
+- **ExperimentLog / Experiment**：结构化实验日志，记录策略研究过程中的假设（hypothesis）、观察（observation）、结论（conclusion），支持从策略运行结果自动生成实验记录
 
 **Tool 调用**：
 ```
-→ observe_get_trace(run_id="run_20240101")        # 查看执行追踪
-→ observe_replay(run_id="run_20240101")            # 重放某次执行
-→ observe_compare_runs(run_ids=["run_a", "run_b"]) # 对比两次执行
+→ observe_trace(audit_id="...")                           # 查看执行追踪
+→ observe_audit_log(run_id="...", strategy="...")          # 查看/创建审计日志
+→ observe_audit_compare(audit_id_a="...", audit_id_b="...") # 对比两次审计
+→ observe_monitor_create(run_id="...", benchmark="SPY")   # 创建策略监控
+→ observe_monitor_summary(monitor_id="...")               # 查看监控摘要
+→ observe_detect_market_state(run_id="...", symbols=["AAPL"])  # 检测市场状态
+→ observe_experiment_create(name="research_v1")           # 创建实验日志
+→ observe_experiment_add(log_id="...", ...)               # 添加实验记录
 ```
 
 ### 5.12 交易执行 (oxq.trade)
@@ -857,51 +921,62 @@ Tool 定义是框架的核心资产之一，与传输协议无关。每个 Tool 
 
 | 工具组 | 工具名 | 说明 |
 |--------|--------|------|
-| **universe** | `universe_set` | 设置策略的 Universe（静态列表/指数/过滤条件） |
-| | `universe_list_indexes` | 列出可用的指数代码 |
-| | `universe_inspect` | 查看某日的 Universe 成分快照 |
-| | `universe_history` | 查看 Universe 成分变动历史 |
 | **strategy** | `strategy_create` | 创建策略 |
 | | `strategy_add_indicator` | 添加指标 |
 | | `strategy_add_signal` | 添加信号 |
 | | `strategy_add_rule` | 添加规则 |
-| | `strategy_list` | 列出所有策略 |
 | | `strategy_inspect` | 查看策略详情 |
-| | `strategy_validate` | 验证策略配置（含 rule burden 检查） |
-| | `strategy_set_objectives` | 设置策略目标（Sharpe、MaxDD 等目标范围） |
-| | `strategy_export` | 导出策略为 YAML/JSON |
-| | `strategy_import` | 导入策略配置 |
+| | `indicator_list` | 列出所有可用指标类型 |
+| | `indicator_describe` | 查看某指标类型的参数说明 |
 | **data** | `data_load_symbols` | 加载标的行情数据 |
-| | `data_list_symbols` | 列出可用标的 |
+| | `data_list_symbols` | 列出已有标的 |
 | | `data_inspect` | 查看数据摘要（时间范围、缺失值等） |
-| | `data_query` | 查询特定数据（价格、因子等） |
-| **engine** | `engine_run` | 运行策略（回测/模拟/实盘取决于 Provider） |
-| | `engine_results` | 获取运行结果 |
-| | `engine_compare` | 对比多次运行 |
+| | `factor_download` | 下载宏观因子数据（World Bank） |
+| | `factor_list` | 列出已有因子 |
+| | `factor_inspect` | 查看因子数据摘要 |
+| **universe** | `universe_set` | 设置 Universe（静态列表/指数/过滤条件） |
+| | `universe_list_indexes` | 列出可用的指数代码 |
+| | `universe_inspect` | 查看 Universe 成分快照 |
+| | `universe_history` | 查看 Universe 成分变动历史 |
+| **engine** | `engine_run` | 运行策略（回测） |
+| | `engine_results` | 获取运行结果和绩效指标 |
 | | `engine_trade_list` | 查看交易记录 |
-| **optimize** | `optimize_define_paramset` | 定义参数搜索空间 |
-| | `optimize_run_search` | 运行参数搜索 |
-| | `optimize_run_walk_forward` | 运行前推分析 |
-| | `optimize_results` | 获取优化结果 |
-| **analysis** | `analysis_performance` | 绩效指标（Sharpe, MaxDD, Calmar...） |
-| | `analysis_deflated_sharpe` | Deflated Sharpe Ratio |
-| | `analysis_profit_hurdle` | 利润门槛检验 |
-| | `analysis_drawdown` | 回撤分析 |
-| | `analysis_trade_stats` | 交易统计（胜率、盈亏比...） |
-| | `analysis_benchmark` | 基准相对分析（Tracking Error, IR, Alpha/Beta） |
-| | `analysis_mae_mfe` | 逐笔交易 MAE/MFE 分布分析 |
-| | `analysis_component` | 逐组件评估（独立评估指标/信号/规则） |
-| **trade** | `trade_generate_orders` | 生成订单计划 |
-| | `trade_estimate_costs` | 估算交易成本 |
-| | `trade_execute` | 执行订单（需确认） |
-| | `trade_status` | 查询订单状态 |
-| **observe** | `observe_trace` | 查看执行追踪 |
-| | `observe_audit_log` | 查看审计日志 |
-| | `observe_replay` | 重放历史执行 |
-| **orchestrator** | `orchestrator_create` | 创建多策略编排 |
-| | `orchestrator_add_strategy` | 添加子策略 |
-| | `orchestrator_set_constraints` | 设置全局约束 |
-| | `orchestrator_run` | 运行编排 |
+| **optimize** | `paramset_create` | 定义参数搜索空间 |
+| | `paramset_inspect` | 查看参数空间定义 |
+| | `grid_search` | 网格搜索 |
+| | `walk_forward` | 前推分析 |
+| | `cross_validate` | 时间序列交叉验证 |
+| | `overfit_analysis` | 过拟合分析（Deflated Sharpe 等） |
+| **observe** | `observe_trace` | 查看执行追踪（TraceSpan） |
+| | `observe_audit_log` | 查看/创建审计日志 |
+| | `observe_audit_compare` | 对比两次审计记录 |
+| | `observe_monitor_create` | 创建策略监控 |
+| | `observe_monitor_summary` | 查看监控摘要 |
+| | `observe_detect_market_state` | 检测市场状态 |
+| | `observe_performance_by_state` | 按市场状态分析绩效 |
+| | `observe_experiment_create` | 创建实验日志 |
+| | `observe_experiment_add` | 添加实验记录 |
+| | `observe_experiment_add_from_strategy` | 从策略运行自动添加实验记录 |
+| | `observe_experiment_list` | 列出实验记录 |
+| **live** | `live_connect` | 连接券商（Alpaca） |
+| | `live_account` | 查看账户信息 |
+| | `live_positions` | 查看实盘持仓 |
+| | `live_bars` | 获取实时行情 |
+| | `live_generate_orders` | 按目标权重生成订单计划 |
+| | `live_submit_order` | 提交订单 |
+| | `live_order_status` | 查询订单状态 |
+| | `live_open_orders` | 查看未成交订单 |
+| | `live_cancel_order` | 撤单 |
+
+**未实现的 Tool**（待后续 Phase）：
+
+- `strategy_list` — 列出所有策略
+- `strategy_validate` — 验证策略配置（含 rule burden 检查）
+- `strategy_export` / `strategy_import` — 导出/导入策略
+- `data_query` — 查询特定数据
+- `engine_compare` — 对比多次运行
+- `observe_replay` — 重放历史执行
+- `orchestrator_*` — 多策略编排（Phase 4）
 
 **设计原则**：
 
@@ -1041,21 +1116,23 @@ tools_required: [optimize.*, analysis.*]
 - `skills/`: strategy-builder.md（已实现 6 阶段流程）, data-explorer.md（已实现）
 - **目标**: ✅ Coding Agent / 开发者可以通过 SDK 构建 SMA 策略并回测
 
-### Phase 2: 参数优化 + 统计检验 + Universe 扩展 + MCP 分发
-- `oxq.universe`: IndexUniverse（Point-in-Time）, FilterUniverse
-- `oxq.optimize`: ParamSet, GridSearch, WalkForward
-- `oxq.optimize.validation`: DeflatedSharpe, ProfitHurdle
-- `oxq.tools`: optimize_* + analysis_* tool 定义
-- `mcp_server`: MCP 协议适配层（从 oxq.tools 导入，支持非 Coding AI 客户端）
-- `skills/`: parameter-tuner.md, performance-reviewer.md
-- **目标**: Agent 可以优化参数并验证统计显著性，Universe 支持指数成分和动态过滤，MCP 客户端可通过 MCP Server 使用全部功能
+### Phase 2: 参数优化 + 统计检验 + 指标扩展 ✅ 大部分已完成
+- `oxq.indicators`: 扩展至 27 个内置指标（SMA, EMA, WMA, DEMA, TEMA, RSI, MACDLine/Signal/Histogram, ROC, PPO, CCI, BollingerUpper/Lower, ATR, OBV, VWAP, MFI, ADX, AROON, StochK, Momentum, NdayReturn, LogReturn, RollingVolatility, RollingMDD, Ratio）
+- `oxq.signals`: 新增 EqualWeight、TopNRanking、RiskParity 权重信号
+- `oxq.rules`: 新增 SizedEntryRule、StopLossRule、TakeProfitRule、TrailingStopRule、RebalanceRule、MaxDrawdownRisk、DailyLossLimitRisk、clip_to_max_position、clip_to_pct_equity
+- `oxq.optimize`: ParameterSet、GridSearch、WalkForward、TimeSeriesCV、过拟合分析
+- `oxq.tools`: paramset_create、grid_search、walk_forward、cross_validate、overfit_analysis、paramset_inspect
+- **未完成**: `IndexUniverse`（Point-in-Time）、Threshold/Comparison/Formula/Peak/Timestamp/Composite 信号
+- **目标**: ✅ Agent 可以优化参数并验证统计显著性
 
-### Phase 3: 交易执行 + 可观测性
-- `oxq.trade`: 完整订单簿 + 费率 + 滑点 + executor protocol
-- `oxq.observe`: Tracer, AuditLog, EventBus
-- `oxq.tools`: trade_* + observe_* tool 定义
-- `skills/`: trade-executor.md, strategy-monitor.md
-- **目标**: 端到端全链路，从构建到执行到监控
+### Phase 3: 交易执行 + 可观测性 🔄 部分已完成
+- `oxq.observe`: DefaultTracer + TraceSpan（执行追踪）、AuditRecord（审计日志）、StrategyMonitor（策略监控）、MarketStateDetector（市场状态检测）、ExperimentLog（实验日志）
+- `oxq.trade`: LiveBroker（Alpaca 实盘）、FeeModel、SlippageModel、OrderGenerator、FillPriceMode
+- `oxq.contrib.alpaca`: AlpacaClient、AlpacaMarketDataProvider
+- `oxq.tools`: observe_* (11) + live_* (9) = 20 个工具
+- `oxq.portfolio`: ExecutionReport（模拟 vs 实盘对比）、ManagedOrder + OrderBook（订单生命周期管理）
+- **未完成**: observe_replay（执行重放）、EventBus
+- **目标**: 🔄 端到端交易链路可用，可观测性基础完成
 
 ### Phase 4: 多策略 + 高级特性
 - `oxq.orchestrator`: 多策略编排 + 资金分配
@@ -1107,12 +1184,14 @@ python -m mcp_server.server
 4. 验证：结果与 SDK 直接调用一致
 ```
 
-### 可复现性测试
+### 可复现性测试（依赖 observe_replay，待实现）
 ```
 1. 运行策略，记录 trace_id + result_hash
 2. 使用 observe_replay(trace_id) 重放
 3. 验证 result_hash 完全一致
 ```
+
+> **当前可用的确定性验证**：通过 `observe_audit_log` 创建审计记录，`observe_audit_compare` 对比两次运行的 `result_hash` 是否一致。完整的执行重放（`observe_replay`）待后续实现。
 
 ---
 
