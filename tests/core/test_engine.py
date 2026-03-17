@@ -525,6 +525,131 @@ def test_rebalance_clears_stale_stop_orders() -> None:
     assert result.portfolio.cash < Decimal(str(100_000 * 3))
 
 
+class TestBenchmarkPrices:
+    """Engine should fetch and store benchmark prices from strategy.benchmarks."""
+
+    def test_benchmark_prices_recorded(self) -> None:
+        """When strategy has benchmarks, result.benchmark_prices contains close Series."""
+        dates = pd.bdate_range("2024-01-01", periods=5)
+        bench_closes = [100.0, 102.0, 104.0, 106.0, 108.0]
+        aapl_closes = [50.0, 51.0, 52.0, 53.0, 54.0]
+
+        data = {
+            "AAPL": pd.DataFrame(
+                {
+                    "open": aapl_closes,
+                    "high": aapl_closes,
+                    "low": aapl_closes,
+                    "close": aapl_closes,
+                    "volume": [1_000_000] * 5,
+                },
+                index=dates,
+            ),
+            "BENCH": pd.DataFrame(
+                {
+                    "open": bench_closes,
+                    "high": bench_closes,
+                    "low": bench_closes,
+                    "close": bench_closes,
+                    "volume": [500_000] * 5,
+                },
+                index=dates,
+            ),
+        }
+
+        strategy = Strategy(
+            name="bench_test",
+            hypothesis="Test benchmark recording",
+            universe=StaticUniverse(("AAPL",)),
+            indicators={},
+            signals={},
+            entry_rules=[],
+            exit_rules=[],
+            benchmarks=["BENCH"],
+        )
+
+        broker = SimBroker()
+        result = Engine().run(
+            strategy,
+            market=FakeMarketDataProvider(data),
+            broker=broker,
+            start="2024-01-01",
+            end="2024-12-31",
+        )
+
+        assert "BENCH" in result.benchmark_prices
+        bench_series = result.benchmark_prices["BENCH"]
+        assert isinstance(bench_series, pd.Series)
+        assert list(bench_series.values) == bench_closes
+
+    def test_no_benchmarks_empty_dict(self) -> None:
+        """When strategy.benchmarks is empty, benchmark_prices is empty dict."""
+        data = _make_trending_data()
+        strategy = _make_strategy()  # default: no benchmarks
+        broker = SimBroker()
+
+        result = Engine().run(
+            strategy,
+            market=FakeMarketDataProvider(data),
+            broker=broker,
+            start="2024-01-01",
+            end="2024-12-31",
+        )
+
+        assert result.benchmark_prices == {}
+
+    def test_benchmark_prices_with_step_mode(self) -> None:
+        """Benchmark prices should also be available via setup()+step() mode."""
+        dates = pd.bdate_range("2024-01-01", periods=5)
+        bench_closes = [100.0, 102.0, 104.0, 106.0, 108.0]
+        aapl_closes = [50.0, 51.0, 52.0, 53.0, 54.0]
+
+        data = {
+            "AAPL": pd.DataFrame(
+                {
+                    "open": aapl_closes, "high": aapl_closes,
+                    "low": aapl_closes, "close": aapl_closes,
+                    "volume": [1_000_000] * 5,
+                },
+                index=dates,
+            ),
+            "BENCH": pd.DataFrame(
+                {
+                    "open": bench_closes, "high": bench_closes,
+                    "low": bench_closes, "close": bench_closes,
+                    "volume": [500_000] * 5,
+                },
+                index=dates,
+            ),
+        }
+
+        strategy = Strategy(
+            name="bench_step_test",
+            hypothesis="Benchmark in step mode",
+            universe=StaticUniverse(("AAPL",)),
+            indicators={},
+            signals={},
+            entry_rules=[],
+            exit_rules=[],
+            benchmarks=["BENCH"],
+        )
+
+        engine = Engine()
+        engine.setup(
+            strategy=strategy,
+            market=FakeMarketDataProvider(data),
+            broker=SimBroker(),
+            start="2024-01-01",
+            end="2024-12-31",
+        )
+        for date in engine.dates:
+            engine.step(date)
+        result = engine.result
+
+        assert "BENCH" in result.benchmark_prices
+        assert list(result.benchmark_prices["BENCH"].values) == bench_closes
+
+
 class TestEngineStep:
     def test_step_matches_run(self):
         """step() called for each date should produce same result as run()."""

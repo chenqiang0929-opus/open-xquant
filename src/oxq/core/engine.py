@@ -88,6 +88,12 @@ class Engine:
         for symbol in self._universe.symbols:
             self._mktdata[symbol] = market.get_bars(symbol, start, end).copy()
 
+        # -- Benchmark data (recorded for post-run analysis) ----------
+        self._benchmark_prices: dict[str, pd.Series] = {}
+        for bench_symbol in strategy.benchmarks:
+            bench_bars = market.get_bars(bench_symbol, start, end)
+            self._benchmark_prices[bench_symbol] = bench_bars["close"].copy()
+
         # -- Phase 1: Indicator (vectorized, per symbol) ----------------------
         for symbol in self._universe.symbols:
             for ind_name, (indicator, params) in strategy.indicators.items():
@@ -135,6 +141,7 @@ class Engine:
             trades=self._trades,
             equity_curve=self._equity_curve,
             mktdata=self._mktdata,
+            benchmark_prices=self._benchmark_prices,
         )
 
     def step(self, date: pd.Timestamp) -> None:
@@ -291,12 +298,14 @@ class Engine:
             return RunResult(
                 portfolio=self._portfolio, trades=[], equity_curve=[],
                 mktdata=self._mktdata,
+                benchmark_prices=self._benchmark_prices,
             )
 
         if run_through == "signal":
             return RunResult(
                 portfolio=self._portfolio, trades=[], equity_curve=[],
                 mktdata=self._mktdata,
+                benchmark_prices=self._benchmark_prices,
             )
 
         for date in self.dates:
