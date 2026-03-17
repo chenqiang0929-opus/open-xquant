@@ -90,3 +90,52 @@ def clip_to_pct_equity(
         return 0
     max_shares = int(room / price)
     return max(0, min(shares, max_shares))
+
+
+def os_equal_weight(cash: Decimal, n_assets: int, price: Decimal) -> int:
+    """Shares for equal-weight allocation: cash / n_assets / price."""
+    if n_assets <= 0 or price <= 0:
+        return 0
+    return int(cash / n_assets / price)
+
+
+def os_pct_equity(equity: Decimal, pct: float, price: Decimal) -> int:
+    """Shares for a fixed percentage of equity."""
+    if price <= 0:
+        return 0
+    return int(equity * Decimal(str(pct)) / price)
+
+
+def os_risk_parity(
+    equity: Decimal,
+    target_risk: float,
+    volatility: float,
+    price: Decimal,
+) -> int:
+    """Shares for risk-parity: allocate proportional to target_risk / volatility."""
+    if price <= 0 or volatility <= 0:
+        return 0
+    allocation = float(equity) * target_risk / volatility
+    return int(Decimal(str(allocation)) / price)
+
+
+def os_kelly(
+    equity: Decimal,
+    win_rate: float,
+    avg_win: float,
+    avg_loss: float,
+    price: Decimal,
+    fraction: float = 1.0,
+) -> int:
+    """Kelly criterion position sizing.
+
+    kelly_pct = win_rate - (1 - win_rate) / payoff_ratio
+    Use *fraction* < 1.0 for fractional Kelly (e.g. 0.5 for half-Kelly).
+    """
+    if price <= 0 or avg_loss <= 0:
+        return 0
+    payoff_ratio = avg_win / avg_loss
+    kelly_pct = win_rate - (1.0 - win_rate) / payoff_ratio
+    kelly_pct = max(0.0, kelly_pct) * fraction
+    allocation = float(equity) * kelly_pct
+    return int(Decimal(str(allocation)) / price)
