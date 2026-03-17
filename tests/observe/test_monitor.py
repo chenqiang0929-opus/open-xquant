@@ -30,8 +30,9 @@ def _make_result(
 
 class TestBadPeriod:
     def test_frozen(self) -> None:
-        from oxq.observe.monitor import BadPeriod
         from datetime import date
+
+        from oxq.observe.monitor import BadPeriod
         bp = BadPeriod(start=date(2024, 1, 1), end=date(2024, 2, 1), days=22, avg_sharpe=-0.5)
         with pytest.raises(AttributeError):
             bp.days = 10

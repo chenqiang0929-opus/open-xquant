@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
@@ -69,7 +69,7 @@ class ExperimentLog:
                 result=result,
                 conclusion=conclusion,
                 notes=notes,
-                timestamp=datetime.now(tz=timezone.utc).isoformat(),
+                timestamp=datetime.now(tz=UTC).isoformat(),
             ),
         )
 

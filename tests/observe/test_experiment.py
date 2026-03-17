@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -70,8 +69,8 @@ class TestAdd:
 
 class TestAddFromStrategy:
     def test_extracts_hypothesis(self) -> None:
-        from oxq.observe.experiment import ExperimentLog
         from oxq.core.strategy import Strategy
+        from oxq.observe.experiment import ExperimentLog
         from oxq.universe.static import StaticUniverse
 
         strategy = Strategy(
@@ -101,8 +100,8 @@ class TestAddFromStrategy:
         assert "annualized_return" in exp.result
 
     def test_matches_objectives(self) -> None:
-        from oxq.observe.experiment import ExperimentLog
         from oxq.core.strategy import Strategy
+        from oxq.observe.experiment import ExperimentLog
         from oxq.universe.static import StaticUniverse
 
         strategy = Strategy(
