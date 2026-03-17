@@ -123,6 +123,30 @@ class TestPerformanceByState:
         valid_states = detector.states.dropna()
         assert total_days == len(valid_states)
 
+    def test_performance_by_state_warns_on_low_overlap(self) -> None:
+        """Warn when date overlap is less than 50%."""
+        import warnings
+
+        from oxq.observe.detector import MarketStateDetector
+
+        result1 = _make_result_with_mktdata(["A", "B"], n_days=200, seed=42)
+        # Create result2 with completely different dates
+        np.random.seed(99)
+        dates2 = pd.bdate_range("2025-01-01", periods=200)
+        values2 = np.linspace(100, 120, 200).tolist()
+        result2 = RunResult(
+            portfolio=Portfolio(cash=Decimal("120")),
+            trades=[],
+            equity_curve=[(d, v) for d, v in zip(dates2, values2)],
+            mktdata={},
+        )
+        detector = MarketStateDetector(result1, vol_lookback=20)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            detector.performance_by_state(result2)
+            assert len(w) == 1
+            assert "overlap" in str(w[0].message).lower()
+
     def test_different_result(self) -> None:
         from oxq.observe.detector import MarketStateDetector
         result1 = _make_result_with_mktdata(["A", "B"], n_days=200, seed=42)

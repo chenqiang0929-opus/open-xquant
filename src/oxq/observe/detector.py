@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -77,6 +79,13 @@ class MarketStateDetector:
         daily_ret = pd.Series(dict(result.equity_curve)).pct_change().dropna()
         valid_states = self._states.dropna()
         common_idx = daily_ret.index.intersection(valid_states.index)
+
+        if len(common_idx) < len(daily_ret) * 0.5:
+            warnings.warn(
+                f"Only {len(common_idx)}/{len(daily_ret)} dates overlap between "
+                f"result and detector states. Results may be unreliable.",
+                stacklevel=2,
+            )
 
         perf: dict[str, dict] = {}
         for state in ("high", "normal", "low"):
