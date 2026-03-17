@@ -125,6 +125,35 @@ class TestAddFromStrategy:
         assert exp.criteria == {"sortino": {"min": 1.5}, "calmar": {"min": 1.0}}
 
 
+    def test_empty_objectives(self) -> None:
+        """Empty objectives should still extract base metrics."""
+        from oxq.core.strategy import Strategy
+        from oxq.observe.experiment import ExperimentLog
+        from oxq.universe.static import StaticUniverse
+
+        strategy = Strategy(
+            name="test",
+            universe=StaticUniverse(("A",)),
+            indicators={}, signals={},
+            entry_rules=[], exit_rules=[],
+            hypothesis="test hyp",
+            objectives={},  # empty!
+        )
+        result = _make_result([100, 105, 110])
+        log = ExperimentLog()
+        log.add_from_strategy(
+            strategy=strategy, result=result,
+            observation="test", conclusion="confirmed",
+        )
+        exp = log.experiments[0]
+        # Base metrics should still be present
+        assert "total_return" in exp.result
+        assert "sharpe_ratio" in exp.result
+        assert "max_drawdown" in exp.result
+        assert "annualized_return" in exp.result
+        assert exp.criteria == {}
+
+
 class TestToDataFrame:
     def test_columns(self) -> None:
         from oxq.observe.experiment import ExperimentLog

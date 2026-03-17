@@ -207,6 +207,51 @@ class TestExperimentAddFromStrategy:
         assert "total_return" in result["experiment"]["result"]
 
 
+class TestExperimentAddFromStrategyErrors:
+    def test_missing_strategy(self):
+        from oxq.tools.observe import observe_experiment_add_from_strategy, observe_experiment_create
+        run_id = _setup_run_result()
+        log_result = observe_experiment_create()
+        result = observe_experiment_add_from_strategy(
+            log_id=log_result["log_id"],
+            strategy="nonexistent",
+            run_id=run_id,
+            observation="test",
+            conclusion="confirmed",
+        )
+        assert "error" in result
+
+    def test_missing_run_id(self):
+        from oxq.core.strategy import Strategy
+        from oxq.tools.observe import observe_experiment_add_from_strategy, observe_experiment_create
+        from oxq.universe.static import StaticUniverse
+        strat = Strategy(
+            name="s", universe=StaticUniverse(("A",)),
+            indicators={}, signals={},
+            entry_rules=[], exit_rules=[],
+            hypothesis="h", objectives={},
+        )
+        session._strategies["s"] = strat
+        log_result = observe_experiment_create()
+        result = observe_experiment_add_from_strategy(
+            log_id=log_result["log_id"],
+            strategy="s",
+            run_id="nonexistent",
+            observation="test",
+            conclusion="confirmed",
+        )
+        assert "error" in result
+
+
+class TestDetectMarketStateErrors:
+    def test_invalid_symbols(self):
+        """Passing symbols not in mktdata should return error."""
+        from oxq.tools.observe import observe_detect_market_state
+        run_id = _setup_run_result()
+        result = observe_detect_market_state(run_id, symbols=["NONEXISTENT"])
+        assert "error" in result
+
+
 class TestExperimentList:
     def test_lists_experiments(self):
         from oxq.tools.observe import (

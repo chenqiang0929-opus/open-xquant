@@ -95,6 +95,14 @@ class TestSymbolsParam:
         assert len(detector.market_vol) == 100
 
 
+    def test_invalid_symbol_raises(self) -> None:
+        """Passing a symbol not in mktdata should raise KeyError."""
+        from oxq.observe.detector import MarketStateDetector
+        result = _make_result_with_mktdata(["A", "B"], n_days=100)
+        with pytest.raises(KeyError):
+            MarketStateDetector(result, symbols=("NONEXISTENT",), vol_lookback=20)
+
+
 class TestPerformanceByState:
     def test_returns_all_states(self) -> None:
         from oxq.observe.detector import MarketStateDetector
@@ -146,6 +154,29 @@ class TestPerformanceByState:
             detector.performance_by_state(result2)
             assert len(w) == 1
             assert "overlap" in str(w[0].message).lower()
+
+    def test_no_overlap_returns_empty(self) -> None:
+        """Result with no overlapping dates returns empty performance."""
+        import warnings
+
+        from oxq.observe.detector import MarketStateDetector
+        result1 = _make_result_with_mktdata(["A"], n_days=100, seed=42)
+        # Create result2 with completely different dates
+        dates2 = pd.bdate_range("2026-01-01", periods=50)
+        values2 = np.linspace(100, 120, 50).tolist()
+        result2 = RunResult(
+            portfolio=Portfolio(cash=Decimal("120")),
+            trades=[],
+            equity_curve=[(d, v) for d, v in zip(dates2, values2)],
+            mktdata={},
+        )
+        detector = MarketStateDetector(result1, vol_lookback=20)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            perf = detector.performance_by_state(result2)
+        # No overlapping dates -> empty or all states have 0 days
+        total_days = sum(m["days"] for m in perf.values())
+        assert total_days == 0
 
     def test_different_result(self) -> None:
         from oxq.observe.detector import MarketStateDetector
