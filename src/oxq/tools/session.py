@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     from oxq.optimize.validation import CVResult
     from oxq.optimize.walk_forward import WalkForwardResult
     from oxq.portfolio.analytics import RunResult
+    from oxq.observe.detector import MarketStateDetector
+    from oxq.observe.experiment import ExperimentLog
+    from oxq.observe.monitor import StrategyMonitor
     from oxq.trade.live_broker import LiveBroker
 
 logger = logging.getLogger(__name__)
@@ -32,6 +35,9 @@ _paramsets: dict[str, ParameterSet] = {}
 _search_results: dict[str, SearchResult] = {}
 _wf_results: dict[str, WalkForwardResult] = {}
 _cv_results: dict[str, CVResult] = {}
+_monitors: dict[str, StrategyMonitor] = {}
+_detectors: dict[str, MarketStateDetector] = {}
+_experiment_logs: dict[str, ExperimentLog] = {}
 
 # Live trading state (not persisted — requires fresh connect each session)
 _live_broker: LiveBroker | None = None
@@ -50,6 +56,9 @@ def _save() -> None:
                     "search_results": _search_results,
                     "wf_results": _wf_results,
                     "cv_results": _cv_results,
+                    "monitors": _monitors,
+                    "detectors": _detectors,
+                    "experiment_logs": _experiment_logs,
                 },
                 f,
             )
@@ -70,6 +79,9 @@ def _load() -> None:
         _search_results.update(data.get("search_results", {}))
         _wf_results.update(data.get("wf_results", {}))
         _cv_results.update(data.get("cv_results", {}))
+        _monitors.update(data.get("monitors", {}))
+        _detectors.update(data.get("detectors", {}))
+        _experiment_logs.update(data.get("experiment_logs", {}))
     except Exception:
         logger.warning("Failed to load session state", exc_info=True)
 
@@ -83,6 +95,9 @@ def clear() -> None:
     _search_results.clear()
     _wf_results.clear()
     _cv_results.clear()
+    _monitors.clear()
+    _detectors.clear()
+    _experiment_logs.clear()
     if _live_broker is not None:
         _live_broker.close()
         _live_broker = None
