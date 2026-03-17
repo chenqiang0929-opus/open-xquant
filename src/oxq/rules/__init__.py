@@ -3,7 +3,14 @@ from oxq.rules.exit import ExitRule
 from oxq.rules.order import StopLossRule, TakeProfitRule, TrailingStopRule
 from oxq.rules.rebalance import RebalanceRule
 from oxq.rules.risk import DailyLossLimitRisk, MaxDrawdownRisk
-from oxq.rules.sizing import clip_to_max_position, clip_to_pct_equity
+from oxq.rules.sizing import (
+    clip_to_max_position,
+    clip_to_pct_equity,
+    os_equal_weight,
+    os_kelly,
+    os_pct_equity,
+    os_risk_parity,
+)
 
 __all__ = [
     "DailyLossLimitRisk",
@@ -19,4 +26,8 @@ __all__ = [
     "TrailingStopRule",
     "clip_to_max_position",
     "clip_to_pct_equity",
+    "os_equal_weight",
+    "os_kelly",
+    "os_pct_equity",
+    "os_risk_parity",
 ]
