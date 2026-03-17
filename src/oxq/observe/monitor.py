@@ -33,6 +33,7 @@ class StrategyMonitor:
         benchmark: str | None = None,
         roll_window: int = 63,
         min_bad_days: int = 20,
+        gap_days: int = 5,
     ) -> None:
         equity = pd.Series(dict(result.equity_curve))
         daily_ret = equity.pct_change().dropna()
@@ -59,7 +60,7 @@ class StrategyMonitor:
             self._rolling_excess = None
 
         # Bad period detection
-        self._bad_periods = _detect_bad_periods(self._rolling_sharpe, min_bad_days)
+        self._bad_periods = _detect_bad_periods(self._rolling_sharpe, min_bad_days, gap_days)
 
     @property
     def rolling_sharpe(self) -> pd.Series:
@@ -114,13 +115,14 @@ class StrategyMonitor:
 def _detect_bad_periods(
     rolling_sharpe: pd.Series,
     min_bad_days: int,
+    gap_days: int = 5,
 ) -> list[BadPeriod]:
     bad = rolling_sharpe[rolling_sharpe < 0].dropna()
     if len(bad) == 0:
         return []
 
     periods: list[BadPeriod] = []
-    gaps = (bad.index.to_series().diff() > pd.Timedelta(days=5)).cumsum()
+    gaps = (bad.index.to_series().diff() > pd.Timedelta(days=gap_days)).cumsum()
     for _, group in bad.groupby(gaps):
         if len(group) >= min_bad_days:
             periods.append(

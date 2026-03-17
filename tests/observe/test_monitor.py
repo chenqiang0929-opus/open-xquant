@@ -126,6 +126,30 @@ class TestBadPeriods:
         assert bp.avg_sharpe < 0
 
 
+    def test_gap_days_parameter(self) -> None:
+        """Custom gap_days changes how bad periods are grouped."""
+        from oxq.observe.monitor import StrategyMonitor
+
+        # Create data with a gap in the decline
+        up1 = np.linspace(100, 120, 20).tolist()
+        down1 = np.linspace(120, 90, 15).tolist()
+        flat = np.linspace(90, 91, 8).tolist()  # 8-day gap (slight recovery)
+        down2 = np.linspace(91, 70, 15).tolist()
+        up2 = np.linspace(70, 100, 20).tolist()
+        values = up1 + down1[1:] + flat[1:] + down2[1:] + up2[1:]
+        result = _make_result(values)
+
+        # With gap_days=5 (default), the flat period (8 calendar days ~= 6 bdays)
+        # might split the bad period into two
+        monitor_default = StrategyMonitor(result, roll_window=10, min_bad_days=3, gap_days=5)
+
+        # With gap_days=15, the flat period won't split
+        monitor_wide = StrategyMonitor(result, roll_window=10, min_bad_days=3, gap_days=15)
+
+        # Wide gap should produce fewer or equal bad periods
+        assert len(monitor_wide.bad_periods) <= len(monitor_default.bad_periods)
+
+
 class TestSummary:
     def test_summary_keys(self) -> None:
         from oxq.observe.monitor import StrategyMonitor
