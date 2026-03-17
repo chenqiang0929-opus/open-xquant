@@ -1,19 +1,25 @@
-"""Observe layer — strategy diagnostics and analysis."""
+"""Observe layer — strategy diagnostics, tracing, and audit."""
 
 __all__ = [
+    "AuditRecord",
     "BadPeriod",
+    "DefaultTracer",
     "Experiment",
     "ExperimentLog",
     "MarketStateDetector",
     "StrategyMonitor",
+    "TraceSpan",
 ]
 
 _IMPORTS = {
+    "AuditRecord": "oxq.observe.audit",
     "BadPeriod": "oxq.observe.monitor",
-    "StrategyMonitor": "oxq.observe.monitor",
-    "MarketStateDetector": "oxq.observe.detector",
+    "DefaultTracer": "oxq.observe.tracer",
     "Experiment": "oxq.observe.experiment",
     "ExperimentLog": "oxq.observe.experiment",
+    "MarketStateDetector": "oxq.observe.detector",
+    "StrategyMonitor": "oxq.observe.monitor",
+    "TraceSpan": "oxq.observe.tracer",
 }
 
 

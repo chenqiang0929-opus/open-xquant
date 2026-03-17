@@ -5,6 +5,17 @@ from __future__ import annotations
 import pytest
 
 
+class TestObserveExports:
+    def test_tracer_exports(self) -> None:
+        from oxq.observe import DefaultTracer, TraceSpan
+        assert DefaultTracer is not None
+        assert TraceSpan is not None
+
+    def test_audit_exports(self) -> None:
+        from oxq.observe import AuditRecord
+        assert AuditRecord is not None
+
+
 class TestTraceSpan:
     def test_frozen(self) -> None:
         from oxq.observe.tracer import TraceSpan
