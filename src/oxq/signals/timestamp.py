@@ -41,8 +41,5 @@ class Timestamp:
             else:
                 series = pd.Series(False, index=idx)
 
-            filled = series.fillna(True)
-            result[s] = pd.Series(
-                [bool(v) for v in filled], index=idx, dtype=object
-            )
+            result[s] = series.fillna(True).astype(bool)
         return result

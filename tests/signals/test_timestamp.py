@@ -12,10 +12,10 @@ def test_month_start():
     mktdata = {"A": pd.DataFrame({"close": range(len(idx))}, index=idx)}
     result = Timestamp().compute(mktdata, rule="month_start")
     series = result["A"]
-    assert series.iloc[0] is True   # Jan 2 — first bar
+    assert series.iloc[0] == True   # Jan 2 — first bar
     feb1_idx = idx.get_loc(pd.Timestamp("2024-02-01"))
-    assert series.iloc[feb1_idx] is True  # Feb 1 — month change
-    assert series.iloc[1] is False         # Jan 3 — not month start
+    assert series.iloc[feb1_idx] == True  # Feb 1 — month change
+    assert series.iloc[1] == False         # Jan 3 — not month start
 
 
 def test_month_end():
@@ -25,8 +25,8 @@ def test_month_end():
     series = result["A"]
     # 2024-01-31 (Wed) is last trading day of Jan
     jan31_idx = idx.get_loc(pd.Timestamp("2024-01-31"))
-    assert series.iloc[jan31_idx] is True
-    assert series.iloc[0] is False  # Jan 2 — not month end
+    assert series.iloc[jan31_idx] == True
+    assert series.iloc[0] == False  # Jan 2 — not month end
 
 
 def test_quarter_start():
@@ -36,9 +36,9 @@ def test_quarter_start():
     series = result["A"]
     # 2024-04-01 is first trading day of Q2
     apr1_idx = idx.get_loc(pd.Timestamp("2024-04-01"))
-    assert series.iloc[apr1_idx] is True
+    assert series.iloc[apr1_idx] == True
     # Most days are not quarter start
-    assert series.iloc[1] is False
+    assert series.iloc[1] == False
 
 
 def test_weekday():
