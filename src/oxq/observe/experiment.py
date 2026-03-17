@@ -112,6 +112,11 @@ class ExperimentLog:
     def to_markdown(self) -> str:
         if not self._experiments:
             return ""
+        try:
+            import tabulate as _  # noqa: F401
+        except ImportError:
+            msg = "to_markdown() requires the 'tabulate' package: pip install tabulate"
+            raise ImportError(msg) from None
         df = self.to_dataframe()
         return df.to_markdown(index=False)
 
