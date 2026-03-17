@@ -8,6 +8,7 @@ and live trading.  The difference is which providers you plug in.
 from __future__ import annotations
 
 import logging
+import time as _time
 from decimal import Decimal
 from typing import Literal
 
@@ -16,6 +17,7 @@ import pandas as pd
 from oxq.core.strategy import Strategy
 from oxq.core.types import Broker, Fill, Portfolio, Position
 from oxq.data.providers import MarketDataProvider
+from oxq.observe.tracer import DefaultTracer
 from oxq.portfolio.analytics import RunResult
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,7 @@ class Engine:
         end: str,
         initial_cash: float = 100_000.0,
         run_through: Literal["indicator", "signal"] | None = None,
+        tracer: DefaultTracer | None = None,
     ) -> None:
         """Initialize engine state and run vectorized phases.
 
@@ -80,6 +83,13 @@ class Engine:
         self._strategy = strategy
         self._broker = broker
         self._portfolio = Portfolio(cash=Decimal(str(initial_cash)))
+        self._tracer = tracer
+
+        if tracer:
+            tracer.on_run_start(
+                strategy_name=strategy.name,
+                config={"start": start, "end": end, "initial_cash": initial_cash},
+            )
 
         # -- Phase 0: Universe ------------------------------------------------
         self._universe = strategy.universe.get_universe(as_of_date=end)
@@ -95,8 +105,9 @@ class Engine:
             self._benchmark_prices[bench_symbol] = bench_bars["close"].copy()
 
         # -- Phase 1: Indicator (vectorized, per symbol) ----------------------
-        for symbol in self._universe.symbols:
-            for ind_name, (indicator, params) in strategy.indicators.items():
+        for ind_name, (indicator, params) in strategy.indicators.items():
+            t0 = _time.perf_counter()
+            for symbol in self._universe.symbols:
                 for dep_col in getattr(indicator, "depends_on", ()):
                     if dep_col not in self._mktdata[symbol].columns:
                         logger.warning(
@@ -109,15 +120,34 @@ class Engine:
                 self._mktdata[symbol][ind_name] = indicator.compute(
                     self._mktdata[symbol], **params,
                 )
+            elapsed = (_time.perf_counter() - t0) * 1000
+            if tracer:
+                sample = self._mktdata[self._universe.symbols[0]][ind_name]
+                tracer.on_indicator(
+                    name=ind_name, params=params,
+                    output_summary={"rows": len(sample), "non_null": int(sample.notna().sum())},
+                    duration_ms=elapsed,
+                )
 
         if run_through == "indicator":
             return
 
         # -- Phase 2: Signal (vectorized, cross-sectional) --------------------
         for sig_name, (signal, params) in strategy.signals.items():
+            t0 = _time.perf_counter()
             results = signal.compute(self._mktdata, **params)
+            elapsed = (_time.perf_counter() - t0) * 1000
             for symbol, series in results.items():
                 self._mktdata[symbol][sig_name] = series
+            if tracer:
+                total_signals = sum(
+                    int(s.sum()) for s in results.values() if hasattr(s, 'sum')
+                )
+                tracer.on_signal(
+                    name=sig_name, inputs=params,
+                    output_summary={"signal_count": total_signals},
+                    duration_ms=elapsed,
+                )
 
         # -- Phase 3 state init -----------------------------------------------
         self._trades: list[Fill] = []
@@ -273,6 +303,7 @@ class Engine:
         end: str,
         initial_cash: float = 100_000.0,
         run_through: Literal["indicator", "signal"] | None = None,
+        tracer: DefaultTracer | None = None,
     ) -> RunResult:
         """Run the 4-phase strategy pipeline.
 
@@ -295,7 +326,7 @@ class Engine:
         self.setup(
             strategy=strategy, market=market, broker=broker,
             start=start, end=end, initial_cash=initial_cash,
-            run_through=run_through,
+            run_through=run_through, tracer=tracer,
         )
 
         if run_through == "indicator":
@@ -314,6 +345,22 @@ class Engine:
 
         for date in self.dates:
             self.step(date)
+
+        if self._tracer:
+            rule_names = (
+                [(r, "entry") for r in strategy.entry_rules]
+                + [(r, "exit") for r in strategy.exit_rules]
+                + [(r, "risk") for r in strategy.risk_rules]
+                + [(r, "order") for r in strategy.order_rules]
+                + [(r, "rebalance") for r in strategy.rebalance_rules]
+            )
+            for rule, rule_type in rule_names:
+                self._tracer.on_rule(
+                    name=rule.name, rule_type=rule_type,
+                    output_summary={"total_trades": len(self._trades)},
+                    duration_ms=0.0,
+                )
+            self._tracer.on_run_end("ok")
 
         return self.result
 
