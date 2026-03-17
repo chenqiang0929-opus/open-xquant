@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from oxq.contrib.alpaca.market_data import AlpacaMarketDataProvider
     from oxq.core.strategy import Strategy
     from oxq.observe.detector import MarketStateDetector
+    from oxq.observe.audit import AuditRecord
     from oxq.observe.experiment import ExperimentLog
     from oxq.observe.monitor import StrategyMonitor
     from oxq.optimize.paramset import ParameterSet
@@ -38,6 +39,7 @@ _cv_results: dict[str, CVResult] = {}
 _monitors: dict[str, StrategyMonitor] = {}
 _detectors: dict[str, MarketStateDetector] = {}
 _experiment_logs: dict[str, ExperimentLog] = {}
+_audit_records: dict[str, AuditRecord] = {}
 
 # Live trading state (not persisted — requires fresh connect each session)
 _live_broker: LiveBroker | None = None
@@ -59,6 +61,7 @@ def _save() -> None:
                     "monitors": _monitors,
                     "detectors": _detectors,
                     "experiment_logs": _experiment_logs,
+                    "audit_records": _audit_records,
                 },
                 f,
             )
@@ -82,6 +85,7 @@ def _load() -> None:
         _monitors.update(data.get("monitors", {}))
         _detectors.update(data.get("detectors", {}))
         _experiment_logs.update(data.get("experiment_logs", {}))
+        _audit_records.update(data.get("audit_records", {}))
     except Exception:
         logger.warning("Failed to load session state", exc_info=True)
 
@@ -98,6 +102,7 @@ def clear() -> None:
     _monitors.clear()
     _detectors.clear()
     _experiment_logs.clear()
+    _audit_records.clear()
     if _live_broker is not None:
         _live_broker.close()
         _live_broker = None

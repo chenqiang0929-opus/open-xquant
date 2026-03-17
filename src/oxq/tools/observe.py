@@ -6,9 +6,11 @@ import time
 from dataclasses import asdict
 from typing import Any
 
+from oxq.observe.audit import AuditRecord
 from oxq.observe.detector import MarketStateDetector
 from oxq.observe.experiment import ExperimentLog
 from oxq.observe.monitor import StrategyMonitor
+from oxq.observe.tracer import DefaultTracer, TraceSpan
 from oxq.tools import session
 from oxq.tools.registry import registry
 
@@ -185,6 +187,7 @@ def observe_experiment_add(
     result: dict[str, Any],
     conclusion: str,
     notes: str = "",
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Add a manual experiment record to a log."""
     log = session._experiment_logs.get(log_id)
@@ -199,6 +202,7 @@ def observe_experiment_add(
         result=result,
         conclusion=conclusion,
         notes=notes,
+        run_id=run_id,
     )
     session._save()
 
@@ -219,6 +223,7 @@ def observe_experiment_add_from_strategy(
     observation: str,
     conclusion: str,
     notes: str = "",
+    audit_id: str | None = None,
 ) -> dict[str, Any]:
     """Add experiment from strategy + run result auto-extraction."""
     log = session._experiment_logs.get(log_id)
@@ -240,6 +245,7 @@ def observe_experiment_add_from_strategy(
             observation=observation,
             conclusion=conclusion,
             notes=notes,
+            run_id=audit_id,
         )
     except Exception as e:
         return {"error": str(e)}
@@ -279,4 +285,159 @@ def observe_experiment_list(log_id: str) -> dict[str, Any]:
         "experiment_count": len(experiments),
         "experiments": experiments,
         "markdown_table": markdown,
+    }
+
+
+@registry.tool(
+    name="observe_trace",
+    description="View execution trace (TraceSpans) for a run's audit record. "
+    "Shows each component's inputs, output summary, timing, and status.",
+)
+def observe_trace(audit_id: str) -> dict[str, Any]:
+    """View execution trace from an audit record."""
+    audit = session._audit_records.get(audit_id)
+    if audit is None:
+        return {"error": f"Audit record '{audit_id}' not found"}
+
+    spans = [
+        {
+            "component": s.component,
+            "inputs": s.inputs,
+            "output_summary": s.output_summary,
+            "duration_ms": s.duration_ms,
+            "status": s.status,
+            "error": s.error,
+        }
+        for s in audit.trace_spans
+    ]
+
+    return {
+        "audit_id": audit_id,
+        "run_id": audit.run_id,
+        "strategy_name": audit.strategy_name,
+        "span_count": len(spans),
+        "spans": spans,
+    }
+
+
+@registry.tool(
+    name="observe_audit_log",
+    description="Create or view an audit record for a run. "
+    "Captures strategy config, execution trace, and layered hashes for determinism verification.",
+)
+def observe_audit_log(
+    run_id: str,
+    strategy: str | None = None,
+    audit_id: str | None = None,
+) -> dict[str, Any]:
+    """Create or retrieve an audit record.
+
+    If audit_id is provided, retrieves an existing record.
+    If strategy is provided, creates a new audit record from the run.
+    """
+    # Retrieve existing
+    if audit_id is not None:
+        audit = session._audit_records.get(audit_id)
+        if audit is None:
+            return {"error": f"Audit record '{audit_id}' not found"}
+        return {
+            "audit_id": audit_id,
+            "run_id": audit.run_id,
+            "strategy_name": audit.strategy_name,
+            "strategy_config": audit.strategy_config,
+            "start_date": audit.start_date,
+            "end_date": audit.end_date,
+            "initial_cash": audit.initial_cash,
+            "mktdata_hash": audit.mktdata_hash,
+            "trades_hash": audit.trades_hash,
+            "equity_hash": audit.equity_hash,
+            "result_hash": audit.result_hash,
+            "span_count": len(audit.trace_spans),
+            "created_at": audit.created_at,
+        }
+
+    # Create new
+    if strategy is None:
+        return {"error": "Provide either audit_id to retrieve, or strategy + run_id to create"}
+
+    run_result = session._run_results.get(run_id)
+    if run_result is None:
+        return {"error": f"Run '{run_id}' not found"}
+
+    strat = session._strategies.get(strategy)
+    if strat is None:
+        return {"error": f"Strategy '{strategy}' not found"}
+
+    # Build a tracer retroactively (no live trace data — record config only)
+    tracer = DefaultTracer()
+    strategy_config = {
+        "indicators": {k: v[1] for k, v in strat.indicators.items()},
+        "signals": {k: v[1] for k, v in strat.signals.items()},
+    }
+    tracer.on_run_start(strat.name, strategy_config)
+    tracer.on_run_end("ok")
+
+    # Determine date range from equity curve
+    start_date = str(run_result.equity_curve[0][0]) if run_result.equity_curve else ""
+    end_date = str(run_result.equity_curve[-1][0]) if run_result.equity_curve else ""
+
+    audit = AuditRecord.build(
+        tracer=tracer,
+        result=run_result,
+        strategy_name=strat.name,
+        strategy_config=strategy_config,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=float(strat.objectives.get("initial_cash", {}).get("value", 100000.0))
+        if "initial_cash" in strat.objectives
+        else 100000.0,
+    )
+
+    audit_id = audit.run_id
+    session._audit_records[audit_id] = audit
+    session._save()
+
+    return {
+        "audit_id": audit_id,
+        "run_id": run_id,
+        "strategy_name": audit.strategy_name,
+        "strategy_config": audit.strategy_config,
+        "mktdata_hash": audit.mktdata_hash,
+        "trades_hash": audit.trades_hash,
+        "equity_hash": audit.equity_hash,
+        "result_hash": audit.result_hash,
+        "created_at": audit.created_at,
+    }
+
+
+@registry.tool(
+    name="observe_audit_compare",
+    description="Compare two audit records to identify which layer (mktdata/trades/equity) changed. "
+    "Useful for verifying determinism or understanding the impact of parameter changes.",
+)
+def observe_audit_compare(
+    audit_id_a: str,
+    audit_id_b: str,
+) -> dict[str, Any]:
+    """Compare layered hashes of two audit records."""
+    a = session._audit_records.get(audit_id_a)
+    if a is None:
+        return {"error": f"Audit record '{audit_id_a}' not found"}
+
+    b = session._audit_records.get(audit_id_b)
+    if b is None:
+        return {"error": f"Audit record '{audit_id_b}' not found"}
+
+    return {
+        "audit_a": audit_id_a,
+        "audit_b": audit_id_b,
+        "strategy_a": a.strategy_name,
+        "strategy_b": b.strategy_name,
+        "config_match": a.strategy_config == b.strategy_config,
+        "mktdata_match": a.mktdata_hash == b.mktdata_hash,
+        "trades_match": a.trades_hash == b.trades_hash,
+        "equity_match": a.equity_hash == b.equity_hash,
+        "result_match": a.result_hash == b.result_hash,
+        "config_a": a.strategy_config,
+        "config_b": b.strategy_config,
     }
