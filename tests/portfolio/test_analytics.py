@@ -347,6 +347,29 @@ def test_drawdown_series_single_point() -> None:
     assert dd.iloc[0] == 0.0
 
 
+# -- benchmark_prices ----------------------------------------------------------
+
+def test_run_result_benchmark_prices_default_empty() -> None:
+    """RunResult.benchmark_prices defaults to empty dict."""
+    result = _make_result([100.0, 110.0])
+    assert result.benchmark_prices == {}
+
+
+def test_run_result_benchmark_prices_stored() -> None:
+    """RunResult stores benchmark price series."""
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    bench = pd.Series([100.0, 101.0, 102.0], index=dates)
+    result = RunResult(
+        portfolio=Portfolio(cash=Decimal("100")),
+        trades=[],
+        equity_curve=[(d, v) for d, v in zip(dates, [100, 110, 120])],
+        mktdata={},
+        benchmark_prices={"510300.SS": bench},
+    )
+    assert "510300.SS" in result.benchmark_prices
+    assert len(result.benchmark_prices["510300.SS"]) == 3
+
+
 def test_drawdown_series_min_equals_max_drawdown() -> None:
     """drawdown_series().min() should equal max_drawdown()."""
     values = [100.0, 110.0, 90.0, 95.0, 85.0, 120.0]
