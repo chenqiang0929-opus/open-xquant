@@ -36,9 +36,12 @@ class RiskParityOptimizer:
     ) -> dict[str, float]:
         inv_vols: dict[str, float] = {}
         for symbol, df in indicators.items():
+            if self.volatility_col not in df.columns:
+                continue
             vol = float(df[self.volatility_col].iloc[-1])
-            if vol > 0:
-                inv_vols[symbol] = 1.0 / vol
+            if pd.isna(vol) or vol <= 0:
+                continue
+            inv_vols[symbol] = 1.0 / vol
 
         if not inv_vols:
             return {"CASH": 1.0}
@@ -72,6 +75,9 @@ class KellyOptimizer:
         weights: dict[str, float] = {}
 
         for symbol, df in indicators.items():
+            required = {self.win_rate_col, self.avg_win_col, self.avg_loss_col}
+            if not required.issubset(df.columns):
+                continue
             win_rate = float(df[self.win_rate_col].iloc[-1])
             avg_win = float(df[self.avg_win_col].iloc[-1])
             avg_loss = float(df[self.avg_loss_col].iloc[-1])
@@ -122,6 +128,8 @@ class TopNRankingOptimizer:
     ) -> dict[str, float]:
         scores: dict[str, float] = {}
         for symbol, df in indicators.items():
+            if self.score_col not in df.columns:
+                continue
             val = float(df[self.score_col].iloc[-1])
             if pd.isna(val):
                 continue
