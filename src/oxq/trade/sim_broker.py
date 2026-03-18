@@ -263,6 +263,8 @@ class SimBroker:
     ) -> Decimal | None:
         """Get fill price based on fill_price_mode."""
         df = mktdata[symbol]
+        if date not in df.index:
+            return None
         if self._fill_price_mode == FillPriceMode.CLOSE:
             price = Decimal(str(float(df.loc[date, "close"])))  # type: ignore[arg-type]
             return price if price.is_finite() else None
