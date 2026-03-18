@@ -6,48 +6,21 @@ from decimal import Decimal
 
 import pandas as pd
 
-from oxq.core.types import Order, Portfolio
+from oxq.core.types import Portfolio, RuleResult
 
 
 class MaxDrawdownRisk:
     """Portfolio-level circuit breaker based on maximum drawdown.
 
     Monitors the portfolio's peak-to-trough drawdown. When the drawdown
-    exceeds ``max_drawdown``, liquidates all positions for the current
-    symbol and freezes all subsequent rule stages (order rules, rebalance,
-    exit, entry) for the current bar.
-
-    The peak value is tracked across the entire backtest and only
-    resets when a new high is reached.
+    exceeds ``max_drawdown``, returns RuleResult with target_positions
+    to liquidate and hold=True to freeze trading.
 
     Parameters
     ----------
     max_drawdown : float
         Maximum allowed drawdown as a decimal fraction.
         Default is 0.15 (15%). Must be between 0 and 1.
-
-    Attributes
-    ----------
-    name : str
-        Rule identifier, always ``"MaxDrawdownRisk"``.
-
-    Examples
-    --------
-    >>> strategy = Strategy(
-    ...     risk_rules=[MaxDrawdownRisk(max_drawdown=0.15)],
-    ...     ...
-    ... )
-
-    Notes
-    -----
-    This rule is evaluated once per symbol per bar. It computes a
-    portfolio-level metric, so the drawdown check is the same for all
-    symbols — but it generates a SELL order per symbol that has a
-    position, ensuring all positions are liquidated when triggered.
-
-    The ``hold`` signal freezes stages 2b-5 (order rules, rebalance,
-    exit, entry) but does NOT prevent pending stop/limit orders from
-    triggering in stage 2a (``process_pending_orders``).
     """
 
     name = "MaxDrawdownRisk"
@@ -62,24 +35,11 @@ class MaxDrawdownRisk:
         row: pd.Series,
         portfolio: Portfolio,
         prices: dict[str, Decimal] | None = None,
-    ) -> tuple[Order | None, bool]:
-        """Evaluate drawdown risk.
-
-        Parameters
-        ----------
-        prices : dict[str, Decimal] or None
-            Current prices for all symbols. If None, falls back to
-            using only the current symbol's close price.
-
-        Returns
-        -------
-        tuple[Order | None, bool]
-            (sell order if position exists, whether to freeze trading)
-        """
+    ) -> RuleResult:
         if prices is None:
             price = Decimal(str(float(row["close"])))
             if not price.is_finite():
-                return None, False
+                return RuleResult()
             prices = {symbol: price}
         current_value = portfolio.total_value(prices)
 
@@ -87,17 +47,23 @@ class MaxDrawdownRisk:
             self._peak_value = current_value
 
         if self._peak_value == 0:
-            return None, False
+            return RuleResult()
 
         drawdown = (self._peak_value - current_value) / self._peak_value
 
         if float(drawdown) >= self.max_drawdown:
             if symbol in portfolio.positions:
-                pos = portfolio.positions[symbol]
-                return Order(symbol=symbol, side="SELL", shares=pos.shares), True
-            return None, True
+                return RuleResult(
+                    target_positions={symbol: 0.0},
+                    hold=True,
+                    reason=f"max drawdown {float(drawdown):.1%} >= {self.max_drawdown:.0%}, liquidate {symbol}",
+                )
+            return RuleResult(
+                hold=True,
+                reason=f"max drawdown {float(drawdown):.1%} >= {self.max_drawdown:.0%}, freeze trading",
+            )
 
-        return None, False
+        return RuleResult()
 
 
 class DailyLossLimitRisk:
@@ -105,33 +71,14 @@ class DailyLossLimitRisk:
 
     Compares the portfolio value at the start of each trading day
     with the current value. If the intraday loss exceeds
-    ``max_daily_loss``, freezes all subsequent rule stages for the
-    remainder of the current bar. Does NOT liquidate positions —
-    only prevents new orders from being generated.
+    ``max_daily_loss``, returns RuleResult with hold=True.
+    Does NOT liquidate positions — only prevents new orders.
 
     Parameters
     ----------
     max_daily_loss : float
         Maximum allowed single-day loss as a decimal fraction.
         Default is 0.03 (3%). Must be between 0 and 1.
-
-    Attributes
-    ----------
-    name : str
-        Rule identifier, always ``"DailyLossLimitRisk"``.
-
-    Examples
-    --------
-    >>> strategy = Strategy(
-    ...     risk_rules=[DailyLossLimitRisk(max_daily_loss=0.03)],
-    ...     ...
-    ... )
-
-    Notes
-    -----
-    The "start of day" value is recorded on the first symbol
-    evaluation of each new date. Subsequent symbol evaluations
-    on the same date compare against this recorded value.
     """
 
     name = "DailyLossLimitRisk"
@@ -147,25 +94,12 @@ class DailyLossLimitRisk:
         row: pd.Series,
         portfolio: Portfolio,
         prices: dict[str, Decimal] | None = None,
-    ) -> tuple[Order | None, bool]:
-        """Evaluate daily loss limit.
-
-        Parameters
-        ----------
-        prices : dict[str, Decimal] or None
-            Current prices for all symbols. If None, falls back to
-            using only the current symbol's close price.
-
-        Returns
-        -------
-        tuple[Order | None, bool]
-            (always None — no liquidation, whether to freeze trading)
-        """
+    ) -> RuleResult:
         bar_date = row.name if hasattr(row, "name") else None
         if prices is None:
             price = Decimal(str(float(row["close"])))
             if not price.is_finite():
-                return None, False
+                return RuleResult()
             prices = {symbol: price}
         current_value = portfolio.total_value(prices)
 
@@ -174,11 +108,14 @@ class DailyLossLimitRisk:
             self._day_start_value = current_value
 
         if self._day_start_value == 0:
-            return None, False
+            return RuleResult()
 
         daily_loss = (self._day_start_value - current_value) / self._day_start_value
 
         if float(daily_loss) >= self.max_daily_loss:
-            return None, True
+            return RuleResult(
+                hold=True,
+                reason=f"daily loss {float(daily_loss):.1%} >= {self.max_daily_loss:.0%}, freeze trading",
+            )
 
-        return None, False
+        return RuleResult()
