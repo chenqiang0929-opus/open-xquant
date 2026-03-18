@@ -1,6 +1,6 @@
 """Universal strategy execution engine.
 
-Executes the 4-phase pipeline: Universe -> Indicator -> Signal -> Rule.
+Executes the new pipeline: Universe -> Indicator -> Signal -> Optimize -> Rules.
 Provider-agnostic — the same engine serves backtest, paper trading,
 and live trading.  The difference is which providers you plug in.
 """
@@ -15,10 +15,11 @@ from typing import Literal
 import pandas as pd
 
 from oxq.core.strategy import Strategy
-from oxq.core.types import Broker, Fill, Portfolio, Position
+from oxq.core.types import Broker, Fill, Order, Portfolio, Position, Rule
 from oxq.data.providers import MarketDataProvider
 from oxq.observe.tracer import DefaultTracer
 from oxq.portfolio.analytics import RunResult
+from oxq.trade.order_generator import generate_orders
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 class Engine:
     """Universal strategy execution engine.
 
-    Executes the 4-phase pipeline: Universe -> Indicator -> Signal -> Rule.
+    Executes the pipeline: Universe -> Indicator -> Signal -> Optimize -> Rules.
     Provider-agnostic: the same engine serves backtest, paper trading,
     and live trading — the difference is which providers you plug in.
 
@@ -61,6 +62,7 @@ class Engine:
         initial_cash: float = 100_000.0,
         run_through: Literal["indicator", "signal"] | None = None,
         tracer: DefaultTracer | None = None,
+        rules: list[Rule] | None = None,
     ) -> None:
         """Initialize engine state and run vectorized phases.
 
@@ -78,12 +80,14 @@ class Engine:
             Starting cash.
         run_through : str | None
             Stop after this phase: ``"indicator"`` or ``"signal"``.
-            Controls which vectorized phases are computed.
+        rules : list[Rule] | None
+            Optional list of Rule instances for pre/post-trade evaluation.
         """
         self._strategy = strategy
         self._broker = broker
         self._portfolio = Portfolio(cash=Decimal(str(initial_cash)))
         self._tracer = tracer
+        self._rules: list[Rule] = rules or []
 
         if tracer:
             tracer.on_run_start(
@@ -104,8 +108,14 @@ class Engine:
             bench_bars = market.get_bars(bench_symbol, start, end)
             self._benchmark_prices[bench_symbol] = bench_bars["close"].copy()
 
-        # -- Phase 1: Indicator (vectorized, per symbol) ----------------------
-        for ind_name, (indicator, params) in strategy.indicators.items():
+        # -- Phase 1: Indicator (collected from signals' required_indicators) --
+        all_indicators: dict[str, tuple] = {}
+        for _sig_name, (signal, _params) in strategy.signals.items():
+            for ind_name, ind_spec in getattr(signal, "required_indicators", {}).items():
+                if ind_name not in all_indicators:
+                    all_indicators[ind_name] = ind_spec
+
+        for ind_name, (indicator, params) in all_indicators.items():
             t0 = _time.perf_counter()
             for symbol in self._universe.symbols:
                 for dep_col in getattr(indicator, "depends_on", ()):
@@ -175,14 +185,14 @@ class Engine:
         )
 
     def step(self, date: pd.Timestamp) -> None:
-        """Process a single bar through the Phase 3 rule state machine."""
+        """Process a single bar through the new pipeline."""
         universe = self._universe
         strategy = self._strategy
         broker = self._broker
         portfolio = self._portfolio
         mktdata = self._mktdata
 
-        # Build bar-wide prices dict for portfolio valuation
+        # ── Step 1: Build bar_prices ──────────────────────────────────
         bar_prices: dict[str, Decimal] = {}
         for s in universe.symbols:
             if date in mktdata[s].index:
@@ -193,93 +203,89 @@ class Engine:
                 bar_prices[s] = Decimal(str(self._last_known_price[s]))
         portfolio.bar_prices = bar_prices
 
-        # ── Stage 1: Risk Rules ──────────────────────────────────────
+        # ── Step 2: Portfolio optimizer → target_weights ──────────────
+        signals_data: dict[str, pd.DataFrame] = {}
+        indicators_data: dict[str, pd.DataFrame] = {}
+        for s in universe.symbols:
+            if date in mktdata[s].index:
+                signals_data[s] = mktdata[s]
+                indicators_data[s] = mktdata[s]
+
+        target_weights = strategy.portfolio.optimize(signals_data, indicators_data)
+
+        # ── Step 3: Pre-trade rules ───────────────────────────────────
         hold = False
-        for rule in strategy.risk_rules:
+        for rule in self._rules:
             for symbol in universe.symbols:
                 if date not in mktdata[symbol].index:
                     continue
                 row = mktdata[symbol].loc[date]
-                result_tuple = rule.evaluate(  # type: ignore[call-arg]
-                    symbol, row, portfolio, prices=bar_prices,
-                )
-                order, should_hold = result_tuple  # type: ignore[misc]
-                if should_hold:
+                result = rule.evaluate(symbol, row, portfolio, prices=bar_prices)
+                if result.hold:
                     hold = True
-                if order:
-                    broker.submit_order(order)
+                if result.weights is not None:
+                    target_weights.update(result.weights)
 
-        # ── Stage 2a: Process pending orders (even if hold) ──────────
-        # Sync pending SELL orders with current positions:
-        # - No position → cancel all pending SELLs
-        # - Position reduced → cap pending SELL shares to position size
-        for sym in {
-            m.order.symbol for m in broker.get_open_orders()
-            if m.order.side == "SELL" and m.order.order_type != "market"
-        }:
-            pos = portfolio.positions.get(sym)
-            broker.cap_pending_sells(sym, pos.shares if pos else 0)
+        # ── Step 4: Trading algorithm (skip if hold) ──────────────────
+        if not hold:
+            total_capital = portfolio.total_value(bar_prices)
+            planned = generate_orders(
+                target_weights={
+                    s: Decimal(str(w))
+                    for s, w in target_weights.items()
+                    if s != "CASH"
+                },
+                positions=portfolio.positions,
+                prices=bar_prices,
+                total_capital=total_capital,
+            )
+            for p in planned:
+                broker.submit_order(p.order)
 
+        # ── Step 5: Broker executes ───────────────────────────────────
         broker.on_bar_open(mktdata, date)
-
-        # Apply fills from pending orders immediately so that
-        # subsequent rules see up-to-date portfolio state.
         for fill in broker.get_fills():
             _apply_fill(portfolio, fill)
             self._trades.append(fill)
 
-        # ── Stage 2b: Order Rules (skip if hold) ─────────────────────
-        if not hold:
-            for rule in strategy.order_rules:
-                for symbol in universe.symbols:
-                    if date not in mktdata[symbol].index:
-                        continue
-                    row = mktdata[symbol].loc[date]
-                    order = rule.evaluate(symbol, row, portfolio)
-                    if order:
-                        broker.submit_order(order)
-
-        # ── Stage 3: Rebalance Rules (skip if hold) ──────────────────
-        if not hold:
-            for rule in strategy.rebalance_rules:
-                for symbol in universe.symbols:
-                    if date not in mktdata[symbol].index:
-                        continue
-                    row = mktdata[symbol].loc[date]
-                    order = rule.evaluate(symbol, row, portfolio)
-                    if order:
-                        broker.submit_order(order)
-
-        # ── Stage 4: Exit Rules (skip if hold) ───────────────────────
-        if not hold:
-            for rule in strategy.exit_rules:
-                for symbol in universe.symbols:
-                    if date not in mktdata[symbol].index:
-                        continue
-                    row = mktdata[symbol].loc[date]
-                    order = rule.evaluate(symbol, row, portfolio)
-                    if order:
-                        broker.submit_order(order)
-
-        # ── Stage 5: Entry Rules (skip if hold) ──────────────────────
-        if not hold:
-            for rule in strategy.entry_rules:
-                for symbol in universe.symbols:
-                    if date not in mktdata[symbol].index:
-                        continue
-                    row = mktdata[symbol].loc[date]
-                    order = rule.evaluate(symbol, row, portfolio)
-                    if order:
-                        broker.submit_order(order)
-
-        # ── Fill market orders + collect all fills ────────────────────
         broker.on_bar_close(mktdata, date)
-
         for fill in broker.get_fills():
             _apply_fill(portfolio, fill)
             self._trades.append(fill)
 
-        # Record equity curve (float for numpy analytics)
+        # ── Step 6: Post-trade monitoring rules ───────────────────────
+        exit_targets: dict[str, float] = {}
+        for rule in self._rules:
+            for symbol in list(portfolio.positions.keys()):
+                if date not in mktdata[symbol].index:
+                    continue
+                row = mktdata[symbol].loc[date]
+                result = rule.evaluate(symbol, row, portfolio, prices=bar_prices)
+                if result.target_positions is not None:
+                    for sym, target_ratio in result.target_positions.items():
+                        if sym in exit_targets:
+                            exit_targets[sym] = min(exit_targets[sym], target_ratio)
+                        else:
+                            exit_targets[sym] = target_ratio
+
+        # ── Step 7: Execute exits ─────────────────────────────────────
+        if exit_targets:
+            for sym, target_ratio in exit_targets.items():
+                if sym not in portfolio.positions:
+                    continue
+                pos = portfolio.positions[sym]
+                target_shares = int(pos.shares * target_ratio)
+                sell_shares = pos.shares - target_shares
+                if sell_shares > 0:
+                    broker.submit_order(Order(symbol=sym, side="SELL", shares=sell_shares))
+
+            # ── Step 8: Broker executes exit orders ───────────────────
+            broker.on_bar_close(mktdata, date)
+            for fill in broker.get_fills():
+                _apply_fill(portfolio, fill)
+                self._trades.append(fill)
+
+        # ── Step 9: Record equity curve ───────────────────────────────
         prices: dict[str, Decimal] = {}
         for s in universe.symbols:
             if date in mktdata[s].index:
@@ -304,8 +310,9 @@ class Engine:
         initial_cash: float = 100_000.0,
         run_through: Literal["indicator", "signal"] | None = None,
         tracer: DefaultTracer | None = None,
+        rules: list[Rule] | None = None,
     ) -> RunResult:
-        """Run the 4-phase strategy pipeline.
+        """Run the strategy pipeline.
 
         Parameters
         ----------
@@ -322,11 +329,13 @@ class Engine:
         run_through : str | None
             Stop after this phase: ``"indicator"`` or ``"signal"``.
             ``None`` runs the full pipeline including rules.
+        rules : list[Rule] | None
+            Optional list of Rule instances.
         """
         self.setup(
             strategy=strategy, market=market, broker=broker,
             start=start, end=end, initial_cash=initial_cash,
-            run_through=run_through, tracer=tracer,
+            run_through=run_through, tracer=tracer, rules=rules,
         )
 
         if run_through == "indicator":
@@ -347,16 +356,9 @@ class Engine:
             self.step(date)
 
         if self._tracer:
-            rule_names = (
-                [(r, "entry") for r in strategy.entry_rules]
-                + [(r, "exit") for r in strategy.exit_rules]
-                + [(r, "risk") for r in strategy.risk_rules]
-                + [(r, "order") for r in strategy.order_rules]
-                + [(r, "rebalance") for r in strategy.rebalance_rules]
-            )
-            for rule, rule_type in rule_names:
+            for rule in self._rules:
                 self._tracer.on_rule(
-                    name=rule.name, rule_type=rule_type,
+                    name=rule.name, rule_type="rule",
                     output_summary={"total_trades": len(self._trades)},
                     duration_ms=0.0,
                 )
