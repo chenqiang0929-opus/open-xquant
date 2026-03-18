@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy — risk-adjusted momentum with periodic rebalancing.
+"""Momentum Rotation Strategy — risk-adjusted momentum with portfolio optimization.
 
 Hypothesis:
     在纳指100ETF、沪深300ETF、黄金ETF三类资产中，按风险调整后的动量
@@ -13,21 +13,14 @@ Objectives:
 
 Pipeline:
     Indicator 层 — Momentum(20), RollingVolatility(20), Ratio(mom/vol)
+                   (collected automatically from signal's required_indicators)
     Signal 层   — TopNRanking(score=ram, n=2, max_weight=0.6)
-    Rule 层     — RebalanceRule(weight_col=tw, frequency=F)
-
-Variants (三种调仓频率对比):
-    - 每 5 天调仓  — 高频跟踪，换手率高
-    - 每 10 天调仓 — 中等频率，平衡收益与成本
-    - 每 20 天调仓 — 低频持有，换手率低
+    Portfolio   — EqualWeightOptimizer (handles position sizing)
 
 Architecture note:
-    Strategy 定义与执行环境解耦。Engine 只依赖三个 Protocol 接口：
-    MarketDataProvider, OrderRouter, FillReceiver。
-
-    本例使用 3 只跨资产类别 ETF（股票+商品），展示 TopNRanking 信号层
-    如何在截面维度选择资产并归一化权重，以及 RebalanceRule 如何
-    按目标权重定期调仓。
+    Strategy defines: name, universe, signals, portfolio (PortfolioOptimizer).
+    Indicators are collected automatically from signals' required_indicators.
+    No more RebalanceRule — portfolio optimization handles rebalancing.
 
     标的:
       - 513100.SS  纳指100ETF（美股科技）
@@ -50,7 +43,7 @@ Usage:
 from oxq.core import Engine, Strategy
 from oxq.data import LocalMarketDataProvider
 from oxq.indicators import Momentum, Ratio, RollingVolatility
-from oxq.rules import RebalanceRule
+from oxq.portfolio.optimizers import EqualWeightOptimizer
 from oxq.signals import TopNRanking
 from oxq.trade import SimBroker
 from oxq.universe import StaticUniverse
@@ -67,9 +60,19 @@ INITIAL_CASH = 100_000.0
 START = "2024-11-15"
 END = "2026-02-28"
 
-# ── 1. Common pipeline components ───────────────────────────────────
+# ── 1. Build signal with required_indicators ─────────────────────────
 
-COMMON = dict(
+ranking_signal = TopNRanking()
+ranking_signal.required_indicators = {
+    "mom": (Momentum(), {"column": "close", "period": 20}),
+    "vol": (RollingVolatility(), {"column": "close", "period": 20}),
+    "ram": (Ratio(), {"col_a": "mom", "col_b": "vol"}),
+}
+
+# ── 2. Strategy definition ───────────────────────────────────────────
+
+strategy = Strategy(
+    name="momentum_rotation",
     hypothesis=(
         "在纳指100ETF、沪深300ETF、黄金ETF中，"
         "按 Momentum(20)/Volatility(20) 风险调整动量排名，"
@@ -83,114 +86,75 @@ COMMON = dict(
     },
     benchmarks=[],
     universe=StaticUniverse(SYMBOLS),
-    indicators={
-        "mom": (Momentum(), {"column": "close", "period": 20}),
-        "vol": (RollingVolatility(), {"column": "close", "period": 20}),
-        "ram": (Ratio(), {"col_a": "mom", "col_b": "vol"}),
-    },
     signals={
-        "tw": (TopNRanking(), {"score": "ram", "n": 2, "max_weight": 0.6}),
+        "tw": (ranking_signal, {"score": "ram", "n": 2, "max_weight": 0.6}),
     },
-    entry_rules=[],
-    exit_rules=[],
+    portfolio=EqualWeightOptimizer(),
 )
 
-# ── 2. Three rebalance frequency variants ─────────────────────────
+# ── 3. Run ────────────────────────────────────────────────────────────
 
-STRATEGIES = {
-    "每5天调仓": Strategy(
-        name="rebal_5d",
-        rebalance_rules=[RebalanceRule(weight_col="tw", frequency=5)],
-        **COMMON,
-    ),
-    "每10天调仓": Strategy(
-        name="rebal_10d",
-        rebalance_rules=[RebalanceRule(weight_col="tw", frequency=10)],
-        **COMMON,
-    ),
-    "每20天调仓": Strategy(
-        name="rebal_20d",
-        rebalance_rules=[RebalanceRule(weight_col="tw", frequency=20)],
-        **COMMON,
-    ),
-}
+broker = SimBroker()
+result = Engine().run(
+    strategy,
+    market=LocalMarketDataProvider(),
+    broker=broker,
+    start=START,
+    end=END,
+    initial_cash=INITIAL_CASH,
+)
 
-# ── 3. Run all variants ─────────────────────────────────────────────
-
-results = {}
-for label, strategy in STRATEGIES.items():
-    broker = SimBroker()
-    result = Engine().run(
-        strategy,
-        market=LocalMarketDataProvider(),
-        broker=broker,
-        start=START,
-        end=END,
-        initial_cash=INITIAL_CASH,
-    )
-    results[label] = result
-
-# ── 4. Comparison table ─────────────────────────────────────────────
+# ── 4. Results ────────────────────────────────────────────────────────
 
 universe_str = ", ".join(f"{s}({SYMBOL_NAMES[s]})" for s in SYMBOLS)
 print("=" * 76)
-print("Momentum Rotation Strategy — Rebalance Frequency Comparison")
+print("Momentum Rotation Strategy")
 print(f"Universe: {universe_str}")
 print(f"Period: {START} ~ {END}  |  Init Cash: {INITIAL_CASH:,.0f}")
 print("=" * 76)
 
-header = f"{'':>20}" + "".join(f"{label:>18}" for label in results)
-print(header)
-print("-" * len(header))
-
 rows = [
-    ("Total Return", lambda r: f"{r.total_return():.2%}"),
-    ("Ann. Return", lambda r: f"{r.annualized_return():.2%}"),
-    ("Ann. Volatility", lambda r: f"{r.annualized_volatility():.2%}"),
-    ("Sharpe Ratio", lambda r: f"{r.sharpe_ratio():.2f}"),
-    ("Calmar Ratio", lambda r: f"{r.calmar_ratio():.2f}"),
-    ("Sortino Ratio", lambda r: f"{r.sortino_ratio():.2f}"),
-    ("Max Drawdown", lambda r: f"{r.max_drawdown():.2%}"),
-    ("Total Trades", lambda r: f"{len(r.trades)}"),
-    ("Final Cash", lambda r: f"{r.portfolio.cash:,.0f}"),
-    ("Total Value", lambda r: f"{r.equity_curve[-1][1]:,.0f}"),
+    ("Total Return", f"{result.total_return():.2%}"),
+    ("Ann. Return", f"{result.annualized_return():.2%}"),
+    ("Ann. Volatility", f"{result.annualized_volatility():.2%}"),
+    ("Sharpe Ratio", f"{result.sharpe_ratio():.2f}"),
+    ("Calmar Ratio", f"{result.calmar_ratio():.2f}"),
+    ("Sortino Ratio", f"{result.sortino_ratio():.2f}"),
+    ("Max Drawdown", f"{result.max_drawdown():.2%}"),
+    ("Total Trades", f"{len(result.trades)}"),
+    ("Final Cash", f"{result.portfolio.cash:,.0f}"),
+    ("Total Value", f"{result.equity_curve[-1][1]:,.0f}"),
 ]
 
-for name, fn in rows:
-    vals = "".join(f"{fn(r):>18}" for r in results.values())
-    print(f"{name:>20}{vals}")
+for name, val in rows:
+    print(f"  {name:>20}: {val}")
 
-# ── 5. Objectives check per variant ─────────────────────────────────
+# ── 5. Objectives check ──────────────────────────────────────────────
 
 print()
-objectives = COMMON["objectives"]
+objectives = strategy.objectives
 metric_fns = {
     "annualized_return": lambda r: r.annualized_return(),
     "sharpe_ratio": lambda r: r.sharpe_ratio(),
     "max_drawdown": lambda r: r.max_drawdown(),
 }
 
-for label, result in results.items():
-    checks = []
-    for metric_name, bounds in objectives.items():
-        actual = metric_fns[metric_name](result)
-        passed = True
-        if "min" in bounds:
-            passed = passed and actual >= bounds["min"]
-        if "max" in bounds:
-            passed = passed and actual <= bounds["max"]
-        checks.append(("pass" if passed else "FAIL", metric_name))
-    status = "  ".join(f"{name} {tag}" for tag, name in checks)
-    print(f"  {label:<12} {status}")
+for metric_name, bounds in objectives.items():
+    actual = metric_fns[metric_name](result)
+    passed = True
+    if "min" in bounds:
+        passed = passed and actual >= bounds["min"]
+    if "max" in bounds:
+        passed = passed and actual <= bounds["max"]
+    tag = "pass" if passed else "FAIL"
+    print(f"  {metric_name:<20} {tag}  ({actual:.4f})")
 
-# ── 6. Trade log (first 20 trades per variant) ──────────────────────
+# ── 6. Trade log (first 20 trades) ───────────────────────────────────
 
-for label, result in results.items():
-    if not result.trades:
-        continue
+if result.trades:
     shown = result.trades[:20]
     more = len(result.trades) - len(shown)
-    print(f"\n  {label} — Trades ({len(result.trades)} total, showing first {len(shown)}):")
+    print(f"\nTrades ({len(result.trades)} total, showing first {len(shown)}):")
     print(f"  {'Date':<28} {'Side':>4}  {'Shares':>6} {'Symbol':<12} {'Price':>10}")
     print("  " + "-" * 64)
     for fill in shown:

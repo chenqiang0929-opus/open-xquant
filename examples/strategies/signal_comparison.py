@@ -1,10 +1,9 @@
-"""Signal Comparison Strategy — comparing weight allocation methods.
+"""Signal Comparison Strategy — comparing weight allocation via portfolio optimizers.
 
 Hypothesis:
     在纳指100ETF、沪深300ETF、黄金ETF三类资产中，使用相同的动量指标体系
-    （Momentum/Volatility 风险调整动量），但采用不同的信号层权重分配方法
-    （等权、归一化排名、风险平价），在固定 10 天调仓频率下，
-    不同信号方法会产生显著不同的收益与风险特征。
+    （Momentum/Volatility 风险调整动量），但采用不同的 PortfolioOptimizer
+    （等权、风险平价），在相同信号下，不同优化方法会产生显著不同的收益与风险特征。
 
 Objectives:
     - 年化收益率 ≥ 5%
@@ -13,20 +12,19 @@ Objectives:
 
 Pipeline:
     Indicator 层 — Momentum(20), RollingVolatility(20), Ratio(mom/vol)
-    Signal 层   — EqualWeight / TopNRanking / RiskParity
-    Rule 层     — RebalanceRule(weight_col=tw, frequency=10)
+                   (collected automatically from signal's required_indicators)
+    Signal 层   — TopNRanking(score=ram, n=3, filter_negative=True)
+    Portfolio   — EqualWeightOptimizer / RiskParityOptimizer
 
-Variants (三种信号方法对比):
-    - 等权 (EqualWeight)   — 所有资产等权分配
-    - 动量排名 (TopNRanking) — 按动量排名，Top 3 归一化权重，过滤负动量
+Variants (portfolio optimizer comparison):
+    - 等权 (EqualWeight)    — 所有信号资产等权分配
     - 风险平价 (RiskParity) — 按波动率倒数分配权重，低波动资产获得更高权重
 
 Architecture note:
-    Strategy 定义与执行环境解耦。Engine 只依赖三个 Protocol 接口：
-    MarketDataProvider, OrderRouter, FillReceiver。
-
-    本例使用 3 只跨资产类别 ETF（股票+商品），展示不同信号层权重分配方法
-    在相同指标和调仓频率下的表现差异。
+    Strategy defines: name, universe, signals, portfolio (PortfolioOptimizer).
+    Indicators are collected automatically from signals' required_indicators.
+    Different PortfolioOptimizer implementations replace the old signal-level
+    weight methods (EqualWeight signal, RiskParity signal).
 
     标的:
       - 513100.SS  纳指100ETF（美股科技）
@@ -41,8 +39,8 @@ Usage:
 from oxq.core import Engine, Strategy
 from oxq.data import LocalMarketDataProvider, YFinanceDownloader
 from oxq.indicators import Momentum, Ratio, RollingVolatility
-from oxq.rules import RebalanceRule
-from oxq.signals import EqualWeight, RiskParity, TopNRanking
+from oxq.portfolio.optimizers import EqualWeightOptimizer, RiskParityOptimizer
+from oxq.signals import TopNRanking
 from oxq.trade import SimBroker
 from oxq.universe import StaticUniverse
 
@@ -64,14 +62,23 @@ downloader = YFinanceDownloader()
 for sym in SYMBOLS:
     downloader.download(sym, start=START, end=END)
 
-# ── 1. Common pipeline components (indicators only) ────────────────
+# ── 1. Build signal with required_indicators ─────────────────────────
+
+ranking_signal = TopNRanking()
+ranking_signal.required_indicators = {
+    "mom": (Momentum(), {"column": "close", "period": 20}),
+    "vol": (RollingVolatility(), {"column": "close", "period": 20}),
+    "ram": (Ratio(), {"col_a": "mom", "col_b": "vol"}),
+}
+
+# ── 2. Common components ─────────────────────────────────────────────
 
 COMMON = dict(
     hypothesis=(
         "在纳指100ETF、沪深300ETF、黄金ETF中，"
         "使用 Momentum(20)/Volatility(20) 风险调整动量指标，"
-        "对比等权、归一化排名、风险平价三种信号方法，"
-        "固定 10 天调仓频率，观察收益与风险差异"
+        "对比等权和风险平价两种 PortfolioOptimizer，"
+        "观察收益与风险差异"
     ),
     objectives={
         "annualized_return": {"min": 0.05},
@@ -80,43 +87,27 @@ COMMON = dict(
     },
     benchmarks=[],
     universe=StaticUniverse(SYMBOLS),
-    indicators={
-        "mom": (Momentum(), {"column": "close", "period": 20}),
-        "vol": (RollingVolatility(), {"column": "close", "period": 20}),
-        "ram": (Ratio(), {"col_a": "mom", "col_b": "vol"}),
+    signals={
+        "tw": (ranking_signal, {"score": "ram", "n": 3, "filter_negative": True}),
     },
-    entry_rules=[],
-    exit_rules=[],
-    rebalance_rules=[RebalanceRule(weight_col="tw", frequency=10)],
 )
 
-# ── 2. Three signal method variants ────────────────────────────────
+# ── 3. Strategy variants with different portfolio optimizers ─────────
 
 STRATEGIES = {
     "等权": Strategy(
         name="equal_weight",
-        signals={
-            "tw": (EqualWeight(), {}),
-        },
-        **COMMON,
-    ),
-    "动量排名": Strategy(
-        name="momentum_ranking",
-        signals={
-            "tw": (TopNRanking(), {"score": "ram", "n": 3, "filter_negative": True}),
-        },
+        portfolio=EqualWeightOptimizer(),
         **COMMON,
     ),
     "风险平价": Strategy(
         name="risk_parity",
-        signals={
-            "tw": (RiskParity(), {"vol": "vol"}),
-        },
+        portfolio=RiskParityOptimizer(volatility_col="vol"),
         **COMMON,
     ),
 }
 
-# ── 3. Run all variants ─────────────────────────────────────────────
+# ── 4. Run all variants ──────────────────────────────────────────────
 
 results = {}
 for label, strategy in STRATEGIES.items():
@@ -131,11 +122,11 @@ for label, strategy in STRATEGIES.items():
     )
     results[label] = result
 
-# ── 4. Comparison table ─────────────────────────────────────────────
+# ── 5. Comparison table ──────────────────────────────────────────────
 
 universe_str = ", ".join(f"{s}({SYMBOL_NAMES[s]})" for s in SYMBOLS)
 print("=" * 76)
-print("Signal Comparison Strategy — Weight Allocation Method Comparison")
+print("Signal Comparison Strategy — Portfolio Optimizer Comparison")
 print(f"Universe: {universe_str}")
 print(f"Period: {START} ~ {END}  |  Init Cash: {INITIAL_CASH:,.0f}")
 print("=" * 76)
@@ -161,7 +152,7 @@ for name, fn in rows:
     vals = "".join(f"{fn(r):>18}" for r in results.values())
     print(f"{name:>20}{vals}")
 
-# ── 5. Objectives check per variant ─────────────────────────────────
+# ── 6. Objectives check per variant ──────────────────────────────────
 
 print()
 objectives = COMMON["objectives"]
@@ -184,7 +175,7 @@ for label, result in results.items():
     status = "  ".join(f"{name} {tag}" for tag, name in checks)
     print(f"  {label:<12} {status}")
 
-# ── 6. Trade log (first 20 trades per variant) ──────────────────────
+# ── 7. Trade log (first 20 trades per variant) ───────────────────────
 
 for label, result in results.items():
     if not result.trades:
