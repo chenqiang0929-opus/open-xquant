@@ -17,20 +17,17 @@ class Peak:
 
     def compute(
         self,
-        mktdata: dict[str, pd.DataFrame],
+        mktdata: pd.DataFrame,
         column: str = "",
         kind: str = "peak",
         order: int = 1,
-    ) -> dict[str, pd.Series]:
+    ) -> pd.Series:
         is_max = kind == "peak"
-        result: dict[str, pd.Series] = {}
-        for s, df in mktdata.items():
-            col = df[column]
-            cond = pd.Series(True, index=col.index)
-            for i in range(1, order + 1):
-                if is_max:
-                    cond = cond & (col > col.shift(i)) & (col > col.shift(-i))
-                else:
-                    cond = cond & (col < col.shift(i)) & (col < col.shift(-i))
-            result[s] = cond.fillna(False).astype(bool)
-        return result
+        col = mktdata[column]
+        cond = pd.Series(True, index=col.index)
+        for i in range(1, order + 1):
+            if is_max:
+                cond = cond & (col > col.shift(i)) & (col > col.shift(-i))
+            else:
+                cond = cond & (col < col.shift(i)) & (col < col.shift(-i))
+        return cond.fillna(False).astype(bool)

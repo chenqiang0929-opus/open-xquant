@@ -14,11 +14,11 @@ class Threshold:
 
     def compute(
         self,
-        mktdata: dict[str, pd.DataFrame],
+        mktdata: pd.DataFrame,
         column: str = "",
         threshold: float = 0.0,
         relationship: str = "gt",
-    ) -> dict[str, pd.Series]:
+    ) -> pd.Series:
         ops = {
             "gt": operator.gt,
             "lt": operator.lt,
@@ -26,4 +26,4 @@ class Threshold:
             "lte": operator.le,
         }
         op = ops[relationship]
-        return {s: op(df[column], threshold) for s, df in mktdata.items()}
+        return op(mktdata[column], threshold)

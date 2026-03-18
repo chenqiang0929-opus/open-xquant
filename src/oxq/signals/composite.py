@@ -14,14 +14,11 @@ class Composite:
 
     def compute(
         self,
-        mktdata: dict[str, pd.DataFrame],
+        mktdata: pd.DataFrame,
         signals: list[str] | None = None,
         logic: str = "and",
-    ) -> dict[str, pd.Series]:
+    ) -> pd.Series:
         if not signals:
-            return {}
+            return pd.Series(dtype=bool)
         op = pd.Series.__and__ if logic == "and" else pd.Series.__or__
-        return {
-            s: reduce(op, (df[col] for col in signals))
-            for s, df in mktdata.items()
-        }
+        return reduce(op, (mktdata[col] for col in signals))

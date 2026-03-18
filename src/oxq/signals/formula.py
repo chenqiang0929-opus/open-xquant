@@ -12,7 +12,7 @@ class Formula:
 
     def compute(
         self,
-        mktdata: dict[str, pd.DataFrame],
+        mktdata: pd.DataFrame,
         expr: str = "",
-    ) -> dict[str, pd.Series]:
-        return {s: df.eval(expr).astype(bool) for s, df in mktdata.items()}
+    ) -> pd.Series:
+        return mktdata.eval(expr).astype(bool)

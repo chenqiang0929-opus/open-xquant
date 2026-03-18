@@ -14,11 +14,11 @@ class Comparison:
 
     def compute(
         self,
-        mktdata: dict[str, pd.DataFrame],
+        mktdata: pd.DataFrame,
         left: str = "",
         right: str = "",
         relationship: str = "gt",
-    ) -> dict[str, pd.Series]:
+    ) -> pd.Series:
         ops = {
             "gt": operator.gt,
             "lt": operator.lt,
@@ -28,4 +28,4 @@ class Comparison:
             "ne": operator.ne,
         }
         op = ops[relationship]
-        return {s: op(df[left], df[right]) for s, df in mktdata.items()}
+        return op(mktdata[left], mktdata[right])
