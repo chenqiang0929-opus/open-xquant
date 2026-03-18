@@ -4,7 +4,7 @@
 
 open-xquant 是一个 **Agent-First** 的开源量化交易框架。引擎（SDK + Tool 定义）是地基，Skill 才是 Agent-First 的交付面——用户感知到的 Agent 体验，由 Skill 层交付。
 
-底层是严谨的量化金融引擎，经 Universe → Indicator → Signal → Rule 四阶段模型生成交易决策；核心资产是 **Python SDK + 协议无关的 Tool 定义**（名称、参数、语义），每个工作流编写 skill.md，指导 Agent 如何组合 tools 完成复杂任务。
+底层是严谨的量化金融引擎，经 Indicator → Universe → Signal → Portfolio → Rule → Broker 管道生成交易决策；核心资产是 **Python SDK + 协议无关的 Tool 定义**（名称、参数、语义），每个工作流编写 skill.md，指导 Agent 如何组合 tools 完成复杂任务。
 
 **三种使用角色与入口**：
 
@@ -69,7 +69,7 @@ open-xquant/
 │     └───────────────────────────┘                    │
 ├──────────────────────────────────────────────────────┤
 │              Engine Layer                             │  ← 纯计算，无 I/O
-│  Universe resolve → Indicator → Signal → Rule        │
+│  Indicator → Universe → Signal → Portfolio → Rule → Broker │
 ├──────────────────────────────────────────────────────┤
 │              Provider Layer                           │  ← 数据注入（Protocol）
 │  MarketData / Factor / Portfolio                      │
@@ -80,16 +80,19 @@ open-xquant/
 
 ## 4. 核心引擎设计
 
-### 4.1 Universe → Indicator → Signal → Rule 四阶段模型
+### 4.1 Strategy = Universe + Signal + Portfolio
 
-策略始于**假设和目标**，而非代码——明确的假设（hypothesis）定义了策略试图捕捉的市场现象，目标（objectives）量化了成功标准，基准（benchmarks）提供了比较的参照系。策略由四层声明式组件构成：Universe（标的池）、Indicator（指标计算）、Signal（信号生成）、Rule（交易决策）。Strategy 是纯声明式容器，直接传给 Engine 执行。
+策略始于**假设和目标**，而非代码——明确的假设（hypothesis）定义了策略试图捕捉的市场现象，目标（objectives）量化了成功标准，基准（benchmarks）提供了比较的参照系。Strategy 由三个核心组件构成：Universe（标的池）、Signal（信号生成）、Portfolio（组合构建）。Strategy 是纯声明式容器，直接传给 Engine 执行。
 
-**四层组件的精确语义**：
+Engine 驱动完整管道：**Indicators → Universe → Signal → Portfolio → Pre-trade Rule → Trading Algorithm → Broker → Post-trade Rule**。Indicators 由 Strategy 声明但由 Engine 计算；Rules 不属于 Strategy，而是传给 `Engine.run(rules=[...])`。
+
+**核心组件的精确语义**：
 
 - **Universe**：选择参与计算的标的（Filter），可以是假设的一部分（"该现象存在于大盘股中"），也可以是业务约束（"只交易沪深300成分股"）
 - **Indicator**：从行情数据衍生的量化值。**路径无关**——不知道当前持仓和交易历史，可向量化计算
 - **Signal**：对某个时间点的**方向性预测**。描述"交易的欲望"而非行动本身——信号可能因规则约束而不触发交易
-- **Rule**：**路径相关**的可操作决策。知道当前持仓、挂单、资金状态，生成实际订单
+- **Portfolio**：组合构建层，通过 PortfolioOptimizer Protocol 将信号转化为目标权重/持仓
+- **Rule**：返回 RuleResult（weights/constraints/target_positions/hold），而非 Order。Rules 传给 Engine.run()，不属于 Strategy
 
 **SDK 方式定义策略**：
 
@@ -99,7 +102,6 @@ Strategy 是纯声明式 dataclass，通过构造器传入所有组件。Indicat
 from oxq.core import Engine, Strategy
 from oxq.indicators import SMA
 from oxq.signals import Crossover
-from oxq.rules import EntryRule, ExitRule
 from oxq.universe import StaticUniverse
 
 strategy = Strategy(
@@ -119,15 +121,15 @@ strategy = Strategy(
     signals={
         "golden_cross": (Crossover(), {"fast": "sma_fast", "slow": "sma_slow"}),
     },
-    entry_rules=[EntryRule(signal="golden_cross", shares=100)],
-    exit_rules=[ExitRule(fast="sma_fast", slow="sma_slow")],
 )
 
 # 运行（Provider 决定模式：回测 / 模拟 / 实盘）
+# Rules 传给 Engine.run()，不属于 Strategy
 engine = Engine()
 result = engine.run(strategy,
     market=LocalMarketDataProvider(),
     broker=sim_broker,
+    rules=[StopLossRule(threshold=0.05)],
     start="2023-01-01", end="2024-12-31")
 ```
 
@@ -146,8 +148,6 @@ Tool 定义在 `oxq.tools` 中，协议无关——Coding Agent 直接 `import` 
     params={"column": "close", "period": 50})
 → strategy_add_signal(strategy="sma_crossover", name="golden_cross", type="Crossover",
     inputs={"fast": "sma_fast", "slow": "sma_slow"})
-→ strategy_add_rule(strategy="sma_crossover", name="enter_long", type="EntryRule",
-    params={"signal": "golden_cross", "shares": 100})
 → engine_run(strategy="sma_crossover", symbols=["AAPL"],
     start="2023-01-01", end="2024-12-31")
 → engine_results(run_id="...")
@@ -161,12 +161,12 @@ Tool 定义在 `oxq.tools` 中，协议无关——Coding Agent 直接 `import` 
 **Per-symbol 宽表**（以单个 symbol 为例）：
 
 ```
-原始行情             Indicator 后              Signal 后               Rule 阶段
+原始行情             Indicator 后              Signal 后               Portfolio+Rule 阶段
 +-----------+       +------------------+      +---------------------+
 | Open      |       | Open             |      | Open                |
 | High      |       | High             |      | High                |
 | Low       | ───►  | Low              | ───► | Low                 | ───► 只读,
-| Close     |       | Close            |      | Close               |      生成订单
+| Close     |       | Close            |      | Close               |      生成 RuleResult
 | Volume    |       | Volume           |      | Volume              |
 |           |       | ma50    (新增)   |      | ma50                |
 |           |       | ma200   (新增)   |      | ma200               |
@@ -189,7 +189,9 @@ symbol_A:                         symbol_B:
            \                           /
       Signal 层：截面操作（跨 symbol 比较、排名、归一化）
                        ↓
-      Rule 层：逐 bar 读取全 universe 信号 + 持仓状态 → 订单
+      Portfolio 层：PortfolioOptimizer 优化目标权重
+                       ↓
+      Rule 层：逐 bar 读取信号/权重 + 持仓状态 → RuleResult
 ```
 
 各层对 `mktdata` 的操作方式：
@@ -198,7 +200,8 @@ symbol_A:                         symbol_B:
 |---|---|---|---|
 | Indicator | per symbol — 每次看到一个 symbol 的 DataFrame | `compute` 返回 Series，**引擎**将其追加为新列 | 纯函数计算 + 引擎回写 |
 | Signal | cross-sectional — 读取全 universe 的指标列 | 结果写回各 symbol 的宽表，或生成独立的权重向量（`SparseVector`） | 截面读取 + 引擎回写 |
-| Rule | per bar × 全 universe — 读取当前 bar 的信号/权重 + 持仓状态 | 生成订单，不修改 mktdata | **只读** |
+| Portfolio | cross-sectional — 将信号权重转化为目标持仓 | PortfolioOptimizer 优化权重 | 截面优化 |
+| Rule | per bar × 全 universe — 读取当前 bar 的信号/权重 + 持仓状态 | 返回 RuleResult（weights/constraints/hold），不修改 mktdata | **只读** |
 
 > **compute 纯函数 vs 引擎回写**：Indicator/Signal 的 `compute` 方法是纯函数，不修改 mktdata。引擎负责将 `compute` 的返回值追加为 mktdata 的新列。这保证了组件的可测试性和确定性——相同输入必然产生相同输出。
 
@@ -214,33 +217,50 @@ symbol_A:                         symbol_B:
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Phase 0: Universe Resolution                        │
-│  确定当前时间截面参与计算的 symbol 集合                │
-│  输入: UniverseProvider + as_of_date                 │
-│  输出: list[str] (symbols)                           │
-│  示例: 沪深300成分股(PIT), 流动性过滤, 静态列表        │
-├─────────────────────────────────────────────────────┤
 │  Phase 1: Indicator                                  │
 │  对全 universe 计算指标/因子                          │
 │  输入: mktdata (per symbol)                          │
 │  输出: mktdata + 指标列 (per symbol)                 │
 │  示例: SMA, RSI, 动量因子, 波动率因子                 │
 ├─────────────────────────────────────────────────────┤
-│  Phase 2: Signal                                     │
+│  Phase 2: Universe Resolution                        │
+│  确定当前时间截面参与计算的 symbol 集合                │
+│  输入: UniverseProvider + as_of_date                 │
+│  输出: list[str] (symbols)                           │
+│  示例: 沪深300成分股(PIT), 流动性过滤, 静态列表        │
+├─────────────────────────────────────────────────────┤
+│  Phase 3: Signal                                     │
 │  基于全 universe 的指标结果生成信号                    │
 │  输入: 全部 symbol 的指标结果                         │
 │  输出: 信号值 / 目标权重 (cross-sectional)            │
 │  示例: 截面排序, top_n 筛选, 归一化, 风控调整          │
 ├─────────────────────────────────────────────────────┤
-│  Phase 3: Rule                                       │
-│  基于信号和当前持仓状态生成交易决策                     │
-│  输入: 目标权重 + 当前 portfolio 状态                  │
-│  输出: 订单 (orders)                                  │
-│  示例: 再平衡判断, 仓位计算, 止损触发                  │
+│  Phase 4: Portfolio                                  │
+│  通过 PortfolioOptimizer 将信号转化为目标持仓          │
+│  输入: 信号权重 + 约束条件                            │
+│  输出: 目标权重 / 目标持仓                            │
+│  示例: 等权分配, 风险平价, Kelly 公式                  │
+├─────────────────────────────────────────────────────┤
+│  Phase 5: Pre-trade Rule                             │
+│  交易前风控检查，返回 RuleResult                      │
+│  输入: 目标持仓 + 当前 portfolio 状态                  │
+│  输出: RuleResult (weights/constraints/hold)          │
+│  示例: 回撤熔断, 日内亏损限制                         │
+├─────────────────────────────────────────────────────┤
+│  Phase 6: Trading Algorithm → Broker                 │
+│  生成订单并提交给 Broker 执行                         │
+│  输入: 目标持仓 + RuleResult 约束                     │
+│  输出: 订单提交 + 成交回报                            │
+├─────────────────────────────────────────────────────┤
+│  Phase 7: Post-trade Rule                            │
+│  交易后处理，返回 RuleResult                          │
+│  输入: 成交结果 + portfolio 状态                      │
+│  输出: RuleResult (constraints/adjustments)           │
+│  示例: 止损止盈挂单, 追踪止损更新                      │
 └─────────────────────────────────────────────────────┘
 ```
 
-外层循环按 phase 推进（`for phase in [universe, indicator, signal, rule]`）。Phase 0 先从 UniverseProvider 获取当前时间截面的 symbol 列表，后续各层输入该 universe 的数据。回测中 universe 可能随再平衡日变化（如指数成分股季度调整），引擎在每个再平衡日重新执行 Phase 0。当 universe 只有一个 symbol 时，执行流程退化为逐 symbol 模式，完全兼容单标的策略。
+外层循环按 phase 推进（`for phase in [indicator, universe, signal, portfolio, pre-trade rule, trading algorithm, broker, post-trade rule]`）。Indicator 最先计算，然后 Universe 确定当前时间截面的 symbol 列表，后续各层输入该 universe 的数据。回测中 universe 可能随再平衡日变化（如指数成分股季度调整），引擎在每个再平衡日重新执行 Universe Resolution。当 universe 只有一个 symbol 时，执行流程退化为逐 symbol 模式，完全兼容单标的策略。Rules 通过 `Engine.run(rules=[...])` 传入，不属于 Strategy 定义。
 
 **分阶段执行（Partial Execution）**：引擎支持在任意阶段终止执行，用于逐组件独立评估：
 
@@ -256,25 +276,26 @@ result = engine.run(strategy, providers, run_through="signal")
 
 #### 向量化与逐 bar 状态机
 
-三个阶段采用不同的计算模式：
+各阶段采用不同的计算模式：
 
 | 阶段 | 计算模式 | 路径依赖 | 调用次数 |
 |---|---|---|---|
 | Indicator | **向量化** — 对全量时间序列一次调用 | 否 | 每个 symbol 1 次 |
 | Signal | **向量化** — 对全量时间序列一次调用 | 否 | 1 次（跨 symbol） |
-| Rule | **逐 bar 循环** — 状态机模式 | 是 | N 次（N = 触发点数） |
+| Portfolio | **截面** — 对当前 bar 的权重进行优化 | 否 | 每个再平衡点 1 次 |
+| Rule | **逐 bar 循环** — 状态机模式，返回 RuleResult | 是 | N 次（N = 触发点数） |
 
 **向量化阶段**（Indicator / Signal）：
 
 ```python
-# Phase 0：从 UniverseProvider 获取当前 universe
-universe = universe_provider.get_universe(as_of_date=context.as_of_date)
-# universe = ["600519.SS", "000858.SZ", ...]  随时间变化
-
-# Indicator：per symbol，一次调用处理全部历史
+# Indicator：per symbol，一次调用处理全部历史（在 Universe Resolution 之前）
 for symbol in universe:
     result = indicator.compute(mktdata[symbol], **params)
     mktdata[symbol]["sma_fast"] = result
+
+# Universe：从 UniverseProvider 获取当前 universe
+universe = universe_provider.get_universe(as_of_date=context.as_of_date)
+# universe = ["600519.SS", "000858.SZ", ...]  随时间变化
 
 # Signal：cross-sectional，一次处理全 universe
 scores = {}
@@ -289,9 +310,10 @@ weights = normalize(top_n(scores, n=5))
 ```python
 # 逐 bar 推进，依赖当前持仓、挂单等状态
 while cur_index <= total_bars:
-    # 按优先级执行规则：risk → order → exit → enter
+    # Pre-trade Rule → Portfolio Optimizer → Trading Algorithm → Broker → Post-trade Rule
+    # Rule 返回 RuleResult（weights/constraints/target_positions/hold）
     # 读取当前 bar 的信号/权重
-    # 生成订单，更新持仓状态
+    # 生成目标持仓，提交订单，更新持仓状态
     cur_index = next_index(cur_index)
 ```
 
@@ -386,10 +408,10 @@ class ParamConstraint:                    # 参数约束
 
 ### 4.6 Broker Protocol 架构：策略与执行分离
 
-策略层（Universe → Indicator → Signal → Rule）只负责"在什么条件下下什么单"。策略自身包含 Universe，通过两个可替换 Protocol 与执行环境解耦：
+策略层（Universe + Signal + Portfolio）只负责"做什么"的声明。策略自身包含 Universe，通过两个可替换 Protocol 与执行环境解耦：
 
 ```
-策略定义层（Universe → Indicator → Signal → Rule）
+策略定义层（Universe + Signal + Portfolio）
          │
          │  不关心下面是回测还是实盘
          │
@@ -661,49 +683,41 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 
 ### 5.5 交易规则 (oxq.rules)
 
-每种规则有明确的执行优先级：
+Rule 返回 **RuleResult**，而非 Order。RuleResult 可携带 weights（目标权重调整）、constraints（约束条件）、target_positions（目标持仓）或 hold（冻结后续规则）。Rules 不属于 Strategy，而是传给 `Engine.run(rules=[...])`。
+
+Engine 执行管道中，Rule 分为两个阶段：
 
 ```
 执行顺序（每个时间步）：
-1. Risk Rules     → 熔断检查、全局风控     （RiskRule Protocol，最高优先级）
-2. Order Rules    → 处理挂单（止损/止盈触发）（Rule Protocol）
-3. Rebalance      → 再平衡检查              （Rule Protocol）
-4. Exit Rules     → 平仓信号                （Rule Protocol）
-5. Entry Rules    → 建仓信号                （Rule Protocol，最低优先级）
+Pre-trade Rule  → 交易前风控检查（如回撤熔断、日内亏损限制）
+                  返回 RuleResult，可冻结后续交易
+Portfolio       → PortfolioOptimizer 将信号转化为目标持仓
+Trading Algo    → 生成订单
+Broker          → 提交并执行订单
+Post-trade Rule → 交易后处理（如止损止盈挂单、追踪止损更新）
+                  返回 RuleResult
 ```
 
-**RiskRule Protocol**：风控规则与普通 Rule 有本质区别——它不仅决定"要不要下单"，还决定"是否熔断后续所有规则"。因此独立为单独的 Protocol：
+**RuleResult**：
 
 ```python
-@runtime_checkable
-class RiskRule(Protocol):
-    """风控规则：可中断后续规则执行"""
-    name: str
-
-    def evaluate(
-        self, symbol: str, row: pd.Series, portfolio: Portfolio,
-        prices: dict[str, Decimal] | None = None,
-    ) -> tuple[Order | None, bool]:
-        """返回 (订单, 是否熔断)。bool=True 时停止后续所有规则执行。"""
-        ...
+@dataclass(frozen=True)
+class RuleResult:
+    """Rule 的统一返回类型"""
+    weights: SparseVector | None = None          # 目标权重调整
+    constraints: dict[str, Any] | None = None    # 约束条件
+    target_positions: SparseVector | None = None  # 目标持仓
+    hold: bool = False                            # True 时冻结后续所有规则
 ```
 
-**已实现的入场规则**：
+**已实现的风控规则**（Pre-trade Rule）：
 
-| 规则 | 参数 | 买入逻辑 |
-|------|------|----------|
-| `EntryRule` | signal, shares | 信号触发时固定股数买入 |
-| `TargetValueEntryRule` | signal, target_value | 信号触发时按目标市值买入（自动算股数） |
-| `FullPositionEntryRule` | signal | 信号触发时全仓买入（用全部可用现金） |
-| `SizedEntryRule` | signal, shares, max_position, max_pct_equity | 带仓位约束的固定股数买入 |
+| 规则 | 参数 | 逻辑 |
+|------|------|------|
+| `MaxDrawdownRisk` | max_drawdown | 组合回撤超阈值时返回 hold=True |
+| `DailyLossLimitRisk` | max_daily_loss | 日内亏损超阈值时返回 hold=True |
 
-**已实现的出场规则**：
-
-| 规则 | 参数 | 卖出逻辑 |
-|------|------|----------|
-| `ExitRule` | fast, slow | 快线跌破慢线时全仓卖出 |
-
-**已实现的订单规则**（挂单触发）：
+**已实现的订单规则**（Post-trade Rule）：
 
 | 规则 | 参数 | 逻辑 |
 |------|------|------|
@@ -711,12 +725,11 @@ class RiskRule(Protocol):
 | `TakeProfitRule` | threshold | 盈利超阈值时止盈卖出 |
 | `TrailingStopRule` | trail_pct | 追踪止损 |
 
-**已实现的风控规则**（实现 `RiskRule` Protocol）：
+**已实现的出场规则**：
 
-| 规则 | 参数 | 逻辑 |
-|------|------|------|
-| `MaxDrawdownRisk` | max_drawdown | 组合回撤超阈值时熔断 |
-| `DailyLossLimitRisk` | max_daily_loss | 日内亏损超阈值时熔断 |
+| 规则 | 参数 | 卖出逻辑 |
+|------|------|----------|
+| `ExitRule` | fast, slow | 快线跌破慢线时全仓卖出 |
 
 **已实现的再平衡规则**：
 
@@ -724,21 +737,23 @@ class RiskRule(Protocol):
 |------|------|------|
 | `RebalanceRule` | weight_col, frequency | 按权重信号列定期再平衡 |
 
-**仓位约束函数**：
+### 5.5.1 PortfolioOptimizer Protocol
 
-| 函数 | 说明 |
-|------|------|
-| `clip_to_max_position(shares, symbol, portfolio, max_shares)` | 裁剪到最大持仓股数 |
-| `clip_to_pct_equity(shares, symbol, price, portfolio, prices, max_pct)` | 裁剪到权益占比上限 |
+PortfolioOptimizer 取代了旧的 sizing 函数（如 clip_to_max_position、clip_to_pct_equity、os_equal_weight 等），提供统一的组合优化接口：
 
-**仓位管理函数**（Phase 2+）：
-- `osMaxPos` - 最大仓位限制
-- `osEqualWeight` - 等权分配
-- `osRiskParity` - 风险平价
-- `osPctEquity` - 固定比例
-- `osKelly` - Kelly 公式
+```python
+@runtime_checkable
+class PortfolioOptimizer(Protocol):
+    """组合优化器：将信号权重转化为目标持仓"""
+    def optimize(self, weights: SparseVector, portfolio: Portfolio,
+                 constraints: dict[str, Any] | None = None) -> SparseVector:
+        """返回优化后的目标权重"""
+        ...
+```
 
-**规则评估**：不同类型的规则有不同的评估方式。Entry rule 应测试 aggressive（市价单穿越 spread）和 passive（限价单挂单等待）两种入场方式——如果策略在 passive 入场下盈利但 aggressive 入场下亏损，实盘表现很可能不佳。Exit rule 分为信号驱动（如反向交叉）和经验驱动（如基于 MAE/MFE 设置的止损/止盈），后者需要从交易统计中实证推导。Risk rule 的止损阈值应基于 MAE 分布的统计分析，而非主观设定。
+PortfolioOptimizer 属于 Portfolio 阶段，在 Signal 之后、Rule 之前执行。
+
+**规则评估**：Risk rule 的止损阈值应基于 MAE 分布的统计分析，而非主观设定。Exit rule 分为信号驱动（如反向交叉）和经验驱动（如基于 MAE/MFE 设置的止损/止盈），后者需要从交易统计中实证推导。
 
 **Rule Burden**：规则数量是过拟合的重要信号。每添加一条规则都会增加策略的自由度。特别危险的模式是：在参数优化后因结果不满意而添加新规则，这本质上是 data snooping。`strategy_validate` 会报告策略的规则数量和总自由度，作为过拟合风险的参考指标。
 
@@ -756,7 +771,7 @@ class RiskRule(Protocol):
 
 ### 5.7 执行引擎 (oxq.core.engine)
 
-Engine 是通用策略执行引擎，执行 Universe → Indicator → Signal → Rule 四阶段管道。它是 **provider-agnostic** 的——不知道自己在运行回测、模拟盘还是实盘，区别仅在于接入的三个 Protocol 实现：
+Engine 是通用策略执行引擎，驱动 Indicators → Universe → Signal → Portfolio → Pre-trade Rule → Trading Algorithm → Broker → Post-trade Rule 管道。它是 **provider-agnostic** 的——不知道自己在运行回测、模拟盘还是实盘，区别仅在于接入的 Protocol 实现：
 
 | 模式 | MarketDataProvider | Broker |
 |------|-------------------|--------|
@@ -769,7 +784,7 @@ Engine 是通用策略执行引擎，执行 Universe → Indicator → Signal �
 ```python
 def run(self, strategy, market, broker,
         start, end, initial_cash=100_000.0,
-        run_through=None, tracer=None) -> RunResult
+        rules=None, run_through=None, tracer=None) -> RunResult
 ```
 
 - `run_through="indicator"` / `"signal"` 支持分阶段运行，用于逐组件评估
@@ -1101,11 +1116,11 @@ tools_required: [optimize.*, analysis.*]
 ## 9. 实现路线
 
 ### Phase 1: 核心引擎 + SDK (MVP) ✅ 已完成
-- `oxq.core`: Strategy (dataclass), Engine (4-phase pipeline), types (Order, Fill, Portfolio, Position, Protocol 定义)
+- `oxq.core`: Strategy (Universe + Signal + Portfolio), Engine (Indicator → Universe → Signal → Portfolio → Rule → Broker pipeline), types (Order, Fill, Portfolio, Position, RuleResult, Protocol 定义)
 - `oxq.universe`: UniverseProvider Protocol, StaticUniverse, FilterUniverse
 - `oxq.indicators`: SMA（其余指标文件已创建，待实现）
 - `oxq.signals`: Crossover（其余信号文件已创建，待实现）
-- `oxq.rules`: EntryRule, TargetValueEntryRule, FullPositionEntryRule, ExitRule
+- `oxq.rules`: ExitRule, RuleResult
 - `oxq.portfolio`: Portfolio, Position, RunResult + analytics (total_return, sharpe_ratio, max_drawdown)
 - `oxq.core.engine`: 通用执行引擎（provider-agnostic），支持 `run_through` 分阶段执行
 - `oxq.trade`: SimBroker（模拟撮合，同时实现 OrderRouter + FillReceiver）
@@ -1119,7 +1134,7 @@ tools_required: [optimize.*, analysis.*]
 ### Phase 2: 参数优化 + 统计检验 + 指标扩展 ✅ 大部分已完成
 - `oxq.indicators`: 扩展至 27 个内置指标（SMA, EMA, WMA, DEMA, TEMA, RSI, MACDLine/Signal/Histogram, ROC, PPO, CCI, BollingerUpper/Lower, ATR, OBV, VWAP, MFI, ADX, AROON, StochK, Momentum, NdayReturn, LogReturn, RollingVolatility, RollingMDD, Ratio）
 - `oxq.signals`: 新增 EqualWeight、TopNRanking、RiskParity 权重信号
-- `oxq.rules`: 新增 SizedEntryRule、StopLossRule、TakeProfitRule、TrailingStopRule、RebalanceRule、MaxDrawdownRisk、DailyLossLimitRisk、clip_to_max_position、clip_to_pct_equity
+- `oxq.rules`: 新增 StopLossRule、TakeProfitRule、TrailingStopRule、RebalanceRule、MaxDrawdownRisk、DailyLossLimitRisk、RuleResult、PortfolioOptimizer Protocol
 - `oxq.optimize`: ParameterSet、GridSearch、WalkForward、TimeSeriesCV、过拟合分析
 - `oxq.tools`: paramset_create、grid_search、walk_forward、cross_validate、overfit_analysis、paramset_inspect
 - **未完成**: `IndexUniverse`（Point-in-Time）、Threshold/Comparison/Formula/Peak/Timestamp/Composite 信号

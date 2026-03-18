@@ -93,22 +93,12 @@ def _apply_params(
 ) -> Strategy:
     """Create a copy of strategy with modified component params.
 
-    Supports indicators, signals, and all rule types (entry, exit,
-    risk, order, rebalance). Components are matched by name — for
-    indicators/signals the dict key is the name, for rules the
-    ``name`` attribute is used.
+    Supports signals and signal-level required_indicators. Components
+    are matched by name — for signals the dict key is the name.
 
     Only modifies parameters for components that appear in ``params``.
     Other components keep their original parameters.
     """
-    new_indicators = {}
-    for name, (indicator, orig_params) in strategy.indicators.items():
-        if name in params:
-            merged = {**orig_params, **params[name]}
-            new_indicators[name] = (indicator, merged)
-        else:
-            new_indicators[name] = (indicator, dict(orig_params))
-
     new_signals = {}
     for name, (signal, orig_params) in strategy.signals.items():
         if name in params:
@@ -117,16 +107,26 @@ def _apply_params(
         else:
             new_signals[name] = (signal, dict(orig_params))
 
+        # Also apply params to required_indicators on the signal
+        req_inds = getattr(signal, "required_indicators", {})
+        if req_inds:
+            new_req = {}
+            for ind_name, (ind, ind_params) in req_inds.items():
+                if ind_name in params:
+                    merged_ind = {**ind_params, **params[ind_name]}
+                    new_req[ind_name] = (ind, merged_ind)
+                else:
+                    new_req[ind_name] = (ind, dict(ind_params))
+            # Set updated indicators on the signal copy
+            new_signal = copy.deepcopy(new_signals[name][0])
+            new_signal.required_indicators = new_req
+            new_signals[name] = (new_signal, new_signals[name][1])
+
     return Strategy(
         name=strategy.name,
         universe=strategy.universe,
-        indicators=new_indicators,
         signals=new_signals,
-        entry_rules=_apply_rule_params(strategy.entry_rules, params),
-        exit_rules=_apply_rule_params(strategy.exit_rules, params),
-        risk_rules=_apply_rule_params(strategy.risk_rules, params),
-        order_rules=_apply_rule_params(strategy.order_rules, params),
-        rebalance_rules=_apply_rule_params(strategy.rebalance_rules, params),
+        portfolio=strategy.portfolio,
         hypothesis=strategy.hypothesis,
         objectives=dict(strategy.objectives),
         benchmarks=list(strategy.benchmarks),

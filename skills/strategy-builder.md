@@ -1,7 +1,7 @@
 ---
 name: strategy-builder
 description: 指导 Agent 构建量化交易策略并进行回测评估
-tools_required: [strategy_create, strategy_add_indicator, strategy_add_signal, strategy_add_rule, strategy_inspect, indicator_describe, indicator_list, engine_run, engine_results, engine_trade_list, data_load_symbols, data_list_symbols, data_inspect, universe_set]
+tools_required: [strategy_create, strategy_add_indicator, strategy_add_signal, strategy_inspect, indicator_describe, indicator_list, engine_run, engine_results, engine_trade_list, data_load_symbols, data_list_symbols, data_inspect, universe_set]
 ---
 
 ## 你的角色
@@ -136,33 +136,26 @@ strategy_add_signal(strategy="sma_crossover", name="golden_cross", type="Crossov
 - `RiskParity` — 风险平价，按波动率倒数分配权重（params: vol, max_weight；默认 max_weight=0.9）
 - `TopNRanking` — 截面排名选 Top N，归一化权重，支持权重上限（params: score, n, filter_negative, max_weight）
 
-### 4.4 添加规则（Rule 层）
+### 4.4 规则（Rules）
 
-规则分五大类，按 Engine 执行顺序排列：
+Rules 不属于 Strategy，而是传给 `engine_run(rules=[...])`。Rule 返回 RuleResult（weights/constraints/target_positions/hold），而非 Order。
 
-#### 4.4.1 风险规则（Risk Rules）— 熔断器
+Engine 管道中 Rule 分为 Pre-trade Rule（交易前风控）和 Post-trade Rule（交易后处理）。
 
-在每根 bar 最先执行。触发后冻结后续所有规则（但已挂条件单仍可触发）。
+> **注意：** EntryRule、TargetValueEntryRule、FullPositionEntryRule、SizedEntryRule 已删除。入场逻辑由 Signal + PortfolioOptimizer 处理。
 
-```
-strategy_add_rule(strategy="...", name="dd_breaker", type="MaxDrawdownRisk", params={"max_drawdown": 0.15})
-strategy_add_rule(strategy="...", name="daily_limit", type="DailyLossLimitRisk", params={"max_daily_loss": 0.03})
-```
+#### 4.4.1 风险规则（Pre-trade Rules）— 熔断器
+
+在每根 bar 交易前执行。触发后返回 `hold=True`，冻结后续所有交易。
 
 | 类型 | 参数 | 说明 |
 |------|------|------|
-| `MaxDrawdownRisk` | `max_drawdown` (默认 0.15) | 组合回撤超阈值 → 清仓 + 冻结 |
-| `DailyLossLimitRisk` | `max_daily_loss` (默认 0.03) | 当日亏损超阈值 → 冻结（不清仓） |
+| `MaxDrawdownRisk` | `max_drawdown` (默认 0.15) | 组合回撤超阈值 → 返回 hold=True |
+| `DailyLossLimitRisk` | `max_daily_loss` (默认 0.03) | 当日亏损超阈值 → 返回 hold=True（不清仓） |
 
-#### 4.4.2 委托规则（Order Rules）— 条件单
+#### 4.4.2 委托规则（Post-trade Rules）— 条件单
 
-挂 stop/limit/trailing_stop 条件单到 SimBroker 的 OrderBook。同标的同类型自动去重（新的覆盖旧的）。
-
-```
-strategy_add_rule(strategy="...", name="stop_loss", type="StopLossRule", params={"threshold": 0.05})
-strategy_add_rule(strategy="...", name="take_profit", type="TakeProfitRule", params={"threshold": 0.15})
-strategy_add_rule(strategy="...", name="trailing", type="TrailingStopRule", params={"trail_pct": 0.05})
-```
+交易后挂 stop/limit/trailing_stop 条件单。同标的同类型自动去重（新的覆盖旧的）。
 
 | 类型 | 参数 | 说明 |
 |------|------|------|
@@ -174,36 +167,15 @@ strategy_add_rule(strategy="...", name="trailing", type="TrailingStopRule", para
 
 按目标权重定期调仓，配合 Signal 层的权重信号使用。
 
-```
-strategy_add_rule(strategy="...", name="rebal", type="RebalanceRule", params={"weight_col": "rp_weight", "frequency": 10})
-```
-
 | 类型 | 参数 | 说明 |
 |------|------|------|
 | `RebalanceRule` | `weight_col`, `frequency` (默认 10) | 每 N 根 bar 按目标权重调仓 |
 
 #### 4.4.4 退出规则（Exit Rules）
 
-```
-strategy_add_rule(strategy="...", name="sell_on_cross", type="ExitRule", params={"fast": "sma_10", "slow": "sma_50"})
-```
-
 | 类型 | 参数 | 说明 |
 |------|------|------|
 | `ExitRule` | `fast`, `slow` | 快线跌破慢线时全仓卖出 |
-
-#### 4.4.5 入场规则（Entry Rules）
-
-```
-strategy_add_rule(strategy="...", name="buy_on_cross", type="EntryRule", params={"signal": "golden_cross", "shares": 100})
-```
-
-| 类型 | 参数 | 说明 |
-|------|------|------|
-| `EntryRule` | `signal`, `shares` (默认 100) | 信号触发时固定股数买入 |
-| `TargetValueEntryRule` | `signal`, `target_value` | 信号触发时按目标市值买入 |
-| `FullPositionEntryRule` | `signal` | 信号触发时全仓买入 |
-| `SizedEntryRule` | `signal`, `shares`, `max_position`, `max_pct_equity` | 带仓位控制的买入（限制最大持股数或持仓占比） |
 
 ### 4.5 检查策略
 ```
@@ -270,8 +242,8 @@ engine_trade_list(run_id="...")
 | "查看策略定义" | 调用 strategy_inspect |
 | "查看回测结果" | 调用 engine_results |
 | "修改指标参数" | 重建策略（当前不支持原地修改） |
-| "加止损" | strategy_add_rule + StopLossRule |
-| "加风控" | strategy_add_rule + MaxDrawdownRisk / DailyLossLimitRisk |
+| "加止损" | engine_run 传入 rules=[StopLossRule(...)] |
+| "加风控" | engine_run 传入 rules=[MaxDrawdownRisk(...)] |
 | "加交易成本" | engine_run 传入 fee_rate / slippage_rate |
 
 ## 红线

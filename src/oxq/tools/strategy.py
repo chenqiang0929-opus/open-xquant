@@ -35,10 +35,9 @@ from oxq.indicators.ratio import Ratio
 from oxq.indicators.rolling_mdd import RollingMDD
 from oxq.indicators.rolling_volatility import RollingVolatility
 from oxq.indicators.sma import SMA
-from oxq.rules.entry import EntryRule, FullPositionEntryRule, SizedEntryRule, TargetValueEntryRule
+from oxq.portfolio.optimizers import EqualWeightOptimizer
 from oxq.rules.exit import ExitRule
 from oxq.rules.order import StopLossRule, TakeProfitRule, TrailingStopRule
-from oxq.rules.rebalance import RebalanceRule
 from oxq.rules.risk import DailyLossLimitRisk, MaxDrawdownRisk
 from oxq.signals.comparison import Comparison
 from oxq.signals.composite import Composite
@@ -100,15 +99,10 @@ SIGNAL_TYPES: dict[str, type] = {
     "TopNRanking": TopNRanking,
 }
 RULE_TYPES: dict[str, type] = {
-    "EntryRule": EntryRule,
-    "TargetValueEntryRule": TargetValueEntryRule,
-    "FullPositionEntryRule": FullPositionEntryRule,
-    "SizedEntryRule": SizedEntryRule,
     "ExitRule": ExitRule,
     "StopLossRule": StopLossRule,
     "TakeProfitRule": TakeProfitRule,
     "TrailingStopRule": TrailingStopRule,
-    "RebalanceRule": RebalanceRule,
     "MaxDrawdownRisk": MaxDrawdownRisk,
     "DailyLossLimitRisk": DailyLossLimitRisk,
 }
@@ -141,10 +135,8 @@ def strategy_create(
         objectives=objectives,
         benchmarks=benchmarks or [],
         universe=StaticUniverse(()),
-        indicators={},
         signals={},
-        entry_rules=[],
-        exit_rules=[],
+        portfolio=EqualWeightOptimizer(),
     )
     session._strategies[name] = strategy
     session._save()
@@ -167,15 +159,8 @@ def strategy_list() -> dict[str, Any]:
             {
                 "name": name,
                 "hypothesis": strat.hypothesis,
-                "indicators": len(strat.indicators),
                 "signals": len(strat.signals),
-                "rules": (
-                    len(strat.entry_rules)
-                    + len(strat.exit_rules)
-                    + len(strat.order_rules)
-                    + len(strat.rebalance_rules)
-                    + len(strat.risk_rules)
-                ),
+                "portfolio": strat.portfolio.name,
             }
             for name, strat in sorted(session._strategies.items())
         ],
@@ -201,7 +186,11 @@ def strategy_add_indicator(
     if cls is None:
         return {"error": f"Unknown indicator type '{type}'. Available: {sorted(INDICATOR_TYPES)}"}
 
-    strat.indicators[name] = (cls(), params or {})
+    # Store indicator info in signal's required_indicators when signal is added.
+    # For now, store indicators in a _pending_indicators dict on the strategy.
+    if not hasattr(strat, "_pending_indicators"):
+        strat._pending_indicators = {}
+    strat._pending_indicators[name] = (cls(), params or {})
     session._save()
     return {
         "strategy": strategy,
@@ -267,16 +256,11 @@ def strategy_add_rule(
     except TypeError as e:
         return {"error": f"Invalid params for {type}: {e}"}
 
-    if type in ("EntryRule", "TargetValueEntryRule", "FullPositionEntryRule", "SizedEntryRule"):
-        strat.entry_rules.append(rule)
-    elif type == "ExitRule":
-        strat.exit_rules.append(rule)
-    elif type in ("StopLossRule", "TakeProfitRule", "TrailingStopRule"):
-        strat.order_rules.append(rule)
-    elif type == "RebalanceRule":
-        strat.rebalance_rules.append(rule)
-    elif type in ("MaxDrawdownRisk", "DailyLossLimitRisk"):
-        strat.risk_rules.append(rule)
+    # Rules are stored externally; they are passed to Engine.run() at runtime.
+    # Store them in a _pending_rules list on the strategy for tool convenience.
+    if not hasattr(strat, "_pending_rules"):
+        strat._pending_rules = []
+    strat._pending_rules.append(rule)
 
     session._save()
     return {
@@ -297,6 +281,8 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
     if strat is None:
         return {"error": f"Strategy '{strategy}' not found"}
 
+    pending_indicators = getattr(strat, "_pending_indicators", {})
+    pending_rules = getattr(strat, "_pending_rules", [])
     return {
         "name": strat.name,
         "hypothesis": strat.hypothesis,
@@ -305,31 +291,16 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
         "universe": list(strat.universe.symbols) if hasattr(strat.universe, "symbols") else [],
         "indicators": {
             k: {"type": v[0].__class__.__name__, "params": v[1]}
-            for k, v in strat.indicators.items()
+            for k, v in pending_indicators.items()
         },
         "signals": {
             k: {"type": v[0].__class__.__name__, "params": v[1]}
             for k, v in strat.signals.items()
         },
-        "entry_rules": [
+        "portfolio": strat.portfolio.name,
+        "rules": [
             {"type": r.__class__.__name__, "name": r.name}
-            for r in strat.entry_rules
-        ],
-        "exit_rules": [
-            {"type": r.__class__.__name__, "name": r.name}
-            for r in strat.exit_rules
-        ],
-        "order_rules": [
-            {"type": r.__class__.__name__, "name": r.name}
-            for r in strat.order_rules
-        ],
-        "rebalance_rules": [
-            {"type": r.__class__.__name__, "name": r.name}
-            for r in strat.rebalance_rules
-        ],
-        "risk_rules": [
-            {"type": r.__class__.__name__, "name": r.name}
-            for r in strat.risk_rules
+            for r in pending_rules
         ],
     }
 

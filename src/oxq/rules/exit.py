@@ -1,14 +1,16 @@
-"""Exit rule — generates SELL orders when fast MA drops below slow MA."""
+"""Exit rule — signals intent to close position when fast MA drops below slow MA."""
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pandas as pd
 
-from oxq.core.types import Order, Portfolio
+from oxq.core.types import Portfolio, RuleResult
 
 
 class ExitRule:
-    """Sell entire position when the fast indicator drops below the slow one."""
+    """Signal intent to close position when the fast indicator drops below the slow one."""
 
     name = "ExitRule"
 
@@ -17,9 +19,15 @@ class ExitRule:
         self.slow = slow
 
     def evaluate(
-        self, symbol: str, row: pd.Series, portfolio: Portfolio,
-    ) -> Order | None:
+        self,
+        symbol: str,
+        row: pd.Series,
+        portfolio: Portfolio,
+        prices: dict[str, Decimal] | None = None,
+    ) -> RuleResult:
         if symbol in portfolio.positions and row[self.fast] < row[self.slow]:
-            pos = portfolio.positions[symbol]
-            return Order(symbol=symbol, side="SELL", shares=pos.shares)
-        return None
+            return RuleResult(
+                target_positions={symbol: 0.0},
+                reason=f"{self.fast} < {self.slow}, exit {symbol}",
+            )
+        return RuleResult()

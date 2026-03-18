@@ -127,6 +127,51 @@ class Portfolio:
         return self.cash + pos_value
 
 
+@dataclass
+class Constraint:
+    """Per-symbol trade constraint applied by a Rule.
+
+    Attributes
+    ----------
+    max_shares : int or None
+        Maximum number of shares allowed.
+    max_value : float or None
+        Maximum notional value allowed.
+    """
+
+    max_shares: int | None = None
+    max_value: float | None = None
+
+
+@dataclass
+class RuleResult:
+    """Structured output returned by a Rule evaluation.
+
+    Rules return a RuleResult to communicate weight overrides,
+    per-symbol constraints, target positions, or a hold signal
+    to the Engine pipeline.
+
+    Attributes
+    ----------
+    weights : dict[str, float] or None
+        Target weight overrides keyed by symbol.
+    constraints : dict[str, Constraint] or None
+        Per-symbol trade constraints.
+    target_positions : dict[str, float] or None
+        Absolute target positions keyed by symbol.
+    hold : bool
+        If True, freeze trading for this bar.
+    reason : str
+        Human-readable explanation for the rule action.
+    """
+
+    weights: dict[str, float] | None = None
+    constraints: dict[str, Constraint] | None = None
+    target_positions: dict[str, float] | None = None
+    hold: bool = False
+    reason: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Execution protocols (Section 4.6 — three-protocol architecture)
 # ---------------------------------------------------------------------------
@@ -203,11 +248,36 @@ class Signal(Protocol):
 
 
 @runtime_checkable
+class PortfolioOptimizer(Protocol):
+    """Portfolio optimization contract.
+
+    Takes signal output and indicator data, returns target weights.
+    Weights must sum to 1.0 (including CASH).
+    """
+
+    name: str
+
+    def optimize(
+        self,
+        signals: dict[str, pd.DataFrame],
+        indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]: ...
+
+
+@runtime_checkable
 class Rule(Protocol):
-    """Rule contract: bar-by-bar stateful evaluation."""
+    """Rule contract: bar-by-bar stateful evaluation.
+
+    Pre-trade rules return RuleResult with weights/constraints.
+    Post-trade monitoring rules return RuleResult with target_positions.
+    """
 
     name: str
 
     def evaluate(
-        self, symbol: str, row: pd.Series, portfolio: Portfolio
-    ) -> Order | None: ...
+        self,
+        symbol: str,
+        row: pd.Series,
+        portfolio: Portfolio,
+        prices: dict[str, Decimal] | None = None,
+    ) -> RuleResult: ...

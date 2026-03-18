@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from oxq.core.types import Fill, Order, Portfolio, Position
+from oxq.core.types import Constraint, Fill, Order, Portfolio, Position, Rule, RuleResult
 
 
 def test_order_is_frozen() -> None:
@@ -90,3 +90,77 @@ def test_portfolio_total_value_missing_price() -> None:
     )
     # If price not in dict, position valued at 0
     assert portfolio.total_value({}) == Decimal("10000")
+
+
+def test_rule_result_defaults():
+    r = RuleResult()
+    assert r.weights is None
+    assert r.constraints is None
+    assert r.target_positions is None
+    assert r.hold is False
+    assert r.reason == ""
+
+
+def test_rule_result_pre_trade():
+    r = RuleResult(
+        weights={"AAPL": 0.0, "GOOG": 0.5},
+        constraints={"AAPL": Constraint(max_shares=1000)},
+        reason="blacklist AAPL",
+    )
+    assert r.weights["AAPL"] == 0.0
+    assert r.constraints["AAPL"].max_shares == 1000
+
+
+def test_rule_result_post_trade():
+    r = RuleResult(
+        target_positions={"AAPL": 0.0},
+        reason="stop loss triggered",
+    )
+    assert r.target_positions["AAPL"] == 0.0
+
+
+def test_constraint_defaults():
+    c = Constraint()
+    assert c.max_shares is None
+    assert c.max_value is None
+
+
+def test_rule_protocol_returns_rule_result():
+    class MyRule:
+        name = "test"
+        def evaluate(self, symbol, row, portfolio, prices=None):
+            return RuleResult(reason="test")
+    assert isinstance(MyRule(), Rule)
+
+
+def test_portfolio_optimizer_protocol():
+    from oxq.core.types import PortfolioOptimizer
+
+    class MyOptimizer:
+        name = "test"
+
+        def optimize(self, signals, indicators):
+            return {"AAPL": 0.5, "CASH": 0.5}
+
+    assert isinstance(MyOptimizer(), PortfolioOptimizer)
+
+
+def test_strategy_new_shape():
+    from oxq.core.strategy import Strategy
+    from oxq.universe.static import StaticUniverse
+
+    class FakeOptimizer:
+        name = "fake"
+        def optimize(self, signals, indicators):
+            return {"CASH": 1.0}
+
+    s = Strategy(
+        name="test",
+        universe=StaticUniverse(("AAPL",)),
+        signals={},
+        portfolio=FakeOptimizer(),
+    )
+    assert s.name == "test"
+    assert s.portfolio.name == "fake"
+    assert not hasattr(s, "entry_rules")
+    assert not hasattr(s, "indicators")
