@@ -16,14 +16,11 @@ class Crossover:
 
     def compute(
         self,
-        mktdata: dict[str, pd.DataFrame],
+        mktdata: pd.DataFrame,
         fast: str = "",
         slow: str = "",
-    ) -> dict[str, pd.Series]:
-        """Return cross-up boolean series for every symbol in *mktdata*."""
-        result: dict[str, pd.Series] = {}
-        for symbol, df in mktdata.items():
-            f = df[fast]
-            s = df[slow]
-            result[symbol] = (f.shift(1) <= s.shift(1)) & (f > s)
-        return result
+    ) -> pd.Series:
+        """Return cross-up boolean series for the given *mktdata*."""
+        f = mktdata[fast]
+        s = mktdata[slow]
+        return (f.shift(1) <= s.shift(1)) & (f > s)

@@ -662,22 +662,19 @@ strategy.add_indicator("alpha_momentum", CachedFactor,
 
 **信号的本质**：Signal 是对某个时间点的**方向性预测**（directional prediction），而非交易指令。信号描述"交易的欲望"——策略可能因仓位限制、风控规则或再平衡周期等原因选择不执行信号。将信号与行动分离，使得信号的预测力可以独立于执行假设进行评估。
 
-提供 10 种内置信号类型：
+提供 7 种内置信号类型（均为 per-symbol 信号，生成布尔或数值列）：
 
 | 信号类型 | 说明 | 状态 |
 |----------|------|------|
 | `Crossover` | 两条线交叉（上穿检测） | ✅ 已实现 |
-| `EqualWeight` | 等权 1/N 分配 | ✅ 已实现 |
-| `TopNRanking` | 按得分排名，选 top N 并归一化权重 | ✅ 已实现 |
-| `RiskParity` | 逆波动率加权分配 | ✅ 已实现 |
-| `Threshold` | 超过/低于阈值 | 🔲 待实现 |
-| `Comparison` | 两个值比较 | 🔲 待实现 |
-| `Formula` | 自定义布尔公式 | 🔲 待实现 |
-| `Peak` | 峰值/谷值检测 | 🔲 待实现 |
-| `Timestamp` | 时间条件触发 | 🔲 待实现 |
-| `Composite` | 多信号 AND/OR 组合 | 🔲 待实现 |
+| `Threshold` | 超过/低于阈值 | ✅ 已实现 |
+| `Comparison` | 两个值比较 | ✅ 已实现 |
+| `Formula` | 自定义布尔公式 | ✅ 已实现 |
+| `Peak` | 峰值/谷值检测 | ✅ 已实现 |
+| `Timestamp` | 时间条件触发 | ✅ 已实现 |
+| `Composite` | 多信号 AND/OR 组合 | ✅ 已实现 |
 
-已实现的信号分为两类：**布尔信号**（`Crossover`，生成 True/False 触发列）和**权重信号**（`EqualWeight`、`TopNRanking`、`RiskParity`，生成截面权重分配）。权重信号是再平衡策略的核心——它们实现了 Signal 层的截面操作能力。
+所有信号均为 per-symbol 操作，生成布尔或数值列。原来的截面权重信号（`EqualWeight`、`TopNRanking`、`RiskParity`）已迁移到 PortfolioOptimizer 层（`EqualWeightOptimizer`、`TopNRankingOptimizer`、`RiskParityOptimizer`），负责截面权重分配。
 
 **信号评估**：信号触发后的前瞻收益分布（forward return distribution）是评估信号质量的核心工具。以信号触发时刻 t₀ 为锚点，统计 t₁...tₙ 期间的收益分布——无需任何执行假设即可判断信号是否具有预测力。引擎的分阶段执行能力（`run_through="signal"`）为此提供了架构支持。稳健的信号应在相邻参数组合中呈现"稳定区域"（stable region）：相似的参数产生相似的正向或负向预期。如果正向预期在参数空间中随机散布，说明假设本身可能有问题。
 
@@ -1133,11 +1130,11 @@ tools_required: [optimize.*, analysis.*]
 
 ### Phase 2: 参数优化 + 统计检验 + 指标扩展 ✅ 大部分已完成
 - `oxq.indicators`: 扩展至 27 个内置指标（SMA, EMA, WMA, DEMA, TEMA, RSI, MACDLine/Signal/Histogram, ROC, PPO, CCI, BollingerUpper/Lower, ATR, OBV, VWAP, MFI, ADX, AROON, StochK, Momentum, NdayReturn, LogReturn, RollingVolatility, RollingMDD, Ratio）
-- `oxq.signals`: 新增 EqualWeight、TopNRanking、RiskParity 权重信号
+- `oxq.signals`: 新增 Comparison、Composite、Formula、Peak、Threshold、Timestamp per-symbol 信号（原 EqualWeight/TopNRanking/RiskParity 已迁移至 PortfolioOptimizer 层）
 - `oxq.rules`: 新增 StopLossRule、TakeProfitRule、TrailingStopRule、RebalanceRule、MaxDrawdownRisk、DailyLossLimitRisk、RuleResult、PortfolioOptimizer Protocol
 - `oxq.optimize`: ParameterSet、GridSearch、WalkForward、TimeSeriesCV、过拟合分析
 - `oxq.tools`: paramset_create、grid_search、walk_forward、cross_validate、overfit_analysis、paramset_inspect
-- **未完成**: `IndexUniverse`（Point-in-Time）、Threshold/Comparison/Formula/Peak/Timestamp/Composite 信号
+- **未完成**: `IndexUniverse`（Point-in-Time）
 - **目标**: ✅ Agent 可以优化参数并验证统计显著性
 
 ### Phase 3: 交易执行 + 可观测性 🔄 部分已完成

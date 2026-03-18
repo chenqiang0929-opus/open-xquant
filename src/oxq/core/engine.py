@@ -146,20 +146,19 @@ class Engine:
         if run_through == "indicator":
             return
 
-        # -- Phase 2: Signal (vectorized, cross-sectional) --------------------
+        # -- Phase 2: Signal (vectorized, per-symbol) --------------------------
         for sig_name, (signal, params) in strategy.signals.items():
             t0 = _time.perf_counter()
-            results = signal.compute(self._mktdata, **params)
-            elapsed = (_time.perf_counter() - t0) * 1000
-            for symbol, series in results.items():
-                self._mktdata[symbol][sig_name] = series
-            if tracer:
-                total_signals = sum(
-                    int(s.sum()) for s in results.values() if hasattr(s, 'sum')
+            for symbol in self._universe.symbols:
+                self._mktdata[symbol][sig_name] = signal.compute(
+                    self._mktdata[symbol], **params,
                 )
+            elapsed = (_time.perf_counter() - t0) * 1000
+            if tracer:
+                sample = self._mktdata[self._universe.symbols[0]][sig_name]
                 tracer.on_signal(
                     name=sig_name, inputs=params,
-                    output_summary={"signal_count": total_signals},
+                    output_summary={"signal_count": int(sample.sum()) if hasattr(sample, 'sum') else 0},
                     duration_ms=elapsed,
                 )
 

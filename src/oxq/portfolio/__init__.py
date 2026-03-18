@@ -1,6 +1,11 @@
 from oxq.portfolio.analytics import RunResult
 from oxq.portfolio.execution_report import ExecutionReport, FillComparison
-from oxq.portfolio.optimizers import EqualWeightOptimizer, KellyOptimizer, RiskParityOptimizer
+from oxq.portfolio.optimizers import (
+    EqualWeightOptimizer,
+    KellyOptimizer,
+    RiskParityOptimizer,
+    TopNRankingOptimizer,
+)
 from oxq.portfolio.orderbook import ManagedOrder, OrderBook
 
 __all__ = [
@@ -12,4 +17,5 @@ __all__ = [
     "OrderBook",
     "RiskParityOptimizer",
     "RunResult",
+    "TopNRankingOptimizer",
 ]

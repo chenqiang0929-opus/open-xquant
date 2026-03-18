@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from oxq.core.types import Constraint, Fill, Order, Portfolio, Position, Rule, RuleResult
+from oxq.core.types import Constraint, Fill, Order, Portfolio, Position, Rule, RuleResult, Signal
 
 
 def test_order_is_frozen() -> None:
@@ -143,6 +143,15 @@ def test_portfolio_optimizer_protocol():
             return {"AAPL": 0.5, "CASH": 0.5}
 
     assert isinstance(MyOptimizer(), PortfolioOptimizer)
+
+
+def test_signal_protocol_per_symbol():
+    """Signal.compute takes a single DataFrame, returns a single Series."""
+    class MySignal:
+        name = "test"
+        def compute(self, mktdata, **params):
+            return mktdata["close"] > 100
+    assert isinstance(MySignal(), Signal)
 
 
 def test_strategy_new_shape():

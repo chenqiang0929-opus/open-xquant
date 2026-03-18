@@ -96,3 +96,51 @@ class KellyOptimizer:
             weights["CASH"] = 1.0 - total
 
         return weights
+
+
+class TopNRankingOptimizer:
+    """Rank symbols by score, select top N, normalize to target weights."""
+
+    name: str = "TopNRanking"
+
+    def __init__(
+        self,
+        score_col: str = "score",
+        n: int = 5,
+        filter_negative: bool = True,
+        max_weight: float = 1.0,
+    ) -> None:
+        self.score_col = score_col
+        self.n = n
+        self.filter_negative = filter_negative
+        self.max_weight = max_weight
+
+    def optimize(
+        self,
+        signals: dict[str, pd.DataFrame],
+        indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]:
+        scores: dict[str, float] = {}
+        for symbol, df in indicators.items():
+            val = float(df[self.score_col].iloc[-1])
+            if pd.isna(val):
+                continue
+            if self.filter_negative and val <= 0:
+                continue
+            scores[symbol] = val
+
+        if not scores:
+            return {"CASH": 1.0}
+
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        top = ranked[: self.n]
+
+        total = sum(v for _, v in top)
+        if total <= 0:
+            return {"CASH": 1.0}
+
+        weights: dict[str, float] = {}
+        for s, v in top:
+            weights[s] = min(v / total, self.max_weight)
+
+        return weights if weights else {"CASH": 1.0}
