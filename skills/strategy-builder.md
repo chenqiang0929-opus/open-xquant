@@ -130,11 +130,11 @@ indicator_describe(type="RSI")
 strategy_add_signal(strategy="sma_crossover", name="golden_cross", type="Crossover", inputs={"fast": "sma_10", "slow": "sma_50"})
 ```
 
-可用信号类型：`Crossover`, `EqualWeight`, `RiskParity`, `TopNRanking`
+可用信号类型：`Comparison`, `Composite`, `Crossover`, `Formula`, `Peak`, `Threshold`, `Timestamp`
 
-- `EqualWeight` — 等权分配 1/N，所有有效标的均匀权重（params: max_weight）
-- `RiskParity` — 风险平价，按波动率倒数分配权重（params: vol, max_weight；默认 max_weight=0.9）
-- `TopNRanking` — 截面排名选 Top N，归一化权重，支持权重上限（params: score, n, filter_negative, max_weight）
+> **注意：** 原来的 `EqualWeight`、`RiskParity`、`TopNRanking` 权重信号已迁移到 PortfolioOptimizer 层
+> （`EqualWeightOptimizer`、`RiskParityOptimizer`、`TopNRankingOptimizer`），Signal 层现在只负责
+> 生成 per-symbol 布尔/数值列。截面权重分配由 PortfolioOptimizer 处理。
 
 ### 4.4 规则（Rules）
 

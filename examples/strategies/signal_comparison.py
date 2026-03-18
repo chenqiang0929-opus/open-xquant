@@ -13,7 +13,7 @@ Objectives:
 Pipeline:
     Indicator 层 — Momentum(20), RollingVolatility(20), Ratio(mom/vol)
                    (collected automatically from signal's required_indicators)
-    Signal 层   — TopNRanking(score=ram, n=3, filter_negative=True)
+    Signal 层   — Threshold(column=ram, threshold=0, relationship=gt) as indicator carrier
     Portfolio   — EqualWeightOptimizer / RiskParityOptimizer
 
 Variants (portfolio optimizer comparison):
@@ -40,7 +40,7 @@ from oxq.core import Engine, Strategy
 from oxq.data import LocalMarketDataProvider, YFinanceDownloader
 from oxq.indicators import Momentum, Ratio, RollingVolatility
 from oxq.portfolio.optimizers import EqualWeightOptimizer, RiskParityOptimizer
-from oxq.signals import TopNRanking
+from oxq.signals import Threshold
 from oxq.trade import SimBroker
 from oxq.universe import StaticUniverse
 
@@ -64,8 +64,8 @@ for sym in SYMBOLS:
 
 # ── 1. Build signal with required_indicators ─────────────────────────
 
-ranking_signal = TopNRanking()
-ranking_signal.required_indicators = {
+active_signal = Threshold()
+active_signal.required_indicators = {
     "mom": (Momentum(), {"column": "close", "period": 20}),
     "vol": (RollingVolatility(), {"column": "close", "period": 20}),
     "ram": (Ratio(), {"col_a": "mom", "col_b": "vol"}),
@@ -88,7 +88,7 @@ COMMON = dict(
     benchmarks=[],
     universe=StaticUniverse(SYMBOLS),
     signals={
-        "tw": (ranking_signal, {"score": "ram", "n": 3, "filter_negative": True}),
+        "active": (active_signal, {"column": "ram", "threshold": 0, "relationship": "gt"}),
     },
 )
 

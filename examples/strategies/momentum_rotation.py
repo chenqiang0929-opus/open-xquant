@@ -14,8 +14,8 @@ Objectives:
 Pipeline:
     Indicator 层 — Momentum(20), RollingVolatility(20), Ratio(mom/vol)
                    (collected automatically from signal's required_indicators)
-    Signal 层   — TopNRanking(score=ram, n=2, max_weight=0.6)
-    Portfolio   — EqualWeightOptimizer (handles position sizing)
+    Signal 层   — Threshold(column=ram, threshold=0, relationship=gt) as indicator carrier
+    Portfolio   — TopNRankingOptimizer(score_col=ram, n=2, max_weight=0.6)
 
 Architecture note:
     Strategy defines: name, universe, signals, portfolio (PortfolioOptimizer).
@@ -43,8 +43,8 @@ Usage:
 from oxq.core import Engine, Strategy
 from oxq.data import LocalMarketDataProvider
 from oxq.indicators import Momentum, Ratio, RollingVolatility
-from oxq.portfolio.optimizers import EqualWeightOptimizer
-from oxq.signals import TopNRanking
+from oxq.portfolio.optimizers import TopNRankingOptimizer
+from oxq.signals import Threshold
 from oxq.trade import SimBroker
 from oxq.universe import StaticUniverse
 
@@ -62,8 +62,8 @@ END = "2026-02-28"
 
 # ── 1. Build signal with required_indicators ─────────────────────────
 
-ranking_signal = TopNRanking()
-ranking_signal.required_indicators = {
+active_signal = Threshold()
+active_signal.required_indicators = {
     "mom": (Momentum(), {"column": "close", "period": 20}),
     "vol": (RollingVolatility(), {"column": "close", "period": 20}),
     "ram": (Ratio(), {"col_a": "mom", "col_b": "vol"}),
@@ -87,9 +87,9 @@ strategy = Strategy(
     benchmarks=[],
     universe=StaticUniverse(SYMBOLS),
     signals={
-        "tw": (ranking_signal, {"score": "ram", "n": 2, "max_weight": 0.6}),
+        "active": (active_signal, {"column": "ram", "threshold": 0, "relationship": "gt"}),
     },
-    portfolio=EqualWeightOptimizer(),
+    portfolio=TopNRankingOptimizer(score_col="ram", n=2, max_weight=0.6),
 )
 
 # ── 3. Run ────────────────────────────────────────────────────────────
