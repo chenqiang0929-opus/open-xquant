@@ -222,6 +222,24 @@ def test_apply_fill_sell() -> None:
     assert "AAPL" not in portfolio.positions
 
 
+def test_engine_sets_dataframe_attrs() -> None:
+    """Engine should set timezone and currency attrs on DataFrames."""
+    data = _make_trending_data()
+    market = FakeMarketDataProvider(data)
+    strategy = _make_strategy()
+
+    result = Engine().run(
+        strategy, market=market, broker=SimBroker(),
+        rules=[], start="2024-01-01", end="2024-12-31",
+    )
+
+    df = result.mktdata["AAPL"]
+    assert "timezone" in df.attrs
+    assert df.attrs["timezone"] == "Asia/Shanghai"
+    assert "currency" in df.attrs
+    assert df.attrs["currency"] == "CNY"
+
+
 def test_engine_benchmarks() -> None:
     """Verify benchmark prices recorded."""
     dates = pd.bdate_range("2024-01-01", periods=5)

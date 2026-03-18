@@ -101,6 +101,10 @@ class Engine:
         self._mktdata: dict[str, pd.DataFrame] = {}
         for symbol in self._universe.symbols:
             self._mktdata[symbol] = market.get_bars(symbol, start, end).copy()
+            if "timezone" not in self._mktdata[symbol].attrs:
+                self._mktdata[symbol].attrs["timezone"] = "Asia/Shanghai"
+            if "currency" not in self._mktdata[symbol].attrs:
+                self._mktdata[symbol].attrs["currency"] = "CNY"
 
         # -- Benchmark data (recorded for post-run analysis) ----------
         self._benchmark_prices: dict[str, pd.Series] = {}
