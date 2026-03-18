@@ -248,11 +248,36 @@ class Signal(Protocol):
 
 
 @runtime_checkable
+class PortfolioOptimizer(Protocol):
+    """Portfolio optimization contract.
+
+    Takes signal output and indicator data, returns target weights.
+    Weights must sum to 1.0 (including CASH).
+    """
+
+    name: str
+
+    def optimize(
+        self,
+        signals: dict[str, pd.DataFrame],
+        indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]: ...
+
+
+@runtime_checkable
 class Rule(Protocol):
-    """Rule contract: bar-by-bar stateful evaluation."""
+    """Rule contract: bar-by-bar stateful evaluation.
+
+    Pre-trade rules return RuleResult with weights/constraints.
+    Post-trade monitoring rules return RuleResult with target_positions.
+    """
 
     name: str
 
     def evaluate(
-        self, symbol: str, row: pd.Series, portfolio: Portfolio
-    ) -> Order | None: ...
+        self,
+        symbol: str,
+        row: pd.Series,
+        portfolio: Portfolio,
+        prices: dict[str, Decimal] | None = None,
+    ) -> RuleResult: ...

@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from oxq.core.types import Constraint, Fill, Order, Portfolio, Position, RuleResult
+from oxq.core.types import Constraint, Fill, Order, Portfolio, Position, Rule, RuleResult
 
 
 def test_order_is_frozen() -> None:
@@ -123,3 +123,23 @@ def test_constraint_defaults():
     c = Constraint()
     assert c.max_shares is None
     assert c.max_value is None
+
+
+def test_rule_protocol_returns_rule_result():
+    class MyRule:
+        name = "test"
+        def evaluate(self, symbol, row, portfolio, prices=None):
+            return RuleResult(reason="test")
+    assert isinstance(MyRule(), Rule)
+
+
+def test_portfolio_optimizer_protocol():
+    from oxq.core.types import PortfolioOptimizer
+
+    class MyOptimizer:
+        name = "test"
+
+        def optimize(self, signals, indicators):
+            return {"AAPL": 0.5, "CASH": 0.5}
+
+    assert isinstance(MyOptimizer(), PortfolioOptimizer)
