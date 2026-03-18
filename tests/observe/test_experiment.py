@@ -73,13 +73,13 @@ class TestAddFromStrategy:
         from oxq.observe.experiment import ExperimentLog
         from oxq.universe.static import StaticUniverse
 
+        from oxq.portfolio.optimizers import EqualWeightOptimizer
+
         strategy = Strategy(
             name="test-strat",
             universe=StaticUniverse(("A",)),
-            indicators={},
             signals={},
-            entry_rules=[],
-            exit_rules=[],
+            portfolio=EqualWeightOptimizer(),
             hypothesis="vol filter improves drawdown",
             objectives={"max_drawdown": {"max": -0.15}},
         )
@@ -104,13 +104,13 @@ class TestAddFromStrategy:
         from oxq.observe.experiment import ExperimentLog
         from oxq.universe.static import StaticUniverse
 
+        from oxq.portfolio.optimizers import EqualWeightOptimizer
+
         strategy = Strategy(
             name="test",
             universe=StaticUniverse(("A",)),
-            indicators={},
             signals={},
-            entry_rules=[],
-            exit_rules=[],
+            portfolio=EqualWeightOptimizer(),
             objectives={"sortino": {"min": 1.5}, "calmar": {"min": 1.0}},
         )
         result = _make_result([100, 102, 99, 103, 97, 105])
@@ -131,11 +131,13 @@ class TestAddFromStrategy:
         from oxq.observe.experiment import ExperimentLog
         from oxq.universe.static import StaticUniverse
 
+        from oxq.portfolio.optimizers import EqualWeightOptimizer
+
         strategy = Strategy(
             name="test",
             universe=StaticUniverse(("A",)),
-            indicators={}, signals={},
-            entry_rules=[], exit_rules=[],
+            signals={},
+            portfolio=EqualWeightOptimizer(),
             hypothesis="test hyp",
             objectives={},  # empty!
         )
@@ -252,10 +254,12 @@ class TestRunIdLinkage:
         from oxq.observe.experiment import ExperimentLog
         from oxq.universe.static import StaticUniverse
 
+        from oxq.portfolio.optimizers import EqualWeightOptimizer
+
         strategy = Strategy(
             name="test", universe=StaticUniverse(("A",)),
-            indicators={}, signals={},
-            entry_rules=[], exit_rules=[],
+            signals={},
+            portfolio=EqualWeightOptimizer(),
             hypothesis="test hyp",
         )
         result = _make_result([100, 105, 110])

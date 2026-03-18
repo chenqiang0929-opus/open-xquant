@@ -18,9 +18,7 @@ from oxq.optimize.validation import (
     TimeSeriesCV,
 )
 from oxq.portfolio.analytics import RunResult
-from oxq.rules.entry import EntryRule
-from oxq.rules.exit import ExitRule
-from oxq.rules.order import StopLossRule
+from oxq.portfolio.optimizers import EqualWeightOptimizer
 from oxq.signals.crossover import Crossover
 from oxq.trade.sim_broker import SimBroker
 from oxq.universe.static import StaticUniverse
@@ -77,20 +75,25 @@ def _make_long_data(start: str, end: str) -> dict[str, pd.DataFrame]:
     }
 
 
+def _make_crossover_signal():
+    """Create a Crossover signal with required_indicators."""
+    signal = Crossover()
+    signal.required_indicators = {
+        "sma_fast": (SMA(), {"period": 10}),
+        "sma_slow": (SMA(), {"period": 30}),
+    }
+    return signal
+
+
 def _make_strategy() -> Strategy:
     return Strategy(
         name="test_sma",
         hypothesis="SMA crossover",
         universe=StaticUniverse(("AAPL",)),
-        indicators={
-            "sma_fast": (SMA(), {"period": 10}),
-            "sma_slow": (SMA(), {"period": 30}),
-        },
         signals={
-            "sma_cross": (Crossover(), {"fast": "sma_fast", "slow": "sma_slow"}),
+            "sma_cross": (_make_crossover_signal(), {"fast": "sma_fast", "slow": "sma_slow"}),
         },
-        entry_rules=[EntryRule(signal="sma_cross", shares=100)],
-        exit_rules=[ExitRule(fast="sma_fast", slow="sma_slow")],
+        portfolio=EqualWeightOptimizer(),
     )
 
 
@@ -365,7 +368,7 @@ def test_cross_validate_with_paramset() -> None:
     market = FakeMarketDataProvider(data)
 
     ps = ParameterSet("test")
-    ps.add("sma_fast", "period", values=[5, 10])
+    ps.add("sma_cross", "fast", values=["sma_fast"])
 
     cv = TimeSeriesCV(n_splits=2, expanding=True)
     result = cv.cross_validate(
@@ -488,12 +491,11 @@ def test_cv_result_to_dataframe_multiple_splits() -> None:
     assert df["oos_total_return"].iloc[1] == pytest.approx(0.20, rel=1e-4)
 
 
-def test_cv_result_to_dataframe_with_rule_params() -> None:
+def test_cv_result_to_dataframe_with_signal_params() -> None:
     sr = CVSplitResult(
         split=CVSplit("2020-01-01", "2021-12-31", "2022-01-01", "2022-12-31"),
         best_params={
-            "sma_fast": {"period": 10},
-            "StopLossRule": {"threshold": 0.05},
+            "sma_cross": {"fast": "sma_fast"},
         },
         in_sample_metric=0.5,
         oos_result=_make_result([100, 110]),
@@ -502,56 +504,8 @@ def test_cv_result_to_dataframe_with_rule_params() -> None:
         splits=[sr], metric="sharpe_ratio", metric_direction="maximize",
     )
     df = cvr.to_dataframe()
-    assert "sma_fast.period" in df.columns
-    assert "StopLossRule.threshold" in df.columns
-    assert df["StopLossRule.threshold"].iloc[0] == 0.05
-
-
-# ---------------------------------------------------------------------------
-# TimeSeriesCV.cross_validate — with rule paramset (integration)
-# ---------------------------------------------------------------------------
-
-
-def test_cross_validate_with_rule_paramset() -> None:
-    """cross_validate can optimize rule parameters per fold."""
-    data = _make_long_data("2018-01-01", "2024-12-31")
-    market = FakeMarketDataProvider(data)
-
-    ps = ParameterSet("rule_cv")
-    ps.add("StopLossRule", "threshold", values=[0.05, 0.10])
-
-    strategy = Strategy(
-        name="test_cv_rules",
-        hypothesis="CV with rule optimization",
-        universe=StaticUniverse(("AAPL",)),
-        indicators={
-            "sma_fast": (SMA(), {"period": 10}),
-            "sma_slow": (SMA(), {"period": 30}),
-        },
-        signals={
-            "sma_cross": (Crossover(), {"fast": "sma_fast", "slow": "sma_slow"}),
-        },
-        entry_rules=[EntryRule(signal="sma_cross", shares=100)],
-        exit_rules=[ExitRule(fast="sma_fast", slow="sma_slow")],
-        order_rules=[StopLossRule(threshold=0.05)],
-    )
-
-    cv = TimeSeriesCV(n_splits=2, expanding=True)
-    result = cv.cross_validate(
-        strategy=strategy,
-        market=market,
-        broker_factory=SimBroker,
-        start="2018-01-01",
-        end="2024-12-31",
-        paramset=ps,
-        metric="sharpe_ratio",
-    )
-
-    assert len(result.splits) == 2
-    for sr in result.splits:
-        assert sr.best_params is not None
-        assert "StopLossRule" in sr.best_params
-        assert sr.best_params["StopLossRule"]["threshold"] in (0.05, 0.10)
+    assert "sma_cross.fast" in df.columns
+    assert df["sma_cross.fast"].iloc[0] == "sma_fast"
 
 
 # ---------------------------------------------------------------------------

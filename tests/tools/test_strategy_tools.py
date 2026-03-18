@@ -73,8 +73,9 @@ def test_strategy_add_indicator() -> None:
     assert result["indicator"] == "sma_10"
     assert result["type"] == "SMA"
     strat = session._strategies["s1"]
-    assert "sma_10" in strat.indicators
-    assert strat.indicators["sma_10"][1] == {"column": "close", "period": 10}
+    pending = getattr(strat, "_pending_indicators", {})
+    assert "sma_10" in pending
+    assert pending["sma_10"][1] == {"column": "close", "period": 10}
 
 
 def test_strategy_add_indicator_unknown_type() -> None:
@@ -120,21 +121,6 @@ def test_strategy_add_signal_unknown_type() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_strategy_add_rule_entry() -> None:
-    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
-    result = strategy_add_rule(
-        strategy="s1",
-        name="buy_on_cross",
-        type="EntryRule",
-        params={"signal": "cross", "shares": 100},
-    )
-    assert result["type"] == "EntryRule"
-    strat = session._strategies["s1"]
-    assert len(strat.entry_rules) == 1
-    assert strat.entry_rules[0].signal == "cross"
-    assert strat.entry_rules[0].shares == 100
-
-
 def test_strategy_add_rule_exit() -> None:
     strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
     result = strategy_add_rule(
@@ -145,21 +131,14 @@ def test_strategy_add_rule_exit() -> None:
     )
     assert result["type"] == "ExitRule"
     strat = session._strategies["s1"]
-    assert len(strat.exit_rules) == 1
-    assert strat.exit_rules[0].fast == "sma_10"
+    pending = getattr(strat, "_pending_rules", [])
+    assert len(pending) == 1
+    assert pending[0].fast == "sma_10"
 
 
 def test_strategy_add_rule_unknown_type() -> None:
     strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
     result = strategy_add_rule(strategy="s1", name="x", type="StopLoss")
-    assert "error" in result
-
-
-def test_strategy_add_rule_invalid_params() -> None:
-    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
-    result = strategy_add_rule(
-        strategy="s1", name="bad", type="EntryRule", params={"bad_key": 1},
-    )
     assert "error" in result
 
 
@@ -176,8 +155,8 @@ def test_strategy_inspect() -> None:
         inputs={"fast": "sma_10", "slow": "sma_50"},
     )
     strategy_add_rule(
-        strategy="s1", name="buy", type="EntryRule",
-        params={"signal": "cross", "shares": 100},
+        strategy="s1", name="sell", type="ExitRule",
+        params={"fast": "sma_10", "slow": "sma_50"},
     )
 
     result = strategy_inspect("s1")
@@ -185,7 +164,7 @@ def test_strategy_inspect() -> None:
     assert "sma_10" in result["indicators"]
     assert result["indicators"]["sma_10"]["type"] == "SMA"
     assert "cross" in result["signals"]
-    assert len(result["entry_rules"]) == 1
+    assert len(result["rules"]) == 1
 
 
 def test_strategy_inspect_not_found() -> None:
@@ -253,7 +232,7 @@ def test_indicator_list_sorted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# strategy_add_rule — order / risk / sized entry rules
+# strategy_add_rule — order / risk rules
 # ---------------------------------------------------------------------------
 
 
@@ -266,8 +245,9 @@ def test_strategy_add_rule_stop_loss() -> None:
         params={"threshold": 0.05},
     )
     strat = session._strategies["s1"]
-    assert len(strat.order_rules) == 1
-    assert strat.order_rules[0].threshold == 0.05
+    pending = getattr(strat, "_pending_rules", [])
+    assert len(pending) == 1
+    assert pending[0].threshold == 0.05
 
 
 def test_strategy_add_rule_take_profit() -> None:
@@ -279,7 +259,8 @@ def test_strategy_add_rule_take_profit() -> None:
         params={"threshold": 0.15},
     )
     strat = session._strategies["s1"]
-    assert len(strat.order_rules) == 1
+    pending = getattr(strat, "_pending_rules", [])
+    assert len(pending) == 1
 
 
 def test_strategy_add_rule_trailing_stop() -> None:
@@ -291,7 +272,8 @@ def test_strategy_add_rule_trailing_stop() -> None:
         params={"trail_pct": 0.05},
     )
     strat = session._strategies["s1"]
-    assert len(strat.order_rules) == 1
+    pending = getattr(strat, "_pending_rules", [])
+    assert len(pending) == 1
 
 
 def test_strategy_add_rule_max_drawdown_risk() -> None:
@@ -303,7 +285,8 @@ def test_strategy_add_rule_max_drawdown_risk() -> None:
         params={"max_drawdown": 0.15},
     )
     strat = session._strategies["s1"]
-    assert len(strat.risk_rules) == 1
+    pending = getattr(strat, "_pending_rules", [])
+    assert len(pending) == 1
 
 
 def test_strategy_add_rule_daily_loss_limit_risk() -> None:
@@ -315,27 +298,16 @@ def test_strategy_add_rule_daily_loss_limit_risk() -> None:
         params={"max_daily_loss": 0.03},
     )
     strat = session._strategies["s1"]
-    assert len(strat.risk_rules) == 1
-
-
-def test_strategy_add_rule_sized_entry() -> None:
-    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
-    strategy_add_rule(
-        strategy="s1",
-        name="sized",
-        type="SizedEntryRule",
-        params={"signal": "sig", "shares": 100, "max_position": 500},
-    )
-    strat = session._strategies["s1"]
-    assert len(strat.entry_rules) == 1
+    pending = getattr(strat, "_pending_rules", [])
+    assert len(pending) == 1
 
 
 # ---------------------------------------------------------------------------
-# strategy_inspect — order_rules and risk_rules fields
+# strategy_inspect — rules field
 # ---------------------------------------------------------------------------
 
 
-def test_strategy_inspect_shows_order_and_risk_rules() -> None:
+def test_strategy_inspect_shows_rules() -> None:
     strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
     strategy_add_rule(
         strategy="s1",
@@ -350,8 +322,7 @@ def test_strategy_inspect_shows_order_and_risk_rules() -> None:
         params={"max_drawdown": 0.15},
     )
     result = strategy_inspect("s1")
-    assert len(result["order_rules"]) == 1
-    assert len(result["risk_rules"]) == 1
+    assert len(result["rules"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -361,15 +332,10 @@ def test_strategy_inspect_shows_order_and_risk_rules() -> None:
 
 def test_rule_types_registry_completeness() -> None:
     expected = {
-        "EntryRule",
-        "TargetValueEntryRule",
-        "FullPositionEntryRule",
-        "SizedEntryRule",
         "ExitRule",
         "StopLossRule",
         "TakeProfitRule",
         "TrailingStopRule",
-        "RebalanceRule",
         "MaxDrawdownRisk",
         "DailyLossLimitRisk",
     }

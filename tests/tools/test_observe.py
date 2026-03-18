@@ -181,13 +181,13 @@ class TestExperimentAddFromStrategy:
         from oxq.universe.static import StaticUniverse
 
         # Setup strategy in session
+        from oxq.portfolio.optimizers import EqualWeightOptimizer
+
         strat = Strategy(
             name="test_strat",
             universe=StaticUniverse(("AAPL",)),
-            indicators={},
             signals={},
-            entry_rules=[],
-            exit_rules=[],
+            portfolio=EqualWeightOptimizer(),
             hypothesis="test hypothesis",
             objectives={"sharpe_ratio": {"min": 1.0}},
         )
@@ -223,12 +223,13 @@ class TestExperimentAddFromStrategyErrors:
 
     def test_missing_run_id(self):
         from oxq.core.strategy import Strategy
+        from oxq.portfolio.optimizers import EqualWeightOptimizer
         from oxq.tools.observe import observe_experiment_add_from_strategy, observe_experiment_create
         from oxq.universe.static import StaticUniverse
         strat = Strategy(
             name="s", universe=StaticUniverse(("A",)),
-            indicators={}, signals={},
-            entry_rules=[], exit_rules=[],
+            signals={},
+            portfolio=EqualWeightOptimizer(),
             hypothesis="h", objectives={},
         )
         session._strategies["s"] = strat
@@ -315,14 +316,15 @@ class TestObserveTrace:
 class TestObserveAuditLog:
     def test_create_audit(self):
         from oxq.core.strategy import Strategy
+        from oxq.portfolio.optimizers import EqualWeightOptimizer
         from oxq.tools.observe import observe_audit_log
         from oxq.universe.static import StaticUniverse
 
         run_id = _setup_run_result()
         strat = Strategy(
             name="test_strat", universe=StaticUniverse(("AAPL",)),
-            indicators={}, signals={},
-            entry_rules=[], exit_rules=[],
+            signals={},
+            portfolio=EqualWeightOptimizer(),
             hypothesis="h", objectives={},
         )
         session._strategies["test_strat"] = strat
@@ -421,14 +423,15 @@ class TestExperimentRunId:
 
     def test_add_from_strategy_with_audit_id(self):
         from oxq.core.strategy import Strategy
+        from oxq.portfolio.optimizers import EqualWeightOptimizer
         from oxq.tools.observe import observe_experiment_add_from_strategy, observe_experiment_create
         from oxq.universe.static import StaticUniverse
 
         run_id = _setup_run_result()
         strat = Strategy(
             name="s", universe=StaticUniverse(("AAPL",)),
-            indicators={}, signals={},
-            entry_rules=[], exit_rules=[],
+            signals={},
+            portfolio=EqualWeightOptimizer(),
             hypothesis="h", objectives={},
         )
         session._strategies["s"] = strat

@@ -17,9 +17,7 @@ from oxq.optimize.walk_forward import (
     _parse_period,
 )
 from oxq.portfolio.analytics import RunResult
-from oxq.rules.entry import EntryRule
-from oxq.rules.exit import ExitRule
-from oxq.rules.order import StopLossRule
+from oxq.portfolio.optimizers import EqualWeightOptimizer
 from oxq.signals.crossover import Crossover
 from oxq.trade.sim_broker import SimBroker
 from oxq.universe.static import StaticUniverse
@@ -58,7 +56,7 @@ def _make_result(values: list[float]) -> RunResult:
 def _make_long_data(start: str, end: str) -> dict[str, pd.DataFrame]:
     """Create market data spanning the given date range.
 
-    Trending pattern: up → down → up cycle to ensure SMA crossovers.
+    Trending pattern: up -> down -> up cycle to ensure SMA crossovers.
     """
     dates = pd.bdate_range(start, end)
     n = len(dates)
@@ -80,20 +78,25 @@ def _make_long_data(start: str, end: str) -> dict[str, pd.DataFrame]:
     }
 
 
+def _make_crossover_signal():
+    """Create a Crossover signal with required_indicators."""
+    signal = Crossover()
+    signal.required_indicators = {
+        "sma_fast": (SMA(), {"period": 10}),
+        "sma_slow": (SMA(), {"period": 30}),
+    }
+    return signal
+
+
 def _make_strategy() -> Strategy:
     return Strategy(
         name="test_sma",
         hypothesis="SMA crossover",
         universe=StaticUniverse(("AAPL",)),
-        indicators={
-            "sma_fast": (SMA(), {"period": 10}),
-            "sma_slow": (SMA(), {"period": 30}),
-        },
         signals={
-            "sma_cross": (Crossover(), {"fast": "sma_fast", "slow": "sma_slow"}),
+            "sma_cross": (_make_crossover_signal(), {"fast": "sma_fast", "slow": "sma_slow"}),
         },
-        entry_rules=[EntryRule(signal="sma_cross", shares=100)],
-        exit_rules=[ExitRule(fast="sma_fast", slow="sma_slow")],
+        portfolio=EqualWeightOptimizer(),
     )
 
 
@@ -176,7 +179,7 @@ def test_rolling_windows_non_overlapping_tests() -> None:
 
 
 def test_rolling_window_train_size_constant() -> None:
-    """Rolling mode: all train windows have similar size (±1 day)."""
+    """Rolling mode: all train windows have similar size (+-1 day)."""
     ps = ParameterSet("test")
     ps.add("sma", "period", values=[10])
     wf = WalkForward(ps, train_period="1Y", test_period="6M")
@@ -435,7 +438,7 @@ def test_walk_forward_run_rolling() -> None:
     market = FakeMarketDataProvider(data)
 
     ps = ParameterSet("test")
-    ps.add("sma_fast", "period", values=[5, 10])
+    ps.add("sma_cross", "fast", values=["sma_fast"])
 
     wf = WalkForward(ps, train_period="2Y", test_period="1Y")
     result = wf.run(
@@ -464,7 +467,7 @@ def test_walk_forward_run_empty_range() -> None:
     market = FakeMarketDataProvider(data)
 
     ps = ParameterSet("test")
-    ps.add("sma_fast", "period", values=[5])
+    ps.add("sma_cross", "fast", values=["sma_fast"])
 
     wf = WalkForward(ps, train_period="2Y", test_period="1Y")
     result = wf.run(
@@ -570,19 +573,18 @@ def test_deterioration_zero_is_metric() -> None:
 
 
 # ---------------------------------------------------------------------------
-# WalkForwardResult — to_dataframe with rule params
+# WalkForwardResult — to_dataframe with signal params
 # ---------------------------------------------------------------------------
 
 
-def test_to_dataframe_with_rule_params() -> None:
+def test_to_dataframe_with_signal_params() -> None:
     w = WindowResult(
         train_start="2020-01-01",
         train_end="2021-12-31",
         test_start="2022-01-01",
         test_end="2022-12-31",
         best_params={
-            "sma_fast": {"period": 10},
-            "StopLossRule": {"threshold": 0.05},
+            "sma_cross": {"fast": "sma_fast"},
         },
         in_sample_metric=0.8,
         oos_result=_make_result([100, 105, 110]),
@@ -591,54 +593,8 @@ def test_to_dataframe_with_rule_params() -> None:
         windows=[w], metric="sharpe_ratio", metric_direction="maximize",
     )
     df = wfr.to_dataframe()
-    assert "sma_fast.period" in df.columns
-    assert "StopLossRule.threshold" in df.columns
-    assert df["StopLossRule.threshold"].iloc[0] == 0.05
-
-
-# ---------------------------------------------------------------------------
-# WalkForward.run — with rule params (integration)
-# ---------------------------------------------------------------------------
-
-
-def test_walk_forward_run_with_rule_params() -> None:
-    """WalkForward.run can optimize rule parameters."""
-    data = _make_long_data("2018-01-01", "2022-12-31")
-    market = FakeMarketDataProvider(data)
-
-    ps = ParameterSet("rule_opt")
-    ps.add("StopLossRule", "threshold", values=[0.05, 0.10])
-
-    strategy = Strategy(
-        name="test_wf_rules",
-        hypothesis="WF with rule optimization",
-        universe=StaticUniverse(("AAPL",)),
-        indicators={
-            "sma_fast": (SMA(), {"period": 10}),
-            "sma_slow": (SMA(), {"period": 30}),
-        },
-        signals={
-            "sma_cross": (Crossover(), {"fast": "sma_fast", "slow": "sma_slow"}),
-        },
-        entry_rules=[EntryRule(signal="sma_cross", shares=100)],
-        exit_rules=[ExitRule(fast="sma_fast", slow="sma_slow")],
-        order_rules=[StopLossRule(threshold=0.05)],
-    )
-
-    wf = WalkForward(ps, train_period="2Y", test_period="1Y")
-    result = wf.run(
-        strategy=strategy,
-        market=market,
-        broker_factory=SimBroker,
-        start="2018-01-01",
-        end="2022-12-31",
-        metric="sharpe_ratio",
-    )
-
-    assert len(result.windows) > 0
-    for w in result.windows:
-        assert "StopLossRule" in w.best_params
-        assert w.best_params["StopLossRule"]["threshold"] in (0.05, 0.10)
+    assert "sma_cross.fast" in df.columns
+    assert df["sma_cross.fast"].iloc[0] == "sma_fast"
 
 
 # ---------------------------------------------------------------------------

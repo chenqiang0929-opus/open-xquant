@@ -371,8 +371,8 @@ def observe_audit_log(
     # Build a tracer retroactively (no live trace data — record config only)
     tracer = DefaultTracer()
     strategy_config = {
-        "indicators": {k: v[1] for k, v in strat.indicators.items()},
         "signals": {k: v[1] for k, v in strat.signals.items()},
+        "portfolio": strat.portfolio.name,
     }
     tracer.on_run_start(strat.name, strategy_config)
     tracer.on_run_end("ok")
