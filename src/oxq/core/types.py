@@ -238,13 +238,16 @@ class Indicator(Protocol):
 
 @runtime_checkable
 class Signal(Protocol):
-    """Signal contract: cross-sectional vectorized computation."""
+    """Signal contract: per-symbol vectorized computation.
+
+    Like Indicator, operates on a single symbol's DataFrame.
+    Unlike Indicator (which outputs numerical values), Signal
+    outputs trading intent: boolean or categorical labels.
+    """
 
     name: str
 
-    def compute(
-        self, mktdata: dict[str, pd.DataFrame], **params: object
-    ) -> dict[str, pd.Series]: ...
+    def compute(self, mktdata: pd.DataFrame, **params: object) -> pd.Series: ...
 
 
 @runtime_checkable
