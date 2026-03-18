@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from oxq.core.types import Indicator, Rule, Signal
+from oxq.core.types import PortfolioOptimizer, Signal
 from oxq.universe.base import UniverseProvider
 
 
@@ -13,21 +13,19 @@ from oxq.universe.base import UniverseProvider
 class Strategy:
     """A complete strategy definition.
 
-    Composes Universe, Indicators, Signals, and Rules into a declarative
-    pipeline that the engine can execute.
+    Composes Universe, Signal, and PortfolioOptimizer into a declarative
+    pipeline that produces target portfolios.
+
+    Strategy is purely functional: given the same market data, it always
+    produces the same target portfolio. State and side effects live in
+    the Engine/Trade layer.
     """
 
     name: str
     universe: UniverseProvider
-    indicators: dict[str, tuple[Indicator, dict[str, Any]]]
     signals: dict[str, tuple[Signal, dict[str, Any]]]
-    entry_rules: list[Rule]
-    exit_rules: list[Rule]
-    # Placeholder for future rule types (Phase 2+)
-    risk_rules: list[Rule] = field(default_factory=list)
-    order_rules: list[Rule] = field(default_factory=list)
-    rebalance_rules: list[Rule] = field(default_factory=list)
-    # Architecture metadata (Section 4.1)
+    portfolio: PortfolioOptimizer
+    # Architecture metadata
     hypothesis: str = ""
     objectives: dict[str, dict[str, float]] = field(default_factory=dict)
     benchmarks: list[str] = field(default_factory=list)

@@ -143,3 +143,24 @@ def test_portfolio_optimizer_protocol():
             return {"AAPL": 0.5, "CASH": 0.5}
 
     assert isinstance(MyOptimizer(), PortfolioOptimizer)
+
+
+def test_strategy_new_shape():
+    from oxq.core.strategy import Strategy
+    from oxq.universe.static import StaticUniverse
+
+    class FakeOptimizer:
+        name = "fake"
+        def optimize(self, signals, indicators):
+            return {"CASH": 1.0}
+
+    s = Strategy(
+        name="test",
+        universe=StaticUniverse(("AAPL",)),
+        signals={},
+        portfolio=FakeOptimizer(),
+    )
+    assert s.name == "test"
+    assert s.portfolio.name == "fake"
+    assert not hasattr(s, "entry_rules")
+    assert not hasattr(s, "indicators")
