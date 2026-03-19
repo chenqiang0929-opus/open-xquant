@@ -112,10 +112,28 @@ class Engine:
             bench_bars = market.get_bars(bench_symbol, start, end)
             self._benchmark_prices[bench_symbol] = bench_bars["close"].copy()
 
-        # -- Phase 1: Indicator (collected from signals' required_indicators) --
+        # -- Phase 1: Indicator (collected from all modules) -------------------
         all_indicators: dict[str, tuple] = {}
+
+        # From signals
         for _sig_name, (signal, _params) in strategy.signals.items():
             for ind_name, ind_spec in getattr(signal, "required_indicators", {}).items():
+                if ind_name not in all_indicators:
+                    all_indicators[ind_name] = ind_spec
+
+        # From portfolio optimizer
+        for ind_name, ind_spec in getattr(strategy.portfolio, "required_indicators", {}).items():
+            if ind_name not in all_indicators:
+                all_indicators[ind_name] = ind_spec
+
+        # From universe
+        for ind_name, ind_spec in getattr(strategy.universe, "required_indicators", {}).items():
+            if ind_name not in all_indicators:
+                all_indicators[ind_name] = ind_spec
+
+        # From rules
+        for rule in self._rules:
+            for ind_name, ind_spec in getattr(rule, "required_indicators", {}).items():
                 if ind_name not in all_indicators:
                     all_indicators[ind_name] = ind_spec
 
