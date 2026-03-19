@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from oxq.core.types import Fill, Portfolio
+from oxq.core.types import BarSnapshot, Fill, Portfolio
 
 
 @dataclass
@@ -19,7 +19,7 @@ class RunResult:
     equity_curve: list[tuple[object, float]]  # [(date, value), ...]
     mktdata: dict[str, pd.DataFrame] = field(repr=False)
     benchmark_prices: dict[str, pd.Series] = field(default_factory=dict)
-    snapshots: list = field(default_factory=list)
+    snapshots: list[BarSnapshot] = field(default_factory=list)
 
     # -- Metrics --------------------------------------------------------------
 
@@ -140,3 +140,29 @@ class RunResult:
         peak = np.maximum.accumulate(values)
         drawdown = (values - peak) / peak
         return pd.Series(drawdown, index=dates)
+
+    # -- Snapshot DataFrames ---------------------------------------------------
+
+    def weights_df(self) -> pd.DataFrame:
+        """Target weights (optimizer output) as a DataFrame, date x symbol."""
+        if not self.snapshots:
+            return pd.DataFrame()
+        rows = {s.date: s.target_weights for s in self.snapshots}
+        return pd.DataFrame.from_dict(rows, orient="index").fillna(0.0)
+
+    def adj_weights_df(self) -> pd.DataFrame:
+        """Adjusted weights (after rules) as a DataFrame, date x symbol."""
+        if not self.snapshots:
+            return pd.DataFrame()
+        rows = {s.date: s.adjusted_weights for s in self.snapshots}
+        return pd.DataFrame.from_dict(rows, orient="index").fillna(0.0)
+
+    def positions_df(self) -> pd.DataFrame:
+        """Position shares as a DataFrame, date x symbol."""
+        if not self.snapshots:
+            return pd.DataFrame()
+        rows = {
+            s.date: {sym: ps.shares for sym, ps in s.positions.items()}
+            for s in self.snapshots
+        }
+        return pd.DataFrame.from_dict(rows, orient="index").fillna(0)

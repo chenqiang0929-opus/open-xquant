@@ -377,3 +377,104 @@ def test_drawdown_series_min_equals_max_drawdown() -> None:
     assert result.drawdown_series().min() == pytest.approx(
         result.max_drawdown(), rel=1e-6,
     )
+
+
+# -- snapshots / DataFrame methods --------------------------------------------
+
+from oxq.core.types import BarSnapshot, PositionSnapshot
+
+
+def _make_result_with_snapshots() -> RunResult:
+    """Build a RunResult with snapshots for testing DataFrame methods."""
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    snapshots = [
+        BarSnapshot(
+            date=dates[0],
+            target_weights={"AAPL": 0.6, "GOOG": 0.4},
+            adjusted_weights={"AAPL": 0.5, "GOOG": 0.3, "CASH": 0.2},
+            positions={"AAPL": PositionSnapshot(shares=100, avg_cost=150.0)},
+            cash=85000.0,
+            total_value=100000.0,
+        ),
+        BarSnapshot(
+            date=dates[1],
+            target_weights={"AAPL": 0.5, "GOOG": 0.5},
+            adjusted_weights={"AAPL": 0.5, "GOOG": 0.5},
+            positions={
+                "AAPL": PositionSnapshot(shares=100, avg_cost=150.0),
+                "GOOG": PositionSnapshot(shares=50, avg_cost=120.0),
+            },
+            cash=69000.0,
+            total_value=100500.0,
+        ),
+        BarSnapshot(
+            date=dates[2],
+            target_weights={"AAPL": 0.7, "GOOG": 0.3},
+            adjusted_weights={"AAPL": 0.7, "GOOG": 0.3},
+            positions={
+                "AAPL": PositionSnapshot(shares=140, avg_cost=152.0),
+                "GOOG": PositionSnapshot(shares=30, avg_cost=120.0),
+            },
+            cash=45000.0,
+            total_value=101000.0,
+        ),
+    ]
+    return RunResult(
+        portfolio=Portfolio(cash=Decimal("45000")),
+        trades=[],
+        equity_curve=[(s.date, s.total_value) for s in snapshots],
+        mktdata={},
+        snapshots=snapshots,
+    )
+
+
+def test_weights_df() -> None:
+    result = _make_result_with_snapshots()
+    df = result.weights_df()
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 3
+    assert "AAPL" in df.columns
+    assert "GOOG" in df.columns
+    # First row: target_weights
+    assert df.iloc[0]["AAPL"] == 0.6
+    assert df.iloc[0]["GOOG"] == 0.4
+    # NaN filled with 0.0
+    assert df.fillna(0).iloc[0].sum() == pytest.approx(1.0)
+
+
+def test_adj_weights_df() -> None:
+    result = _make_result_with_snapshots()
+    df = result.adj_weights_df()
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 3
+    # First row: adjusted_weights includes CASH
+    assert df.iloc[0]["AAPL"] == 0.5
+    assert df.iloc[0]["GOOG"] == 0.3
+    assert df.iloc[0]["CASH"] == 0.2
+
+
+def test_positions_df() -> None:
+    result = _make_result_with_snapshots()
+    df = result.positions_df()
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 3
+    # First bar: only AAPL
+    assert df.iloc[0]["AAPL"] == 100
+    assert df.fillna(0).iloc[0]["GOOG"] == 0
+    # Second bar: AAPL + GOOG
+    assert df.iloc[1]["AAPL"] == 100
+    assert df.iloc[1]["GOOG"] == 50
+
+
+def test_weights_df_empty_snapshots() -> None:
+    result = _make_result([100.0, 110.0])
+    df = result.weights_df()
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 0
+
+
+def test_positions_df_empty_snapshots() -> None:
+    result = _make_result([100.0, 110.0])
+    df = result.positions_df()
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 0
