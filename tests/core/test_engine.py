@@ -91,6 +91,7 @@ def test_engine_full_pipeline() -> None:
 
     # Equity curve should have one entry per bar
     assert len(result.equity_curve) == 120
+    assert len(result.snapshots) == 120
     # mktdata should have indicator and signal columns
     df = result.mktdata["AAPL"]
     assert "sma_10" in df.columns
@@ -187,6 +188,8 @@ def test_engine_step_matches_run() -> None:
     for (d1, v1), (d2, v2) in zip(result1.equity_curve, result2.equity_curve):
         assert d1 == d2
         assert abs(v1 - v2) < 0.01
+
+    assert len(result1.snapshots) == len(result2.snapshots)
 
 
 def test_apply_fill_buy() -> None:
