@@ -242,6 +242,8 @@ def test_engine_sets_dataframe_attrs() -> None:
 
 def test_engine_collects_indicators_from_all_modules() -> None:
     """Engine collects required_indicators from signals, portfolio, universe, and rules."""
+    from oxq.rules.exit import ExitRule
+
     crossover = Crossover()
     crossover.required_indicators = {  # type: ignore[attr-defined]
         "sma_10": (SMA(), {"period": 10}),
@@ -252,12 +254,22 @@ def test_engine_collects_indicators_from_all_modules() -> None:
         "sma_50": (SMA(), {"period": 50}),
     }
 
+    universe = StaticUniverse(("AAPL",))
+    object.__setattr__(universe, "required_indicators", {  # type: ignore[attr-defined]
+        "sma_20": (SMA(), {"period": 20}),
+    })
+
+    exit_rule = ExitRule(fast="sma_10", slow="sma_50")
+    exit_rule.required_indicators = {  # type: ignore[attr-defined]
+        "sma_30": (SMA(), {"period": 30}),
+    }
+
     data = _make_trending_data()
     market = FakeMarketDataProvider(data)
 
     strategy = Strategy(
         name="multi_source_indicators",
-        universe=StaticUniverse(("AAPL",)),
+        universe=universe,
         signals={"cross": (crossover, {"fast": "sma_10", "slow": "sma_50"})},
         portfolio=optimizer,
     )
@@ -265,12 +277,15 @@ def test_engine_collects_indicators_from_all_modules() -> None:
     result = Engine().run(
         strategy, market=market, broker=SimBroker(),
         start="2024-01-01", end="2024-12-31",
+        rules=[exit_rule],
     )
 
     df = result.mktdata["AAPL"]
-    # sma_10 from signal, sma_50 from portfolio optimizer
+    # sma_10 from signal, sma_50 from portfolio, sma_20 from universe, sma_30 from rule
     assert "sma_10" in df.columns
     assert "sma_50" in df.columns
+    assert "sma_20" in df.columns
+    assert "sma_30" in df.columns
 
 
 def test_engine_benchmarks() -> None:
