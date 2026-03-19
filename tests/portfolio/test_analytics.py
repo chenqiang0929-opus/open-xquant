@@ -27,9 +27,9 @@ def _make_result(values: list[float]) -> RunResult:
 def test_annualized_return_basic() -> None:
     values = np.linspace(100, 110, 252).tolist()
     result = _make_result(values)
-    arr = np.array(values)
-    log_ret = np.diff(np.log(arr))
-    expected = float(np.mean(log_ret) * 252)
+    # CAGR: (V_final / V_initial) ^ (252 / N) - 1
+    n = len(values) - 1  # 251 daily returns
+    expected = (110 / 100) ** (252 / n) - 1
     assert result.annualized_return() == pytest.approx(expected, rel=1e-4)
 
 

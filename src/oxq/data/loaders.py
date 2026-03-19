@@ -56,6 +56,9 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 class YFinanceDownloader:
     """Download market data via yfinance. Covers US and global equities."""
 
+    def __init__(self, auto_adjust: bool = True) -> None:
+        self.auto_adjust = auto_adjust
+
     def download(
         self,
         symbol: str,
@@ -69,7 +72,7 @@ class YFinanceDownloader:
         data_dir.mkdir(parents=True, exist_ok=True)
 
         ticker = yfinance.Ticker(symbol)
-        df = ticker.history(start=start, end=end)
+        df = ticker.history(start=start, end=end, auto_adjust=self.auto_adjust)
         if df.empty:
             msg = f"No data returned for '{symbol}' ({start} to {end})."
             raise DownloadError(msg)

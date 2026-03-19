@@ -42,7 +42,7 @@ SYMBOL_NAMES = {
 
 DATA_START = "2024-12-01"   # warmup period for indicators
 START = "2025-01-01"
-END = "2026-03-18"
+END = "2026-03-17"
 INITIAL_CASH = 1_000_000.0
 
 # ── 1. Download data ─────────────────────────────────────────────────
@@ -156,6 +156,7 @@ if __name__ == "__main__":
         initial_cash=INITIAL_CASH,
         lot_size=100,
         cash_annual_return=0.025,
+        data_start=DATA_START,
         rules=[RebalanceFrequencyRule(interval_days=10)],
     )
 

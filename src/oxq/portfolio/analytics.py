@@ -52,14 +52,17 @@ class RunResult:
         return float(np.min(drawdown))
 
     def annualized_return(self, trading_days: int = 252) -> float:
-        """Annualized return based on mean daily log return x T."""
+        """Annualized return (CAGR): (V_final / V_initial) ^ (T / N) - 1."""
         if len(self.equity_curve) < 2:
             return 0.0
-        values = np.array([v for _, v in self.equity_curve], dtype=float)
-        log_returns = np.diff(np.log(values))
-        if len(log_returns) == 0:
+        first = self.equity_curve[0][1]
+        last = self.equity_curve[-1][1]
+        if first <= 0:
             return 0.0
-        return float(np.mean(log_returns) * trading_days)
+        n = len(self.equity_curve) - 1
+        if n <= 0:
+            return 0.0
+        return float((last / first) ** (trading_days / n) - 1)
 
     def annualized_volatility(self, trading_days: int = 252) -> float:
         """Annualized volatility: sigma_daily x sqrt(T)."""

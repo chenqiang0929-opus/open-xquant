@@ -65,6 +65,7 @@ class Engine:
         rules: list[Rule] | None = None,
         lot_size: int = 1,
         cash_annual_return: float = 0.0,
+        data_start: str | None = None,
     ) -> None:
         """Initialize engine state and run vectorized phases.
 
@@ -77,7 +78,7 @@ class Engine:
         broker : Broker
             Unified broker interface (order routing, fills, lifecycle).
         start, end : str
-            Date range.
+            Date range for trading.
         initial_cash : float
             Starting cash.
         run_through : str | None
@@ -88,6 +89,9 @@ class Engine:
             Minimum trade unit (e.g. 100 for A-shares).
         cash_annual_return : float
             Annual cash interest rate.
+        data_start : str | None
+            Start date for loading market data (for indicator warmup).
+            If None, uses ``start``.
         """
         self._strategy = strategy
         self._broker = broker
@@ -96,6 +100,7 @@ class Engine:
         self._rules: list[Rule] = rules or []
         self._lot_size = lot_size
         self._cash_annual_return = cash_annual_return
+        self._step_start = pd.Timestamp(start)
 
         if tracer:
             tracer.on_run_start(
@@ -108,7 +113,8 @@ class Engine:
 
         self._mktdata: dict[str, pd.DataFrame] = {}
         for symbol in self._universe.symbols:
-            self._mktdata[symbol] = market.get_bars(symbol, start, end).copy()
+            load_start = data_start or start
+            self._mktdata[symbol] = market.get_bars(symbol, load_start, end).copy()
             if "timezone" not in self._mktdata[symbol].attrs:
                 self._mktdata[symbol].attrs["timezone"] = "Asia/Shanghai"
             if "currency" not in self._mktdata[symbol].attrs:
@@ -237,8 +243,9 @@ class Engine:
         indicators_data: dict[str, pd.DataFrame] = {}
         for s in universe.symbols:
             if date in mktdata[s].index:
-                signals_data[s] = mktdata[s]
-                indicators_data[s] = mktdata[s]
+                sliced = mktdata[s].loc[:date]
+                signals_data[s] = sliced
+                indicators_data[s] = sliced
 
         target_weights = strategy.portfolio.optimize(signals_data, indicators_data)
 
@@ -349,6 +356,7 @@ class Engine:
         rules: list[Rule] | None = None,
         lot_size: int = 1,
         cash_annual_return: float = 0.0,
+        data_start: str | None = None,
     ) -> RunResult:
         """Run the strategy pipeline.
 
@@ -361,7 +369,7 @@ class Engine:
         broker : Broker
             Unified broker interface (order routing, fills, lifecycle).
         start, end : str
-            Date range.
+            Date range for trading.
         initial_cash : float
             Starting cash.
         run_through : str | None
@@ -373,12 +381,16 @@ class Engine:
             Minimum trade unit (e.g. 100 for A-shares).
         cash_annual_return : float
             Annual cash interest rate.
+        data_start : str | None
+            Start date for loading market data (for indicator warmup).
+            If None, uses ``start``.
         """
         self.setup(
             strategy=strategy, market=market, broker=broker,
             start=start, end=end, initial_cash=initial_cash,
             run_through=run_through, tracer=tracer, rules=rules,
             lot_size=lot_size, cash_annual_return=cash_annual_return,
+            data_start=data_start,
         )
 
         if run_through == "indicator":
@@ -396,6 +408,8 @@ class Engine:
             )
 
         for date in self.dates:
+            if date < self._step_start:
+                continue
             self.step(date)
 
         if self._tracer:
