@@ -148,14 +148,14 @@ class RunResult:
         if not self.snapshots:
             return pd.DataFrame()
         rows = {s.date: s.target_weights for s in self.snapshots}
-        return pd.DataFrame.from_dict(rows, orient="index").fillna(0.0)
+        return pd.DataFrame.from_dict(rows, orient="index").fillna(0.0).sort_index()
 
     def adj_weights_df(self) -> pd.DataFrame:
         """Adjusted weights (after rules) as a DataFrame, date x symbol."""
         if not self.snapshots:
             return pd.DataFrame()
         rows = {s.date: s.adjusted_weights for s in self.snapshots}
-        return pd.DataFrame.from_dict(rows, orient="index").fillna(0.0)
+        return pd.DataFrame.from_dict(rows, orient="index").fillna(0.0).sort_index()
 
     def positions_df(self) -> pd.DataFrame:
         """Position shares as a DataFrame, date x symbol."""
@@ -165,4 +165,4 @@ class RunResult:
             s.date: {sym: ps.shares for sym, ps in s.positions.items()}
             for s in self.snapshots
         }
-        return pd.DataFrame.from_dict(rows, orient="index").fillna(0)
+        return pd.DataFrame.from_dict(rows, orient="index").fillna(0).sort_index()
