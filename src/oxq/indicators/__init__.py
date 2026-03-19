@@ -20,16 +20,20 @@ from oxq.indicators.builtin import (
     MACDSignal,
     StochK,
 )
+from oxq.indicators.annualized_volatility import AnnualizedVolatility
 from oxq.indicators.log_return import LogReturn
 from oxq.indicators.momentum import Momentum
 from oxq.indicators.nday_return import NdayReturn
+from oxq.indicators.power_ratio import PowerRatio
 from oxq.indicators.ratio import Ratio
 from oxq.indicators.rolling_mdd import RollingMDD
 from oxq.indicators.rolling_volatility import RollingVolatility
+from oxq.indicators.simple_momentum import SimpleMomentum
 from oxq.indicators.sma import SMA
 
 __all__ = [
     "ADX",
+    "AnnualizedVolatility",
     "AROON",
     "ATR",
     "BollingerLower",
@@ -46,12 +50,14 @@ __all__ = [
     "NdayReturn",
     "OBV",
     "PPO",
+    "PowerRatio",
     "ROC",
     "RSI",
     "Ratio",
     "RollingMDD",
     "RollingVolatility",
     "SMA",
+    "SimpleMomentum",
     "StochK",
     "TEMA",
     "VWAP",
