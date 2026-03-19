@@ -338,3 +338,116 @@ def test_engine_benchmarks() -> None:
     bench_series = result.benchmark_prices["BENCH"]
     assert isinstance(bench_series, pd.Series)
     assert list(bench_series.values) == bench_closes
+
+
+class AlwaysBuyOptimizer:
+    """Portfolio optimizer that always allocates 100% to first symbol."""
+
+    def optimize(
+        self, signals: dict[str, pd.DataFrame], indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]:
+        symbols = list(signals.keys())
+        if symbols:
+            return {symbols[0]: 1.0}
+        return {"CASH": 1.0}
+
+
+class NeverBuyOptimizer:
+    """Portfolio optimizer that always holds cash."""
+
+    def optimize(
+        self, signals: dict[str, pd.DataFrame], indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]:
+        return {"CASH": 1.0}
+
+
+def test_engine_lot_size() -> None:
+    """lot_size=100 rounds trade shares to multiples of 100."""
+    dates = pd.bdate_range("2024-01-01", periods=3)
+    closes = [1.0, 1.0, 1.0]
+
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": [1_000_000] * 3,
+            },
+            index=dates,
+        ),
+    }
+
+    strategy = Strategy(
+        name="lot_size_test",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=AlwaysBuyOptimizer(),
+    )
+
+    broker = SimBroker()
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=broker,
+        start="2024-01-01",
+        end="2024-12-31",
+        initial_cash=250.0,
+        lot_size=100,
+    )
+
+    # 250 / 1.0 = 250, rounded down to 200 with lot_size=100
+    buy_trades = [t for t in result.trades if t.order.side == "BUY"]
+    assert len(buy_trades) > 0
+    for t in buy_trades:
+        assert t.order.shares % 100 == 0, f"shares {t.order.shares} not multiple of 100"
+    # First buy should be 200 shares
+    assert buy_trades[0].order.shares == 200
+
+
+def test_engine_cash_annual_return() -> None:
+    """cash_annual_return accrues interest on idle cash."""
+    dates = pd.bdate_range("2024-01-01", periods=5)
+    closes = [100.0] * 5
+
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": [1_000_000] * 5,
+            },
+            index=dates,
+        ),
+    }
+
+    strategy = Strategy(
+        name="cash_return_test",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=NeverBuyOptimizer(),
+    )
+
+    initial = 1_000_000.0
+    annual_rate = 0.025
+    broker = SimBroker()
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=broker,
+        start="2024-01-01",
+        end="2024-12-31",
+        initial_cash=initial,
+        cash_annual_return=annual_rate,
+    )
+
+    daily_rate = (1 + annual_rate) ** (1 / 252) - 1
+    expected = initial * (1 + daily_rate) ** 5
+    final_equity = result.equity_curve[-1][1]
+    assert final_equity > initial, "Cash interest should increase equity"
+    assert abs(final_equity - expected) < 0.01, (
+        f"Expected ~{expected:.2f}, got {final_equity:.2f}"
+    )

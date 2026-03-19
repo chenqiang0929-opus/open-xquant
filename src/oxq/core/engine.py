@@ -63,6 +63,8 @@ class Engine:
         run_through: Literal["indicator", "signal"] | None = None,
         tracer: DefaultTracer | None = None,
         rules: list[Rule] | None = None,
+        lot_size: int = 1,
+        cash_annual_return: float = 0.0,
     ) -> None:
         """Initialize engine state and run vectorized phases.
 
@@ -82,12 +84,18 @@ class Engine:
             Stop after this phase: ``"indicator"`` or ``"signal"``.
         rules : list[Rule] | None
             Optional list of Rule instances for pre/post-trade evaluation.
+        lot_size : int
+            Minimum trade unit (e.g. 100 for A-shares).
+        cash_annual_return : float
+            Annual cash interest rate.
         """
         self._strategy = strategy
         self._broker = broker
         self._portfolio = Portfolio(cash=Decimal(str(initial_cash)))
         self._tracer = tracer
         self._rules: list[Rule] = rules or []
+        self._lot_size = lot_size
+        self._cash_annual_return = cash_annual_return
 
         if tracer:
             tracer.on_run_start(
@@ -259,6 +267,7 @@ class Engine:
                 positions=portfolio.positions,
                 prices=bar_prices,
                 total_capital=total_capital,
+                lot_size=self._lot_size,
             )
             for p in planned:
                 broker.submit_order(p.order)
@@ -306,6 +315,12 @@ class Engine:
                 _apply_fill(portfolio, fill)
                 self._trades.append(fill)
 
+        # ── Cash interest ──────────────────────────────────────────
+        if self._cash_annual_return > 0:
+            daily_rate = (1 + self._cash_annual_return) ** (1 / 252) - 1
+            interest = portfolio.cash * Decimal(str(daily_rate))
+            portfolio.cash += interest
+
         # ── Step 9: Record equity curve ───────────────────────────────
         prices: dict[str, Decimal] = {}
         for s in universe.symbols:
@@ -332,6 +347,8 @@ class Engine:
         run_through: Literal["indicator", "signal"] | None = None,
         tracer: DefaultTracer | None = None,
         rules: list[Rule] | None = None,
+        lot_size: int = 1,
+        cash_annual_return: float = 0.0,
     ) -> RunResult:
         """Run the strategy pipeline.
 
@@ -352,11 +369,16 @@ class Engine:
             ``None`` runs the full pipeline including rules.
         rules : list[Rule] | None
             Optional list of Rule instances.
+        lot_size : int
+            Minimum trade unit (e.g. 100 for A-shares).
+        cash_annual_return : float
+            Annual cash interest rate.
         """
         self.setup(
             strategy=strategy, market=market, broker=broker,
             start=start, end=end, initial_cash=initial_cash,
             run_through=run_through, tracer=tracer, rules=rules,
+            lot_size=lot_size, cash_annual_return=cash_annual_return,
         )
 
         if run_through == "indicator":
