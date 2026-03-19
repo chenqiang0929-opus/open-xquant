@@ -19,6 +19,7 @@ class RunResult:
     equity_curve: list[tuple[object, float]]  # [(date, value), ...]
     mktdata: dict[str, pd.DataFrame] = field(repr=False)
     benchmark_prices: dict[str, pd.Series] = field(default_factory=dict)
+    snapshots: list = field(default_factory=list)
 
     # -- Metrics --------------------------------------------------------------
 

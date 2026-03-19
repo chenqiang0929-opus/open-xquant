@@ -15,7 +15,7 @@ from typing import Literal
 import pandas as pd
 
 from oxq.core.strategy import Strategy
-from oxq.core.types import Broker, Fill, Order, Portfolio, Position, Rule
+from oxq.core.types import BarSnapshot, Broker, Fill, Order, Portfolio, Position, PositionSnapshot, Rule
 from oxq.data.providers import MarketDataProvider
 from oxq.observe.tracer import DefaultTracer
 from oxq.portfolio.analytics import RunResult
@@ -198,6 +198,7 @@ class Engine:
         self._trades: list[Fill] = []
         self._equity_curve: list[tuple[object, float]] = []
         self._last_known_price: dict[str, float] = {}
+        self._snapshots: list[BarSnapshot] = []
 
     @property
     def dates(self) -> pd.DatetimeIndex:
@@ -217,6 +218,7 @@ class Engine:
             equity_curve=self._equity_curve,
             mktdata=self._mktdata,
             benchmark_prices=self._benchmark_prices,
+            snapshots=self._snapshots,
         )
 
     def step(self, date: pd.Timestamp) -> None:
@@ -248,6 +250,7 @@ class Engine:
                 indicators_data[s] = sliced
 
         target_weights = strategy.portfolio.optimize(signals_data, indicators_data)
+        raw_target_weights = dict(target_weights)
 
         # ── Step 3: Pre-trade rules ───────────────────────────────────
         hold = False
@@ -261,6 +264,8 @@ class Engine:
                     hold = True
                 if result.weights is not None:
                     target_weights.update(result.weights)
+
+        adjusted_weights = dict(target_weights)
 
         # ── Step 4: Trading algorithm (skip if hold) ──────────────────
         if not hold:
@@ -343,6 +348,23 @@ class Engine:
                 prices[s] = Decimal(str(self._last_known_price[s]))
         self._equity_curve.append((date, float(portfolio.total_value(prices))))
 
+        # ── Step 10: Record bar snapshot ──────────────────────────────
+        pos_snapshot = {
+            sym: PositionSnapshot(shares=pos.shares, avg_cost=float(pos.avg_cost))
+            for sym, pos in portfolio.positions.items()
+        }
+        tv = float(portfolio.total_value(prices))
+        self._snapshots.append(
+            BarSnapshot(
+                date=date,
+                target_weights=raw_target_weights,
+                adjusted_weights=adjusted_weights,
+                positions=pos_snapshot,
+                cash=float(portfolio.cash),
+                total_value=tv,
+            )
+        )
+
     def run(
         self,
         strategy: Strategy,
@@ -398,6 +420,7 @@ class Engine:
                 portfolio=self._portfolio, trades=[], equity_curve=[],
                 mktdata=self._mktdata,
                 benchmark_prices=self._benchmark_prices,
+                snapshots=[],
             )
 
         if run_through == "signal":
@@ -405,6 +428,7 @@ class Engine:
                 portfolio=self._portfolio, trades=[], equity_curve=[],
                 mktdata=self._mktdata,
                 benchmark_prices=self._benchmark_prices,
+                snapshots=[],
             )
 
         for date in self.dates:
