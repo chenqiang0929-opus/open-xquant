@@ -101,6 +101,52 @@ class Position:
     avg_cost: Decimal
 
 
+@dataclass(frozen=True)
+class PositionSnapshot:
+    """Snapshot of a single position at a point in time.
+
+    Attributes
+    ----------
+    shares : int
+        Number of shares held.
+    avg_cost : float
+        Volume-weighted average cost per share.
+    """
+
+    shares: int
+    avg_cost: float
+
+
+@dataclass(frozen=True)
+class BarSnapshot:
+    """Per-bar portfolio snapshot for post-run analysis.
+
+    Captured at the end of each bar in Engine.step().
+
+    Attributes
+    ----------
+    date : object
+        Bar date (pd.Timestamp or str).
+    target_weights : dict[str, float]
+        Raw optimizer output (before rules).
+    adjusted_weights : dict[str, float]
+        Weights after pre-trade rules adjustment.
+    positions : dict[str, PositionSnapshot]
+        Holdings after all fills for this bar.
+    cash : float
+        Cash balance after all fills and interest.
+    total_value : float
+        Total portfolio value (cash + positions).
+    """
+
+    date: object
+    target_weights: dict[str, float]
+    adjusted_weights: dict[str, float]
+    positions: dict[str, PositionSnapshot]
+    cash: float
+    total_value: float
+
+
 @dataclass
 class Portfolio:
     """Mutable portfolio state tracking cash and positions.
