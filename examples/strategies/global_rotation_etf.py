@@ -184,21 +184,3 @@ if __name__ == "__main__":
 
     for name, val in rows:
         print(f"  {name:>20}: {val}")
-
-    # ── 6. Baseline comparison ───────────────────────────────────────
-
-    print()
-    print("Production Baseline Comparison:")
-    baseline = {
-        "Total Return": (result.total_return(), 0.6812),
-        "Ann. Return": (result.annualized_return(), 0.5730),
-        "Volatility": (result.annualized_volatility(), 0.2084),
-        "Sharpe": (result.sharpe_ratio(), 2.65),
-        "Max Drawdown": (result.max_drawdown(), -0.1494),
-        "Calmar": (result.calmar_ratio(), 3.84),
-    }
-
-    for name, (actual, expected) in baseline.items():
-        diff = actual - expected
-        tag = "OK" if abs(diff) < abs(expected) * 0.05 else "DIFF"
-        print(f"  {name:<15} actual={actual:>8.4f}  expected={expected:>8.4f}  diff={diff:>+8.4f}  [{tag}]")
