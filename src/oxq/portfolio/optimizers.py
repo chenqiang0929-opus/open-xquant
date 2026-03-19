@@ -152,3 +152,29 @@ class TopNRankingOptimizer:
             weights[s] = min(v / total, self.max_weight)
 
         return weights if weights else {"CASH": 1.0}
+
+
+class PctEquityOptimizer:
+    """Allocates a fixed percentage of equity to each signaled symbol."""
+
+    name: str = "PctEquity"
+
+    def __init__(self, pct: float = 0.10) -> None:
+        self.pct = pct
+
+    def optimize(
+        self,
+        signals: dict[str, pd.DataFrame],
+        indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]:
+        if not signals:
+            return {"CASH": 1.0}
+
+        total_pct = self.pct * len(signals)
+        if total_pct > 1.0:
+            weight = 1.0 / len(signals)
+            return {symbol: weight for symbol in signals}
+
+        weights: dict[str, float] = {symbol: self.pct for symbol in signals}
+        weights["CASH"] = 1.0 - total_pct
+        return weights

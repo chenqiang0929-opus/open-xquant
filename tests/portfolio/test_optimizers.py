@@ -1,6 +1,6 @@
 import pandas as pd
 from oxq.core.types import PortfolioOptimizer
-from oxq.portfolio.optimizers import EqualWeightOptimizer, RiskParityOptimizer, KellyOptimizer
+from oxq.portfolio.optimizers import EqualWeightOptimizer, RiskParityOptimizer, KellyOptimizer, PctEquityOptimizer
 
 
 def test_equal_weight_protocol():
@@ -88,3 +88,41 @@ def test_kelly_negative_edge_goes_to_cash():
     result = opt.optimize({}, indicators)
     assert result.get("AAPL", 0) == 0
     assert result["CASH"] == 1.0
+
+
+def test_pct_equity_protocol():
+    assert isinstance(PctEquityOptimizer(), PortfolioOptimizer)
+
+
+def test_pct_equity_basic():
+    """Each signaled symbol gets pct_equity weight, rest goes to CASH."""
+    opt = PctEquityOptimizer(pct=0.10)
+    signals = {
+        "AAPL": pd.DataFrame({"signal": [1.0]}, index=pd.to_datetime(["2024-01-01"])),
+        "GOOG": pd.DataFrame({"signal": [1.0]}, index=pd.to_datetime(["2024-01-01"])),
+    }
+    result = opt.optimize(signals, {})
+    assert abs(result["AAPL"] - 0.10) < 1e-9
+    assert abs(result["GOOG"] - 0.10) < 1e-9
+    assert abs(result["CASH"] - 0.80) < 1e-9
+
+
+def test_pct_equity_exceeds_one():
+    """When pct * n_symbols > 1.0, normalize to sum to 1.0."""
+    opt = PctEquityOptimizer(pct=0.40)
+    signals = {
+        "AAPL": pd.DataFrame({"signal": [1.0]}, index=pd.to_datetime(["2024-01-01"])),
+        "GOOG": pd.DataFrame({"signal": [1.0]}, index=pd.to_datetime(["2024-01-01"])),
+        "MSFT": pd.DataFrame({"signal": [1.0]}, index=pd.to_datetime(["2024-01-01"])),
+    }
+    result = opt.optimize(signals, {})
+    total = sum(result.values())
+    assert abs(total - 1.0) < 1e-9
+    for sym in ["AAPL", "GOOG", "MSFT"]:
+        assert abs(result[sym] - 1.0 / 3) < 1e-9
+
+
+def test_pct_equity_empty():
+    opt = PctEquityOptimizer(pct=0.10)
+    result = opt.optimize({}, {})
+    assert result == {"CASH": 1.0}

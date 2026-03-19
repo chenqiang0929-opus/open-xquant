@@ -3,6 +3,7 @@ from oxq.portfolio.execution_report import ExecutionReport, FillComparison
 from oxq.portfolio.optimizers import (
     EqualWeightOptimizer,
     KellyOptimizer,
+    PctEquityOptimizer,
     RiskParityOptimizer,
     TopNRankingOptimizer,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "FillComparison",
     "KellyOptimizer",
     "ManagedOrder",
+    "PctEquityOptimizer",
     "OrderBook",
     "RiskParityOptimizer",
     "RunResult",
