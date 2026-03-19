@@ -560,6 +560,28 @@ class TestFillPriceMode:
         assert len(fills) == 0
 
 
+class TestFillPriceModeMid:
+    def test_mid_price_fill(self):
+        """MID mode fills at (open + close) / 2."""
+        broker = SimBroker(fill_price_mode=FillPriceMode.MID)
+        order = Order(symbol="A", side="BUY", shares=100)
+        broker.submit_order(order)
+
+        df = pd.DataFrame(
+            {"open": [10.0], "high": [12.0], "low": [9.0], "close": [11.0]},
+            index=pd.to_datetime(["2025-01-06"]),
+        )
+        mktdata = {"A": df}
+        date = pd.Timestamp("2025-01-06")
+
+        broker.on_bar_close(mktdata, date)
+        fills = broker.get_fills()
+
+        assert len(fills) == 1
+        # mid = (10.0 + 11.0) / 2 = 10.5
+        assert fills[0].filled_price == Decimal("10.5")
+
+
 class TestNaNAndInfinityPrices:
     """close price may be NaN or Infinity — broker must skip, not crash."""
 

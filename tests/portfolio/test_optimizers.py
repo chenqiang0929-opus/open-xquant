@@ -1,6 +1,7 @@
 import pandas as pd
+import pytest
 from oxq.core.types import PortfolioOptimizer
-from oxq.portfolio.optimizers import EqualWeightOptimizer, RiskParityOptimizer, KellyOptimizer, PctEquityOptimizer
+from oxq.portfolio.optimizers import EqualWeightOptimizer, RiskParityOptimizer, KellyOptimizer, PctEquityOptimizer, TopNRankingOptimizer
 
 
 def test_equal_weight_protocol():
@@ -126,3 +127,42 @@ def test_pct_equity_empty():
     opt = PctEquityOptimizer(pct=0.10)
     result = opt.optimize({}, {})
     assert result == {"CASH": 1.0}
+
+
+class TestTopNRankingOptimizerRedistribution:
+    def test_weights_sum_to_one_after_cap(self):
+        """After capping at max_weight, weights must sum to 1.0."""
+        opt = TopNRankingOptimizer(score_col="score", n=3, max_weight=0.5)
+        indicators = {
+            "A": pd.DataFrame({"score": [0.8]}),
+            "B": pd.DataFrame({"score": [0.15]}),
+            "C": pd.DataFrame({"score": [0.05]}),
+        }
+        result = opt.optimize({}, indicators)
+        assert sum(result.values()) == pytest.approx(1.0)
+
+    def test_excess_goes_to_cash(self):
+        """Excess weight from capping goes to CASH."""
+        opt = TopNRankingOptimizer(score_col="score", n=3, max_weight=0.5)
+        indicators = {
+            "A": pd.DataFrame({"score": [0.8]}),
+            "B": pd.DataFrame({"score": [0.15]}),
+            "C": pd.DataFrame({"score": [0.05]}),
+        }
+        result = opt.optimize({}, indicators)
+        # A: 0.8/1.0 = 0.8, capped to 0.5, excess 0.3 -> CASH
+        assert result["A"] == pytest.approx(0.5)
+        assert "CASH" in result
+        assert result["CASH"] == pytest.approx(0.3)
+        assert sum(result.values()) == pytest.approx(1.0)
+
+    def test_no_cap_no_cash(self):
+        """When no weight exceeds max, no CASH key should be added."""
+        opt = TopNRankingOptimizer(score_col="score", n=3, max_weight=0.9)
+        indicators = {
+            "A": pd.DataFrame({"score": [0.5]}),
+            "B": pd.DataFrame({"score": [0.5]}),
+        }
+        result = opt.optimize({}, indicators)
+        assert "CASH" not in result
+        assert sum(result.values()) == pytest.approx(1.0)

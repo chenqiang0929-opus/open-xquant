@@ -60,13 +60,17 @@ class MaxHoldingsRule:
 class RebalanceFrequencyRule:
     """Freezes trading within a rebalance interval.
 
-    Allows trading on the first bar, then blocks until interval_days have passed.
+    Counts trading days (bars processed), not calendar days.
+    Allows trading on the first bar, then blocks until interval_days
+    trading days have passed.
     """
 
     name = "RebalanceFrequencyRule"
 
     def __init__(self, interval_days: int = 5) -> None:
         self.interval_days = interval_days
+        self._bars_since_rebalance: int | None = None
+        self._last_evaluated_date: pd.Timestamp | None = None
         self._last_rebalance_date: pd.Timestamp | None = None
 
     def evaluate(
@@ -80,16 +84,31 @@ class RebalanceFrequencyRule:
         if bar_date is None:
             return RuleResult()
 
-        if self._last_rebalance_date is None:
+        # First bar ever: allow trading
+        if self._bars_since_rebalance is None:
+            self._bars_since_rebalance = 0
+            self._last_evaluated_date = bar_date
             self._last_rebalance_date = bar_date
             return RuleResult()
 
-        days_since = (bar_date - self._last_rebalance_date).days
-        if days_since >= self.interval_days:
+        # Count new trading days (avoid double-counting for multi-symbol bars)
+        if bar_date != self._last_evaluated_date:
+            self._bars_since_rebalance += 1
+            self._last_evaluated_date = bar_date
+
+        # Allow all symbols on a rebalance date
+        if bar_date == self._last_rebalance_date:
+            return RuleResult()
+
+        if self._bars_since_rebalance >= self.interval_days:
+            self._bars_since_rebalance = 0
             self._last_rebalance_date = bar_date
             return RuleResult()
 
         return RuleResult(
             hold=True,
-            reason=f"rebalance interval: {days_since}d < {self.interval_days}d",
+            reason=(
+                f"rebalance interval: {self._bars_since_rebalance} bars"
+                f" < {self.interval_days} bars"
+            ),
         )

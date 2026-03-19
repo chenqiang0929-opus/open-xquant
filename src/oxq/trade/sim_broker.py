@@ -17,6 +17,7 @@ class FillPriceMode(Enum):
     """Fill price mode for market orders."""
 
     CLOSE = "close"
+    MID = "mid"
     NEXT_OPEN = "next_open"
     NEXT_HIGH = "next_high"
     NEXT_LOW = "next_low"
@@ -268,6 +269,13 @@ class SimBroker:
         if self._fill_price_mode == FillPriceMode.CLOSE:
             price = Decimal(str(float(df.loc[date, "close"])))  # type: ignore[arg-type]
             return price if price.is_finite() else None
+
+        if self._fill_price_mode == FillPriceMode.MID:
+            open_price = Decimal(str(float(df.loc[date, "open"])))
+            close_price = Decimal(str(float(df.loc[date, "close"])))
+            if not open_price.is_finite() or not close_price.is_finite():
+                return None
+            return (open_price + close_price) / 2
 
         # NEXT_* modes: find next bar
         idx = df.index.get_loc(date)
