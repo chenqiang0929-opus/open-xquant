@@ -148,8 +148,16 @@ class TopNRankingOptimizer:
             return {"CASH": 1.0}
 
         weights: dict[str, float] = {}
+        cash = 0.0
         for s, v in top:
-            weights[s] = min(v / total, self.max_weight)
+            w = v / total
+            if w > self.max_weight:
+                cash += w - self.max_weight
+                w = self.max_weight
+            weights[s] = w
+
+        if cash > 0:
+            weights["CASH"] = cash
 
         return weights if weights else {"CASH": 1.0}
 
