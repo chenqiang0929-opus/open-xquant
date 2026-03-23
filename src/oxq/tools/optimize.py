@@ -85,11 +85,16 @@ def _metrics_dict(rr: RunResult) -> dict[str, float]:
 
 @registry.tool(
     name="paramset_create",
-    description="Create a parameter search space with value ranges and constraints for optimization",
+    description=(
+        "Create a parameter search space for optimization. "
+        "IMPORTANT: 'component' must exactly match names from strategy_inspect — "
+        "indicator keys from signals[x].indicators, portfolio.type, or rule names."
+    ),
 )
 def paramset_create(
     name: str,
     params: list[dict[str, Any]],
+    strategy: str | None = None,
     constraints: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a ParameterSet and store it in the session.
@@ -100,11 +105,43 @@ def paramset_create(
         Name for this parameter set.
     params : list[dict]
         Each dict: {"component": "sma_fast", "param": "period", "values": [5, 10, 20]}.
-        component can be an indicator/signal dict key or a Rule class name
-        (e.g. "StopLossRule", "MaxDrawdownRisk").
+        component must match: indicator key in signal.indicators, portfolio.type
+        (e.g. "TopNRanking"), or rule.name (e.g. "StopLossRule").
+    strategy : str or None
+        Optional strategy name to validate component names against.
     constraints : list[str] or None
         Constraint expressions, e.g. ["sma_fast.period < sma_slow.period"].
     """
+    # Validate component names against strategy if provided
+    if strategy:
+        strat = session._strategies.get(strategy)
+        if strat is not None:
+            known: set[str] = set()
+            for _sig_name, (sig, _p) in strat.signals.items():
+                known.add(_sig_name)
+                for ind_name in getattr(sig, "required_indicators", {}):
+                    known.add(ind_name)
+            portfolio_name = getattr(strat.portfolio, "name", None)
+            if portfolio_name:
+                known.add(portfolio_name)
+            for rule in getattr(strat, "_pending_rules", []):
+                rule_name = getattr(rule, "name", None)
+                if rule_name:
+                    known.add(rule_name)
+
+            unmatched = [
+                p["component"] for p in params if p["component"] not in known
+            ]
+            if unmatched:
+                return {
+                    "error": (
+                        f"Component names {unmatched} do not match any indicator, "
+                        f"portfolio, or rule in strategy '{strategy}'. "
+                        f"Known names: {sorted(known)}. "
+                        f"Use strategy_inspect to check exact names."
+                    ),
+                }
+
     try:
         ps = _build_paramset(name, params, constraints)
     except (ValueError, KeyError) as e:
@@ -181,9 +218,9 @@ def paramset_inspect(name: str) -> dict[str, Any]:
 def grid_search(
     strategy: str,
     paramset: str,
-    symbols: list[str],
     start: str,
     end: str,
+    symbols: list[str] | None = None,
     metric: str = "sharpe_ratio",
     metric_direction: str | None = None,
     initial_cash: float = 100_000.0,
@@ -191,6 +228,9 @@ def grid_search(
     fee_rate: float | None = None,
     fee_min: float | None = None,
     slippage_rate: float | None = None,
+    lot_size: int = 1,
+    cash_annual_return: float = 0.0,
+    data_start: str | None = None,
     top_n: int = 5,
 ) -> dict[str, Any]:
     """Run GridSearch and return top results."""
@@ -202,10 +242,17 @@ def grid_search(
     if ps is None:
         return {"error": f"ParameterSet '{paramset}' not found"}
 
-    strat.universe = StaticUniverse(tuple(symbols))
+    if symbols:
+        strat.universe = StaticUniverse(tuple(symbols))
+    elif not hasattr(strat.universe, "symbols") or not strat.universe.symbols:
+        return {"error": "Strategy has no universe set. Use strategy_set_universe first, or pass symbols parameter."}
+
     path = resolve_data_dir(Path(data_dir) if data_dir else None)
     market = LocalMarketDataProvider(path)
     factory = _broker_factory(fee_rate, fee_min, slippage_rate)
+
+    # Collect pending rules from strategy
+    rules = getattr(strat, "_pending_rules", []) or []
 
     try:
         result = GridSearch(ps).run(
@@ -217,6 +264,10 @@ def grid_search(
             metric=metric,
             metric_direction=metric_direction,
             initial_cash=initial_cash,
+            rules=rules,
+            lot_size=lot_size,
+            cash_annual_return=cash_annual_return,
+            data_start=data_start,
         )
     except Exception as e:
         return {"error": str(e)}

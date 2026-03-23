@@ -122,11 +122,37 @@ def _apply_params(
             new_signal.required_indicators = new_req
             new_signals[name] = (new_signal, new_signals[name][1])
 
+    # Apply params to portfolio optimizer
+    new_portfolio = copy.deepcopy(strategy.portfolio)
+    portfolio_name = getattr(new_portfolio, "name", None)
+    if portfolio_name and portfolio_name in params:
+        for attr, value in params[portfolio_name].items():
+            setattr(new_portfolio, attr, value)
+
+    # Warn about unmatched component names
+    known_names: set[str] = set()
+    for _name, (sig, _p) in strategy.signals.items():
+        known_names.add(_name)
+        for ind_name in getattr(sig, "required_indicators", {}):
+            known_names.add(ind_name)
+    if portfolio_name:
+        known_names.add(portfolio_name)
+
+    for comp in params:
+        if comp not in known_names:
+            logger.warning(
+                "Parameter component '%s' does not match any signal, "
+                "indicator, or portfolio name in strategy. "
+                "Known names: %s. This parameter will have NO effect.",
+                comp,
+                sorted(known_names),
+            )
+
     return Strategy(
         name=strategy.name,
         universe=strategy.universe,
         signals=new_signals,
-        portfolio=strategy.portfolio,
+        portfolio=new_portfolio,
         hypothesis=strategy.hypothesis,
         objectives=dict(strategy.objectives),
         benchmarks=list(strategy.benchmarks),
@@ -265,6 +291,10 @@ class GridSearch:
         metric: str | Callable[[RunResult], float] = "sharpe_ratio",
         metric_direction: str | None = None,
         initial_cash: float = 100_000.0,
+        rules: list[Any] | None = None,
+        lot_size: int = 1,
+        cash_annual_return: float = 0.0,
+        data_start: str | None = None,
     ) -> SearchResult:
         """Run grid search over all valid parameter combinations.
 
@@ -311,6 +341,9 @@ class GridSearch:
             modified_strategy = _apply_params(strategy, combo)
             broker = broker_factory()
 
+            # Deep-copy rules per trial so stateful rules reset
+            trial_rules = _apply_rule_params(rules or [], combo) if rules else []
+
             run_result = engine.run(
                 modified_strategy,
                 market=market,
@@ -318,6 +351,10 @@ class GridSearch:
                 start=start,
                 end=end,
                 initial_cash=initial_cash,
+                rules=trial_rules,
+                lot_size=lot_size,
+                cash_annual_return=cash_annual_return,
+                data_start=data_start,
             )
 
             metric_value = _extract_metric(run_result, metric)

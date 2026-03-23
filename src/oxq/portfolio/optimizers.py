@@ -26,7 +26,7 @@ class RiskParityOptimizer:
 
     name: str = "RiskParity"
 
-    def __init__(self, volatility_col: str = "volatility") -> None:
+    def __init__(self, volatility_col: str) -> None:
         self.volatility_col = volatility_col
 
     def optimize(
@@ -57,9 +57,9 @@ class KellyOptimizer:
 
     def __init__(
         self,
-        win_rate_col: str = "win_rate",
-        avg_win_col: str = "avg_win",
-        avg_loss_col: str = "avg_loss",
+        win_rate_col: str,
+        avg_win_col: str,
+        avg_loss_col: str,
         fraction: float = 1.0,
     ) -> None:
         self.win_rate_col = win_rate_col
@@ -111,7 +111,7 @@ class TopNRankingOptimizer:
 
     def __init__(
         self,
-        score_col: str = "score",
+        score_col: str,
         n: int = 5,
         filter_negative: bool = True,
         max_weight: float = 1.0,

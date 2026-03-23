@@ -33,7 +33,7 @@ def test_equal_weight_empty():
 
 
 def test_risk_parity_protocol():
-    assert isinstance(RiskParityOptimizer(), PortfolioOptimizer)
+    assert isinstance(RiskParityOptimizer(volatility_col="vol"), PortfolioOptimizer)
 
 
 def test_risk_parity_basic():
@@ -59,7 +59,7 @@ def test_risk_parity_zero_volatility_excluded():
 
 
 def test_kelly_protocol():
-    assert isinstance(KellyOptimizer(), PortfolioOptimizer)
+    assert isinstance(KellyOptimizer(win_rate_col="wr", avg_win_col="aw", avg_loss_col="al"), PortfolioOptimizer)
 
 
 def test_kelly_basic():

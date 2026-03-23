@@ -31,18 +31,29 @@ tools_required: [paramset_create, paramset_inspect, grid_search, walk_forward, c
 
 引导用户只选择**关键驱动参数**，避免过多自由度：
 
-| 参数类型 | 示例 | 说明 |
-|---------|------|------|
-| 指标参数 | SMA period | 影响信号时机的核心参数 |
-| 规则参数 | StopLossRule threshold | 影响风控效果的关键阈值 |
+| 参数类型 | 示例 | component 名 |
+|---------|------|-------------|
+| 指标参数 | SMA period | signal 的 `indicators` 中的 key 名（如 `"sma_fast"`） |
+| 组合优化器参数 | TopNRanking n, max_weight | `portfolio.name` 值（如 `"TopNRanking"`） |
+| 规则参数 | StopLossRule threshold | `rule.name` 值（如 `"StopLossRule"`） |
+
+**关键：`component` 名必须精确匹配策略中的名称。** 在创建 paramset 前，必须先调用 `strategy_inspect` 查看策略定义，确认：
+- Indicator 的 component 名 = `signals[信号名].indicators` 中的 key（如 `"sma_fast"`、`"momentum_20"`）
+- Portfolio 的 component 名 = `portfolio.type` 值（如 `"TopNRanking"`、`"RiskParity"`）
+- Rule 的 component 名 = `rules[].name` 值（如 `"RebalanceFrequencyRule"`、`"StopLossRule"`）
 
 **原则：** 参数数量 x 每参数取值数 = 总组合数。总组合数应尽量控制在合理范围内（< 500），以减少数据挖掘偏差。
 
 ### 1.2 创建参数集
 
+**在创建前必须先 `strategy_inspect` 确认 component 名！**
+
+#### 示例 1：优化指标参数
 ```
+# strategy_inspect 显示 indicators 中有 "sma_fast" 和 "sma_slow"
 paramset_create(
     name="sma_cross_tune",
+    strategy="sma_crossover",
     params=[
         {"component": "sma_fast", "param": "period", "values": [5, 8, 10, 13, 15, 20]},
         {"component": "sma_slow", "param": "period", "values": [30, 40, 50, 60, 80]},
@@ -50,6 +61,26 @@ paramset_create(
     constraints=["sma_fast.period < sma_slow.period"]
 )
 ```
+
+#### 示例 2：同时优化指标 + 组合优化器参数
+```
+# strategy_inspect 显示：
+#   signals.active.indicators 中有 "mom" 和 "vol"
+#   portfolio.type = "TopNRanking"
+paramset_create(
+    name="momentum_tune",
+    strategy="global_rotation_etf",
+    params=[
+        {"component": "mom", "param": "period", "values": [10, 15, 20, 25, 30]},
+        {"component": "vol", "param": "period", "values": [10, 15, 20, 25, 30]},
+        {"component": "TopNRanking", "param": "n", "values": [1, 2, 3]},
+        {"component": "TopNRanking", "param": "max_weight", "values": [0.7, 0.8, 0.9, 1.0]},
+    ],
+    constraints=["mom.period == vol.period"]
+)
+```
+
+> **传入 `strategy` 参数后，tool 会自动验证 component 名是否匹配。如果不匹配会立即报错，避免网格搜索白跑。**
 
 ### 1.3 检查参数空间
 
@@ -67,13 +98,17 @@ paramset_inspect(name="sma_cross_tune")
 grid_search(
     strategy="sma_crossover",
     paramset="sma_cross_tune",
-    symbols=["AAPL"],
     start="2018-01-01",
     end="2023-12-31",
     metric="sharpe_ratio",
+    initial_cash=1000000.0,
+    lot_size=100,
+    data_start="2017-12-01",
     top_n=10
 )
 ```
+
+注意：`grid_search` 使用 Strategy 上已设定的 Universe，无需再传 `symbols`。可选参数：`lot_size`（最小交易单位）、`data_start`（indicator warmup 起始日）、`cash_annual_return`（现金年化收益）。
 
 ### 2.2 评估搜索结果 — 判断是否有合格参数
 

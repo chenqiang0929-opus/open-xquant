@@ -13,7 +13,7 @@ from oxq.data.market import LocalMarketDataProvider
 from oxq.tools import session
 from oxq.tools.registry import registry
 from oxq.trade.fees import PercentageFee
-from oxq.trade.sim_broker import SimBroker
+from oxq.trade.sim_broker import FillPriceMode, SimBroker
 from oxq.trade.slippage import PercentageSlippage
 from oxq.universe.static import StaticUniverse
 
@@ -24,23 +24,30 @@ from oxq.universe.static import StaticUniverse
 )
 def engine_run(
     strategy: str,
-    symbols: list[str],
     start: str,
     end: str,
+    symbols: list[str] | None = None,
     initial_cash: float = 100_000.0,
     run_through: Literal["indicator", "signal"] | None = None,
     data_dir: str | None = None,
     fee_rate: float | None = None,
     fee_min: float | None = None,
     slippage_rate: float | None = None,
+    lot_size: int = 1,
+    cash_annual_return: float = 0.0,
+    data_start: str | None = None,
+    fill_price_mode: Literal["close", "mid", "next_open", "next_high", "next_low"] | None = None,
 ) -> dict[str, Any]:
     """Run a strategy through the engine and store the result."""
     strat = session._strategies.get(strategy)
     if strat is None:
         return {"error": f"Strategy '{strategy}' not found"}
 
-    # Set universe from symbols param
-    strat.universe = StaticUniverse(tuple(symbols))
+    # Use symbols param as override; otherwise use strategy's universe
+    if symbols:
+        strat.universe = StaticUniverse(tuple(symbols))
+    elif not hasattr(strat.universe, "symbols") or not strat.universe.symbols:
+        return {"error": "Strategy has no universe set. Use strategy_set_universe first, or pass symbols parameter."}
 
     path = resolve_data_dir(Path(data_dir) if data_dir else None)
     market = LocalMarketDataProvider(path)
@@ -57,7 +64,17 @@ def engine_run(
     if slippage_rate is not None:
         slippage_model = PercentageSlippage(rate=Decimal(str(slippage_rate)))
 
-    broker = SimBroker(fee_model=fee_model, slippage_model=slippage_model)
+    broker_kwargs: dict[str, Any] = {}
+    if fee_model is not None:
+        broker_kwargs["fee_model"] = fee_model
+    if slippage_model is not None:
+        broker_kwargs["slippage_model"] = slippage_model
+    if fill_price_mode is not None:
+        broker_kwargs["fill_price_mode"] = FillPriceMode(fill_price_mode)
+    broker = SimBroker(**broker_kwargs)
+
+    # Collect pending rules from strategy
+    rules = getattr(strat, "_pending_rules", []) or []
 
     try:
         result = Engine().run(
@@ -68,9 +85,15 @@ def engine_run(
             end=end,
             initial_cash=initial_cash,
             run_through=run_through,
+            rules=rules,
+            lot_size=lot_size,
+            cash_annual_return=cash_annual_return,
+            data_start=data_start,
         )
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+
+        return {"error": str(e), "type": type(e).__name__, "traceback": traceback.format_exc()}
 
     run_id = f"{strategy}_{int(time.time())}"
     session._run_results[run_id] = result

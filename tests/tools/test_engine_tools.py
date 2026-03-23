@@ -8,7 +8,6 @@ import pytest
 from oxq.tools import session
 from oxq.tools.engine import engine_results, engine_run, engine_trade_list
 from oxq.tools.strategy import (
-    strategy_add_indicator,
     strategy_add_signal,
     strategy_create,
 )
@@ -65,27 +64,15 @@ def _build_strategy(
         hypothesis="SMA10 crossing above SMA50 predicts positive returns",
         objectives=objectives,
     )
-    # Add indicators (stored as pending for tool convenience)
-    strategy_add_indicator(
-        strategy=name, name="sma_10", type="SMA",
-        params={"column": "close", "period": 10},
-    )
-    strategy_add_indicator(
-        strategy=name, name="sma_50", type="SMA",
-        params={"column": "close", "period": 50},
-    )
-    # Add signal — Crossover will produce buy/sell signals
+    # Add signal with its required indicators
     strategy_add_signal(
         strategy=name, name="cross_up", type="Crossover",
-        inputs={"fast": "sma_10", "slow": "sma_50"},
+        params={"fast": "sma_10", "slow": "sma_50"},
+        indicators={
+            "sma_10": {"type": "SMA", "params": {"column": "close", "period": 10}},
+            "sma_50": {"type": "SMA", "params": {"column": "close", "period": 50}},
+        },
     )
-
-    # Attach required_indicators to the signal so Engine can compute them
-    strat = session._strategies[name]
-    pending_inds = getattr(strat, "_pending_indicators", {})
-    if pending_inds:
-        for _sig_name, (signal, _params) in strat.signals.items():
-            signal.required_indicators = dict(pending_inds)
 
 
 def _build_full_strategy() -> None:

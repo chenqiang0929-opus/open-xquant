@@ -28,14 +28,24 @@ from oxq.indicators.builtin import (
     MACDSignal,
     StochK,
 )
+from oxq.indicators.annualized_volatility import AnnualizedVolatility
 from oxq.indicators.log_return import LogReturn
 from oxq.indicators.momentum import Momentum
 from oxq.indicators.nday_return import NdayReturn
+from oxq.indicators.power_ratio import PowerRatio
 from oxq.indicators.ratio import Ratio
 from oxq.indicators.rolling_mdd import RollingMDD
 from oxq.indicators.rolling_volatility import RollingVolatility
+from oxq.indicators.simple_momentum import SimpleMomentum
 from oxq.indicators.sma import SMA
-from oxq.portfolio.optimizers import EqualWeightOptimizer
+from oxq.portfolio.optimizers import (
+    EqualWeightOptimizer,
+    KellyOptimizer,
+    PctEquityOptimizer,
+    RiskParityOptimizer,
+    TopNRankingOptimizer,
+)
+from oxq.rules.constraint import BlacklistRule, MaxHoldingsRule, RebalanceFrequencyRule
 from oxq.rules.exit import ExitRule
 from oxq.rules.order import StopLossRule, TakeProfitRule, TrailingStopRule
 from oxq.rules.risk import DailyLossLimitRisk, MaxDrawdownRisk
@@ -56,6 +66,7 @@ from oxq.universe.static import StaticUniverse
 
 INDICATOR_TYPES: dict[str, type] = {
     "ADX": ADX,
+    "AnnualizedVolatility": AnnualizedVolatility,
     "AROON": AROON,
     "ATR": ATR,
     "BollingerLower": BollingerLower,
@@ -72,12 +83,14 @@ INDICATOR_TYPES: dict[str, type] = {
     "NdayReturn": NdayReturn,
     "OBV": OBV,
     "PPO": PPO,
+    "PowerRatio": PowerRatio,
     "ROC": ROC,
     "RSI": RSI,
     "Ratio": Ratio,
     "RollingMDD": RollingMDD,
     "RollingVolatility": RollingVolatility,
     "SMA": SMA,
+    "SimpleMomentum": SimpleMomentum,
     "StochK": StochK,
     "TEMA": TEMA,
     "VWAP": VWAP,
@@ -93,13 +106,47 @@ SIGNAL_TYPES: dict[str, type] = {
     "Timestamp": Timestamp,
 }
 RULE_TYPES: dict[str, type] = {
+    "BlacklistRule": BlacklistRule,
+    "DailyLossLimitRisk": DailyLossLimitRisk,
     "ExitRule": ExitRule,
+    "MaxDrawdownRisk": MaxDrawdownRisk,
+    "MaxHoldingsRule": MaxHoldingsRule,
+    "RebalanceFrequencyRule": RebalanceFrequencyRule,
     "StopLossRule": StopLossRule,
     "TakeProfitRule": TakeProfitRule,
     "TrailingStopRule": TrailingStopRule,
-    "MaxDrawdownRisk": MaxDrawdownRisk,
-    "DailyLossLimitRisk": DailyLossLimitRisk,
 }
+PORTFOLIO_TYPES: dict[str, type] = {
+    "EqualWeight": EqualWeightOptimizer,
+    "RiskParity": RiskParityOptimizer,
+    "Kelly": KellyOptimizer,
+    "TopNRanking": TopNRankingOptimizer,
+    "PctEquity": PctEquityOptimizer,
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_required_indicators(
+    indicators: dict[str, dict[str, Any]],
+) -> dict[str, tuple] | str:
+    """Convert a tool-level indicators dict to required_indicators format.
+
+    Returns a dict of (instance, params) tuples, or an error string.
+    """
+    result: dict[str, tuple] = {}
+    for ind_name, ind_def in indicators.items():
+        ind_type = ind_def.get("type")
+        if not ind_type:
+            return f"Indicator '{ind_name}' missing 'type' field"
+        cls = INDICATOR_TYPES.get(ind_type)
+        if cls is None:
+            return f"Unknown indicator type '{ind_type}'. Available: {sorted(INDICATOR_TYPES)}"
+        result[ind_name] = (cls(), ind_def.get("params", {}))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -162,50 +209,20 @@ def strategy_list() -> dict[str, Any]:
 
 
 @registry.tool(
-    name="strategy_add_indicator",
-    description="Add an indicator (e.g. SMA) to a strategy",
-)
-def strategy_add_indicator(
-    strategy: str,
-    name: str,
-    type: str,
-    params: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Add an indicator to an existing strategy."""
-    strat = session._strategies.get(strategy)
-    if strat is None:
-        return {"error": f"Strategy '{strategy}' not found"}
-
-    cls = INDICATOR_TYPES.get(type)
-    if cls is None:
-        return {"error": f"Unknown indicator type '{type}'. Available: {sorted(INDICATOR_TYPES)}"}
-
-    # Store indicator info in signal's required_indicators when signal is added.
-    # For now, store indicators in a _pending_indicators dict on the strategy.
-    if not hasattr(strat, "_pending_indicators"):
-        strat._pending_indicators = {}
-    strat._pending_indicators[name] = (cls(), params or {})
-    session._save()
-    return {
-        "strategy": strategy,
-        "indicator": name,
-        "type": type,
-        "params": params or {},
-    }
-
-
-@registry.tool(
     name="strategy_add_signal",
-    description="Add a signal (e.g. Crossover) to a strategy",
+    description=(
+        "Add a signal (e.g. Crossover) to a strategy, "
+        "along with the indicators it depends on"
+    ),
 )
 def strategy_add_signal(
     strategy: str,
     name: str,
     type: str,
-    inputs: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
+    indicators: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Add a signal to an existing strategy."""
+    """Add a signal with its required indicators to an existing strategy."""
     strat = session._strategies.get(strategy)
     if strat is None:
         return {"error": f"Strategy '{strategy}' not found"}
@@ -214,28 +231,40 @@ def strategy_add_signal(
     if cls is None:
         return {"error": f"Unknown signal type '{type}'. Available: {sorted(SIGNAL_TYPES)}"}
 
-    merged = {**(params or {}), **(inputs or {})}
-    strat.signals[name] = (cls(), merged)
+    signal = cls()
+
+    if indicators:
+        built = _build_required_indicators(indicators)
+        if isinstance(built, str):
+            return {"error": built}
+        signal.required_indicators = built
+
+    strat.signals[name] = (signal, params or {})
     session._save()
     return {
         "strategy": strategy,
         "signal": name,
         "type": type,
-        "inputs": inputs or {},
+        "params": params or {},
+        "indicators": list((indicators or {}).keys()),
     }
 
 
 @registry.tool(
     name="strategy_add_rule",
-    description="Add a rule (entry, exit, order, rebalance, or risk) to a strategy",
+    description=(
+        "Add a rule (exit, order, constraint, or risk) to a strategy, "
+        "along with the indicators it depends on"
+    ),
 )
 def strategy_add_rule(
     strategy: str,
     name: str,
     type: str,
     params: dict[str, Any] | None = None,
+    indicators: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Add a rule to an existing strategy."""
+    """Add a rule with its required indicators to an existing strategy."""
     strat = session._strategies.get(strategy)
     if strat is None:
         return {"error": f"Strategy '{strategy}' not found"}
@@ -249,6 +278,12 @@ def strategy_add_rule(
         rule = cls(**rule_params)
     except TypeError as e:
         return {"error": f"Invalid params for {type}: {e}"}
+
+    if indicators:
+        built = _build_required_indicators(indicators)
+        if isinstance(built, str):
+            return {"error": built}
+        rule.required_indicators = built
 
     # Rules are stored externally; they are passed to Engine.run() at runtime.
     # Store them in a _pending_rules list on the strategy for tool convenience.
@@ -275,27 +310,59 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
     if strat is None:
         return {"error": f"Strategy '{strategy}' not found"}
 
-    pending_indicators = getattr(strat, "_pending_indicators", {})
     pending_rules = getattr(strat, "_pending_rules", [])
+
+    # Collect indicators from all components
+    def _fmt_indicators(obj: object) -> dict[str, Any]:
+        return {
+            k: {"type": v[0].__class__.__name__, "params": v[1]}
+            for k, v in getattr(obj, "required_indicators", {}).items()
+        }
+
+    signals_info = {}
+    for k, (sig, params) in strat.signals.items():
+        info: dict[str, Any] = {"type": sig.__class__.__name__, "params": params}
+        ind = _fmt_indicators(sig)
+        if ind:
+            info["indicators"] = ind
+        signals_info[k] = info
+
+    portfolio_info: dict[str, Any] = {"type": strat.portfolio.name}
+    # Show portfolio constructor params
+    port_params = {
+        k: v for k, v in vars(strat.portfolio).items()
+        if not k.startswith("_") and k != "name"
+    }
+    if port_params:
+        portfolio_info["params"] = port_params
+    port_ind = _fmt_indicators(strat.portfolio)
+    if port_ind:
+        portfolio_info["indicators"] = port_ind
+
+    rules_info = []
+    for r in pending_rules:
+        rule_item: dict[str, Any] = {"type": r.__class__.__name__, "name": r.name}
+        # Show rule constructor params
+        rule_params = {
+            k: v for k, v in vars(r).items()
+            if not k.startswith("_") and k != "name"
+        }
+        if rule_params:
+            rule_item["params"] = rule_params
+        r_ind = _fmt_indicators(r)
+        if r_ind:
+            rule_item["indicators"] = r_ind
+        rules_info.append(rule_item)
+
     return {
         "name": strat.name,
         "hypothesis": strat.hypothesis,
         "objectives": strat.objectives,
         "benchmarks": strat.benchmarks,
         "universe": list(strat.universe.symbols) if hasattr(strat.universe, "symbols") else [],
-        "indicators": {
-            k: {"type": v[0].__class__.__name__, "params": v[1]}
-            for k, v in pending_indicators.items()
-        },
-        "signals": {
-            k: {"type": v[0].__class__.__name__, "params": v[1]}
-            for k, v in strat.signals.items()
-        },
-        "portfolio": strat.portfolio.name,
-        "rules": [
-            {"type": r.__class__.__name__, "name": r.name}
-            for r in pending_rules
-        ],
+        "signals": signals_info,
+        "portfolio": portfolio_info,
+        "rules": rules_info,
     }
 
 
@@ -437,4 +504,146 @@ def rule_list() -> dict[str, Any]:
             }
             for name, cls in sorted(RULE_TYPES.items())
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Universe tools (strategy-level)
+# ---------------------------------------------------------------------------
+
+
+@registry.tool(
+    name="strategy_set_universe",
+    description="Set the universe (symbol pool) on a strategy. type='static' for a fixed list, type='filter' for condition-based screening.",
+)
+def strategy_set_universe(
+    strategy: str,
+    type: str,
+    symbols: list[str] | None = None,
+    filters: list[dict[str, Any]] | None = None,
+    name: str = "",
+) -> dict[str, Any]:
+    """Bind a universe to an existing strategy."""
+    from oxq.universe import Filter, FilterUniverse
+
+    strat = session._strategies.get(strategy)
+    if strat is None:
+        return {"error": f"Strategy '{strategy}' not found"}
+
+    if type == "static":
+        if not symbols:
+            return {"error": "type='static' requires 'symbols' list."}
+        strat.universe = StaticUniverse(symbols=tuple(symbols), name=name)
+        session._save()
+        return {
+            "strategy": strategy,
+            "universe_type": "static",
+            "symbols": symbols,
+        }
+
+    if type == "filter":
+        if not symbols:
+            return {"error": "type='filter' requires 'symbols' (base pool) list."}
+        if not filters:
+            return {"error": "type='filter' requires 'filters' list."}
+        filter_objs = tuple(
+            Filter(column=f["column"], op=f["op"], value=f["value"]) for f in filters
+        )
+        strat.universe = FilterUniverse(
+            base=tuple(symbols), filters=filter_objs, mktdata={}, name=name,
+        )
+        session._save()
+        return {
+            "strategy": strategy,
+            "universe_type": "filter",
+            "base_symbols": symbols,
+            "filters": filters,
+        }
+
+    return {"error": f"Unknown type '{type}'. Use 'static' or 'filter'."}
+
+
+# ---------------------------------------------------------------------------
+# Portfolio optimizer tools
+# ---------------------------------------------------------------------------
+
+
+@registry.tool(
+    name="strategy_set_portfolio",
+    description="Set the portfolio optimizer on a strategy (e.g. EqualWeight, RiskParity, Kelly, TopNRanking, PctEquity)",
+)
+def strategy_set_portfolio(
+    strategy: str,
+    type: str,
+    params: dict[str, Any] | None = None,
+    indicators: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Set the portfolio optimizer with its required indicators."""
+    strat = session._strategies.get(strategy)
+    if strat is None:
+        return {"error": f"Strategy '{strategy}' not found"}
+
+    cls = PORTFOLIO_TYPES.get(type)
+    if cls is None:
+        return {"error": f"Unknown portfolio type '{type}'. Available: {sorted(PORTFOLIO_TYPES)}"}
+
+    try:
+        optimizer = cls(**(params or {}))
+    except TypeError as e:
+        return {"error": f"Invalid params for {type}: {e}"}
+
+    if indicators:
+        built = _build_required_indicators(indicators)
+        if isinstance(built, str):
+            return {"error": built}
+        optimizer.required_indicators = built
+
+    strat.portfolio = optimizer
+    session._save()
+    return {
+        "strategy": strategy,
+        "portfolio": type,
+        "params": params or {},
+        "indicators": list((indicators or {}).keys()),
+    }
+
+
+@registry.tool(
+    name="portfolio_list",
+    description="List all available portfolio optimizer types",
+)
+def portfolio_list() -> dict[str, Any]:
+    """Return all portfolio optimizer types with descriptions."""
+    return {
+        "optimizers": [
+            {
+                "name": name,
+                "description": (cls.__doc__ or "").split("\n")[0].strip(),
+            }
+            for name, cls in sorted(PORTFOLIO_TYPES.items())
+        ],
+    }
+
+
+@registry.tool(
+    name="portfolio_describe",
+    description="Describe a portfolio optimizer: show its parameters and usage",
+)
+def portfolio_describe(type: str) -> dict[str, Any]:
+    """Return portfolio optimizer metadata including constructor parameters."""
+    cls = PORTFOLIO_TYPES.get(type)
+    if cls is None:
+        return {"error": f"Unknown portfolio optimizer '{type}'. Available: {sorted(PORTFOLIO_TYPES)}"}
+
+    sig = inspect.signature(cls.__init__)
+    params = {
+        k: str(v.default) if v.default is not v.empty else "(required)"
+        for k, v in sig.parameters.items()
+        if k != "self"
+    }
+
+    return {
+        "name": getattr(cls, "name", type),
+        "description": (cls.__doc__ or "").strip(),
+        "params": params,
     }

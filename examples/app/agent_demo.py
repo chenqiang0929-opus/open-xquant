@@ -19,7 +19,7 @@ nest_asyncio.apply()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_DIR = PROJECT_ROOT / "skills"
-MAX_TOOL_ROUNDS = 30
+MAX_TOOL_ROUNDS = 60
 
 
 # -- Sidebar -------------------------------------------------------------------
@@ -35,8 +35,9 @@ Skill 选择指南：
 - 用户想构建策略、回测 → strategy-builder
 - 用户想下载数据、查看数据 → data-explorer
 - 用户想构建投资域 → universe-builder
-- 用户想配置止损/止盈/交易成本 → trade-executor
-- 用户想配置风控/仓位控制 → risk-analyzer
+- 用户想配置止损/止盈/风控/调仓规则 → rule-builder
+- 用户想优化参数、网格搜索、过拟合分析 → parameter-tuner
+- 用户想配置交易成本/实盘执行 → trade-executor
 
 如果用户的请求不匹配任何 Skill，直接回答即可。"""
 

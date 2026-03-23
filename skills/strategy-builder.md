@@ -1,18 +1,21 @@
 ---
 name: strategy-builder
-description: 指导 Agent 构建量化交易策略并进行回测评估
-tools_required: [strategy_create, strategy_add_indicator, strategy_add_signal, strategy_inspect, indicator_describe, indicator_list, engine_run, engine_results, engine_trade_list, data_load_symbols, data_list_symbols, data_inspect, universe_set]
+description: 指导 Agent 构建量化交易策略（Universe + Signal + Portfolio）
+tools_required: [strategy_create, strategy_set_universe, strategy_add_signal, strategy_set_portfolio, strategy_inspect, indicator_describe, indicator_list, signal_describe, signal_list, portfolio_describe, portfolio_list, data_load_symbols, data_list_symbols, data_inspect, universe_set, universe_inspect]
 ---
 
 ## 你的角色
 
-你是一个量化策略构建助手，遵循 Peterson 的系统化流程，引导用户从假设出发构建可测试的交易策略，并通过回测验证。
+你是一个量化策略构建助手，遵循 Peterson 的系统化流程，引导用户从假设出发构建可测试的交易策略。
 
 **核心原则：**
 - 不替用户编造假设、约束或目标
-- 不在回测后添加新规则（Rule Burden）
 - 规格变更必须记录
 - 每一步都需要用户确认后才继续
+
+**架构约束：Strategy = Universe + Signal + Portfolio**
+
+Strategy 是纯声明式容器，不包含 Rule。Rule 由 rule-builder skill 负责配置，并在回测时通过 `engine_run(rules=[...])` 传入与 Strategy 一起逐 bar 执行。
 
 ## Phase 0：业务约束
 
@@ -70,14 +73,9 @@ tools_required: [strategy_create, strategy_add_indicator, strategy_add_signal, s
 调用 data_inspect(symbol="...") 查看数据完整性
 ```
 
-### 3.4 设定投资域
-```
-调用 universe_set(type="static", symbols=[...])
-```
-
 ## Phase 4：逐层构建策略
 
-严格按顺序构建，每一步确认后再继续。
+严格按架构管道顺序构建：**Universe → Indicator → Signal → Portfolio**。每一步确认后再继续。
 
 ### 4.1 创建策略
 ```
@@ -88,174 +86,150 @@ strategy_create(
 )
 ```
 
-### 4.2 添加指标（Indicator 层）
+### 4.2 设定投资域（Universe）
+
+Universe 是 Strategy 的第一个核心组件，决定策略的标的池。
+
 ```
-strategy_add_indicator(strategy="sma_crossover", name="sma_10", type="SMA", params={"column": "close", "period": 10})
-strategy_add_indicator(strategy="sma_crossover", name="sma_50", type="SMA", params={"column": "close", "period": 50})
+strategy_set_universe(strategy="sma_crossover", type="static", symbols=["AAPL", "MSFT"])
 ```
+
+可选：检查 Universe 数据可用性
+```
+universe_inspect(symbols=["AAPL", "MSFT"])
+```
+
+Universe 类型：
+- `static` — 固定标的列表
+- `filter` — 基于条件的动态过滤（需提供 `filters` 参数）
+
+### 4.3 添加信号（Signal + Indicator）
+
+Signal 是 Strategy 的第二个核心组件。每个 Signal 声明自己依赖的 Indicator，Engine 会自动收集并计算。
+
+**架构原则：Indicator 服务于 Signal/Portfolio/Rule，不独立添加。通过各组件的 `indicators` 参数声明依赖。**
+
+#### 简单示例：SMA 金叉
+```
+strategy_add_signal(
+    strategy="sma_crossover",
+    name="golden_cross",
+    type="Crossover",
+    params={"fast": "sma_10", "slow": "sma_50"},
+    indicators={
+        "sma_10": {"type": "SMA", "params": {"column": "close", "period": 10}},
+        "sma_50": {"type": "SMA", "params": {"column": "close", "period": 50}}
+    }
+)
+```
+
+#### 复杂示例：波动率调整动量
+```
+strategy_add_signal(
+    strategy="momentum_strategy",
+    name="positive_momentum",
+    type="Threshold",
+    params={"column": "vol_adjusted_momentum", "threshold": 0, "relationship": "gt"},
+    indicators={
+        "momentum_20": {"type": "Momentum", "params": {"column": "close", "period": 20}},
+        "volatility_20": {"type": "RollingVolatility", "params": {"column": "close", "period": 20}},
+        "vol_adjusted_momentum": {"type": "Ratio", "params": {"col_a": "momentum_20", "col_b": "volatility_20"}}
+    }
+)
+```
+
+可用信号类型：`Comparison`, `Composite`, `Crossover`, `Formula`, `Peak`, `Threshold`, `Timestamp`
 
 可用指标类型：
 
 **趋势:** `SMA`, `EMA`, `WMA`, `DEMA`, `TEMA`
-**动量:** `RSI`, `MACDLine`, `MACDSignal`(depends_on: macd), `MACDHistogram`(depends_on: macd, macd_signal), `ROC`, `PPO`, `CCI`, `Momentum`
+**动量:** `RSI`, `MACDLine`, `MACDSignal`, `MACDHistogram`, `ROC`, `PPO`, `CCI`, `Momentum`
 **波动:** `BollingerUpper`, `BollingerLower`, `ATR`, `RollingVolatility`
 **成交量:** `OBV`, `VWAP`, `MFI`
 **趋势强度:** `ADX`, `AROON`
 **随机振荡:** `StochK`
 **其他:** `LogReturn`, `NdayReturn`, `RollingMDD`, `Ratio`
 
-> 注意：MACD 系列需按顺序注册：先 `MACDLine`（命名为 "macd"），再 `MACDSignal`（命名为 "macd_signal"），最后 `MACDHistogram`。
-
-### 4.2.1 查询指标信息
-
-在选择指标前，可以查看所有可用指标及其公式：
-
 ```
-indicator_list()
+indicator_list()                    # 查看所有可用指标
+indicator_describe(type="RSI")      # 查看指标公式、参数和依赖
+signal_list()                       # 查看所有可用信号
+signal_describe(type="Crossover")   # 查看信号参数
 ```
 
-查看某个具体指标的公式、参数和依赖：
+### 4.4 设定组合优化器（Portfolio）
+
+Portfolio 是 Strategy 的第三个核心组件，负责将 Signal 输出转化为目标权重。Portfolio 也可以声明依赖的 Indicator。
 
 ```
-indicator_describe(type="RSI")
-# 返回: name, formula (LaTeX), description, params, depends_on
+strategy_set_portfolio(strategy="sma_crossover", type="EqualWeight")
 ```
 
-每个指标都包含 LaTeX 格式的计算公式（`formula` 属性），例如：
-- RSI: `RSI = 100 - \frac{100}{1 + \frac{AvgGain}{AvgLoss}}`
-- SMA: `SMA_t = \frac{1}{N} \sum_{i=0}^{N-1} P_{t-i}`
-
-### 4.3 添加信号（Signal 层）
+需要 Indicator 的 Portfolio 示例（RiskParity 需要波动率列）：
 ```
-strategy_add_signal(strategy="sma_crossover", name="golden_cross", type="Crossover", inputs={"fast": "sma_10", "slow": "sma_50"})
+strategy_set_portfolio(
+    strategy="my_strategy",
+    type="RiskParity",
+    params={"volatility_col": "vol_20"},
+    indicators={
+        "vol_20": {"type": "RollingVolatility", "params": {"column": "close", "period": 20}}
+    }
+)
 ```
 
-可用信号类型：`Comparison`, `Composite`, `Crossover`, `Formula`, `Peak`, `Threshold`, `Timestamp`
+可用优化器类型：
 
-> **注意：** 原来的 `EqualWeight`、`RiskParity`、`TopNRanking` 权重信号已迁移到 PortfolioOptimizer 层
-> （`EqualWeightOptimizer`、`RiskParityOptimizer`、`TopNRankingOptimizer`），Signal 层现在只负责
-> 生成 per-symbol 布尔/数值列。截面权重分配由 PortfolioOptimizer 处理。
+| 类型 | 说明 | 关键参数 |
+|------|------|----------|
+| `EqualWeight` | 等权分配 | 无 |
+| `RiskParity` | 按波动率倒数加权 | `volatility_col` |
+| `Kelly` | 凯利公式仓位管理 | `win_rate_col`, `avg_win_col`, `avg_loss_col`, `fraction` |
+| `TopNRanking` | 按评分排序取前 N | `score_col`, `n`, `filter_negative`, `max_weight` |
+| `PctEquity` | 固定百分比分配 | `pct` |
 
-### 4.4 规则（Rules）
+```
+portfolio_list()                        # 查看所有可用优化器
+portfolio_describe(type="RiskParity")   # 查看具体参数
+```
 
-Rules 不属于 Strategy，而是传给 `engine_run(rules=[...])`。Rule 返回 RuleResult（weights/constraints/target_positions/hold），而非 Order。
-
-Engine 管道中 Rule 分为 Pre-trade Rule（交易前风控）和 Post-trade Rule（交易后处理）。
-
-> **注意：** EntryRule、TargetValueEntryRule、FullPositionEntryRule、SizedEntryRule 已删除。入场逻辑由 Signal + PortfolioOptimizer 处理。
-
-#### 4.4.1 风险规则（Pre-trade Rules）— 熔断器
-
-在每根 bar 交易前执行。触发后返回 `hold=True`，冻结后续所有交易。
-
-| 类型 | 参数 | 说明 |
-|------|------|------|
-| `MaxDrawdownRisk` | `max_drawdown` (默认 0.15) | 组合回撤超阈值 → 返回 hold=True |
-| `DailyLossLimitRisk` | `max_daily_loss` (默认 0.03) | 当日亏损超阈值 → 返回 hold=True（不清仓） |
-
-#### 4.4.2 委托规则（Post-trade Rules）— 条件单
-
-交易后挂 stop/limit/trailing_stop 条件单。同标的同类型自动去重（新的覆盖旧的）。
-
-| 类型 | 参数 | 说明 |
-|------|------|------|
-| `StopLossRule` | `threshold` (默认 0.05) | 止损：`stop_price = avg_cost × (1 - threshold)` |
-| `TakeProfitRule` | `threshold` (默认 0.15) | 止盈：`limit_price = avg_cost × (1 + threshold)` |
-| `TrailingStopRule` | `trail_pct` (默认 0.05) | 追踪止损：从高水位回撤 trail_pct 触发 |
-
-#### 4.4.3 调仓规则（Rebalance Rules）
-
-按目标权重定期调仓，配合 Signal 层的权重信号使用。
-
-| 类型 | 参数 | 说明 |
-|------|------|------|
-| `RebalanceRule` | `weight_col`, `frequency` (默认 10) | 每 N 根 bar 按目标权重调仓 |
-
-#### 4.4.4 退出规则（Exit Rules）
-
-| 类型 | 参数 | 说明 |
-|------|------|------|
-| `ExitRule` | `fast`, `slow` | 快线跌破慢线时全仓卖出 |
+> 注意：如果不调用 strategy_set_portfolio，默认使用 EqualWeight。
 
 ### 4.5 检查策略
 ```
 strategy_inspect(strategy="sma_crossover")
 ```
 
-向用户展示完整的策略定义，确认无误后进入回测。
+向用户展示完整的策略定义（Universe、Signal 及其 Indicator、Portfolio），确认无误。
 
-## Phase 5：回测与达标检查
+## Phase 5：进入规则配置
 
-**重要：Phase 5 的三个工具必须按顺序全部调用，不可跳过。**
+策略构建完成后，**你必须自动调用 `skill_load("rule-builder")` 加载 rule-builder skill**，然后按该 skill 的指导继续配置规则并执行回测。不要停下来让用户手动操作。
 
-### 5.1 执行回测
-```
-engine_run(
-    strategy="sma_crossover",
-    symbols=["AAPL"],
-    start="2023-01-01",
-    end="2024-12-31",
-    fee_rate=0.001,       # 可选：手续费率 0.1%
-    fee_min=5.0,          # 可选：最低手续费 5 元
-    slippage_rate=0.001,  # 可选：滑点率 0.1%
-)
-```
-engine_run 返回 `run_id`、组合概况和交易数，但**不包含绩效指标**。
+向用户说明：
+> "策略构建完成！接下来我将为你配置交易规则（风控熔断、止损止盈、退出条件等），规则会与策略一起逐 bar 执行。"
 
-**交易成本参数：**
-- `fee_rate`：手续费率（如 0.001 = 0.1%），不传则零费率
-- `fee_min`：最低手续费（如 5.0），需配合 fee_rate 使用
-- `slippage_rate`：滑点率（如 0.001 = 0.1%），BUY 价格偏高、SELL 价格偏低
-
-### 5.2 查看绩效（必须调用）
-```
-engine_results(run_id="...")
-```
-**必须用 engine_run 返回的 run_id 调用 engine_results**，才能获取绩效指标和目标达标检查。engine_results 返回 total_return、annualized_return、annualized_volatility、max_drawdown、sharpe_ratio、calmar_ratio、sortino_ratio 以及每项目标的 pass/fail。
-
-向用户报告：
-- 总收益率、年化收益率、年化波动率、最大回撤
-- 夏普比率、卡玛比率、索提诺比率
-- 各项目标的达标情况（pass/fail）
-
-### 5.3 查看交易明细（必须调用）
-```
-engine_trade_list(run_id="...")
-```
-**必须用同一个 run_id 调用 engine_trade_list**，获取完整交易记录（含订单类型和手续费）。
-
-### 调用链示例
-```
-1. result = engine_run(strategy=..., symbols=..., start=..., end=...)
-2. engine_results(run_id=result["run_id"])
-3. engine_trade_list(run_id=result["run_id"])
-```
-
-向用户报告交易次数、买卖时间、价格、手续费。
+Rule 不属于 Strategy，而是在回测时通过 `engine_run(rules=[...])` 传入，与 Strategy 一起逐 bar 执行。这一分离使得同一个 Strategy 可以在不同的规则组合下测试。
 
 ## 决策指南
 
 | 用户意图 | 动作 |
 |---------|------|
 | "构建 SMA 均线策略" | 从 Phase 0 开始 |
-| "回测这个策略" | 跳到 Phase 5（策略必须已创建） |
 | "查看策略定义" | 调用 strategy_inspect |
-| "查看回测结果" | 调用 engine_results |
 | "修改指标参数" | 重建策略（当前不支持原地修改） |
-| "加止损" | engine_run 传入 rules=[StopLossRule(...)] |
-| "加风控" | engine_run 传入 rules=[MaxDrawdownRisk(...)] |
-| "加交易成本" | engine_run 传入 fee_rate / slippage_rate |
+| "换成风险平价" | 调用 strategy_set_portfolio(type="RiskParity") |
+| "加止损 / 加风控 / 回测" | 引导用户进入 rule-builder skill |
 
 ## 红线
 
 - **不替用户做决定**：假设、目标、约束必须由用户提供或确认
-- **不在回测后加规则**：回测后如果不达标，应该让用户修改假设或参数，不能偷偷加规则来美化结果
 - **不忽略错误**：如果任何工具调用返回 `error`，必须报告给用户
 - **不重试超过 1 次**：同一操作连续失败，告知用户错误信息并停止
+- **不在此 skill 中配置 Rule 或执行回测**：Rule 配置和回测属于 rule-builder skill
 
 ## 错误处理
 
 - **Strategy not found**: 策略未创建。引导用户先 strategy_create。
-- **Unknown indicator/signal/rule type**: 不支持的类型。告知用户当前可用类型列表。
+- **Unknown indicator/signal/portfolio type**: 不支持的类型。告知用户当前可用类型列表。
 - **No data for symbol**: 本地无数据。引导用户先用 data_load_symbols 下载。
 - **Invalid params**: 参数错误。告知正确的参数格式。

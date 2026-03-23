@@ -10,7 +10,6 @@ from oxq.tools.strategy import (
     RULE_TYPES,
     indicator_describe,
     indicator_list,
-    strategy_add_indicator,
     strategy_add_rule,
     strategy_add_signal,
     strategy_create,
@@ -54,44 +53,7 @@ def test_strategy_create_missing_objectives() -> None:
 
 
 # ---------------------------------------------------------------------------
-# strategy_add_indicator
-# ---------------------------------------------------------------------------
-
-
-def test_strategy_add_indicator() -> None:
-    strategy_create(
-        name="s1",
-        hypothesis="test",
-        objectives={"total_return": {"min": 0.0}},
-    )
-    result = strategy_add_indicator(
-        strategy="s1",
-        name="sma_10",
-        type="SMA",
-        params={"column": "close", "period": 10},
-    )
-    assert result["indicator"] == "sma_10"
-    assert result["type"] == "SMA"
-    strat = session._strategies["s1"]
-    pending = getattr(strat, "_pending_indicators", {})
-    assert "sma_10" in pending
-    assert pending["sma_10"][1] == {"column": "close", "period": 10}
-
-
-def test_strategy_add_indicator_unknown_type() -> None:
-    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
-    result = strategy_add_indicator(strategy="s1", name="x", type="FooBar")
-    assert "error" in result
-    assert "FooBar" in result["error"]
-
-
-def test_strategy_add_indicator_not_found() -> None:
-    result = strategy_add_indicator(strategy="missing", name="x", type="SMA")
-    assert "error" in result
-
-
-# ---------------------------------------------------------------------------
-# strategy_add_signal
+# strategy_add_signal (with indicators)
 # ---------------------------------------------------------------------------
 
 
@@ -101,13 +63,45 @@ def test_strategy_add_signal() -> None:
         strategy="s1",
         name="cross",
         type="Crossover",
-        inputs={"fast": "sma_10", "slow": "sma_50"},
+        params={"fast": "sma_10", "slow": "sma_50"},
+        indicators={
+            "sma_10": {"type": "SMA", "params": {"column": "close", "period": 10}},
+            "sma_50": {"type": "SMA", "params": {"column": "close", "period": 50}},
+        },
     )
     assert result["signal"] == "cross"
     assert result["type"] == "Crossover"
+    assert "sma_10" in result["indicators"]
     strat = session._strategies["s1"]
     assert "cross" in strat.signals
-    assert strat.signals["cross"][1]["fast"] == "sma_10"
+    signal = strat.signals["cross"][0]
+    assert "sma_10" in signal.required_indicators
+    assert "sma_50" in signal.required_indicators
+
+
+def test_strategy_add_signal_without_indicators() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    result = strategy_add_signal(
+        strategy="s1",
+        name="cross",
+        type="Crossover",
+        params={"fast": "sma_10", "slow": "sma_50"},
+    )
+    assert result["signal"] == "cross"
+    assert result["indicators"] == []
+
+
+def test_strategy_add_signal_unknown_indicator_type() -> None:
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    result = strategy_add_signal(
+        strategy="s1",
+        name="cross",
+        type="Crossover",
+        params={"fast": "x", "slow": "y"},
+        indicators={"x": {"type": "FooBar", "params": {}}},
+    )
+    assert "error" in result
+    assert "FooBar" in result["error"]
 
 
 def test_strategy_add_signal_unknown_type() -> None:
@@ -149,10 +143,13 @@ def test_strategy_add_rule_unknown_type() -> None:
 
 def test_strategy_inspect() -> None:
     strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
-    strategy_add_indicator(strategy="s1", name="sma_10", type="SMA", params={"period": 10})
     strategy_add_signal(
         strategy="s1", name="cross", type="Crossover",
-        inputs={"fast": "sma_10", "slow": "sma_50"},
+        params={"fast": "sma_10", "slow": "sma_50"},
+        indicators={
+            "sma_10": {"type": "SMA", "params": {"column": "close", "period": 10}},
+            "sma_50": {"type": "SMA", "params": {"column": "close", "period": 50}},
+        },
     )
     strategy_add_rule(
         strategy="s1", name="sell", type="ExitRule",
@@ -161,9 +158,9 @@ def test_strategy_inspect() -> None:
 
     result = strategy_inspect("s1")
     assert result["name"] == "s1"
-    assert "sma_10" in result["indicators"]
-    assert result["indicators"]["sma_10"]["type"] == "SMA"
     assert "cross" in result["signals"]
+    assert "indicators" in result["signals"]["cross"]
+    assert "sma_10" in result["signals"]["cross"]["indicators"]
     assert len(result["rules"]) == 1
 
 
@@ -213,7 +210,7 @@ def test_indicator_describe_all_have_formula() -> None:
 
 def test_indicator_list_count() -> None:
     result = indicator_list()
-    assert len(result["indicators"]) == 27
+    assert len(result["indicators"]) == 30
 
 
 def test_indicator_list_structure() -> None:
@@ -332,11 +329,14 @@ def test_strategy_inspect_shows_rules() -> None:
 
 def test_rule_types_registry_completeness() -> None:
     expected = {
+        "BlacklistRule",
+        "DailyLossLimitRisk",
         "ExitRule",
+        "MaxDrawdownRisk",
+        "MaxHoldingsRule",
+        "RebalanceFrequencyRule",
         "StopLossRule",
         "TakeProfitRule",
         "TrailingStopRule",
-        "MaxDrawdownRisk",
-        "DailyLossLimitRisk",
     }
     assert set(RULE_TYPES.keys()) == expected
