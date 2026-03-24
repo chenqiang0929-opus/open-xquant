@@ -182,6 +182,23 @@ class TestRegisterAPI:
         register_rule(_RequiredArgRule)
         assert "RequiredArgRule" in list_rules()
 
+    def test_public_api_importable_from_oxq(self) -> None:
+        """register/list functions should be importable from top-level oxq."""
+        from oxq import (
+            register_indicator,
+            register_signal,
+            register_portfolio_optimizer,
+            register_rule,
+            list_indicators,
+            list_signals,
+            list_portfolio_optimizers,
+            list_rules,
+        )
+        assert isinstance(list_indicators(), dict)
+        assert isinstance(list_signals(), dict)
+        assert isinstance(list_portfolio_optimizers(), dict)
+        assert isinstance(list_rules(), dict)
+
     def test_list_returns_copy(self) -> None:
         from oxq.core.registry import list_indicators
 
