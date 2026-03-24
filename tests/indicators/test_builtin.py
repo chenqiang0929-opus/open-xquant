@@ -673,8 +673,8 @@ def test_indicator_has_formula(cls: type) -> None:
 
 
 def test_indicator_types_count() -> None:
-    """INDICATOR_TYPES registry should contain exactly 31 indicators."""
-    assert len(INDICATOR_TYPES) == 31
+    """INDICATOR_TYPES registry should contain exactly 36 indicators."""
+    assert len(INDICATOR_TYPES) == 36
 
 
 @pytest.mark.parametrize("name,cls", sorted(INDICATOR_TYPES.items()), ids=lambda x: x if isinstance(x, str) else x.name)

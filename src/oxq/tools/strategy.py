@@ -30,6 +30,13 @@ from oxq.indicators.builtin import (
 )
 from oxq.indicators.annualized_volatility import AnnualizedVolatility
 from oxq.indicators.hurst_exponent import HurstExponent
+from oxq.indicators.ichimoku import (
+    IchimokuChikou,
+    IchimokuKijun,
+    IchimokuSenkouA,
+    IchimokuSenkouB,
+    IchimokuTenkan,
+)
 from oxq.indicators.log_return import LogReturn
 from oxq.indicators.momentum import Momentum
 from oxq.indicators.nday_return import NdayReturn
@@ -76,6 +83,11 @@ INDICATOR_TYPES: dict[str, type] = {
     "DEMA": DEMA,
     "EMA": EMA,
     "HurstExponent": HurstExponent,
+    "IchimokuChikou": IchimokuChikou,
+    "IchimokuKijun": IchimokuKijun,
+    "IchimokuSenkouA": IchimokuSenkouA,
+    "IchimokuSenkouB": IchimokuSenkouB,
+    "IchimokuTenkan": IchimokuTenkan,
     "LogReturn": LogReturn,
     "MACDHistogram": MACDHistogram,
     "MACDLine": MACDLine,

@@ -38,3 +38,7 @@ When fixing a bug or updating logic in one module, always check and update all r
 - Prefer Protocol over ABC for interfaces
 - Keep Indicator/Signal compute functions pure (no side effects)
 - **Do not add new top-level directories** — this is an open-source project; keep the root structure stable. New apps, demos, and tutorials go under `examples/`.
+
+ ## Component Creation
+When a user needs an Indicator that doesn't exist in oxq (e.g., "I need a GARCH indicator"),
+read and follow `skills/component-creator.md` to autonomously create, validate, and register it.

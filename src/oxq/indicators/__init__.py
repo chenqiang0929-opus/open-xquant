@@ -1,4 +1,11 @@
 from oxq.indicators.hurst_exponent import HurstExponent
+from oxq.indicators.ichimoku import (
+    IchimokuChikou,
+    IchimokuKijun,
+    IchimokuSenkouA,
+    IchimokuSenkouB,
+    IchimokuTenkan,
+)
 from oxq.indicators.builtin import (
     ADX,
     AROON,
@@ -43,6 +50,11 @@ __all__ = [
     "DEMA",
     "EMA",
     "HurstExponent",
+    "IchimokuChikou",
+    "IchimokuKijun",
+    "IchimokuSenkouA",
+    "IchimokuSenkouB",
+    "IchimokuTenkan",
     "LogReturn",
     "MACDHistogram",
     "MACDLine",

@@ -123,9 +123,15 @@ def render_message(msg: dict[str, Any]) -> None:
                 parsed = json.loads(msg["content"])
                 display = json.dumps(parsed, indent=2, ensure_ascii=False)
             except json.JSONDecodeError:
+                parsed = {}
                 display = msg["content"]
             with st.expander("Tool result", expanded=False):
                 st.code(display, language="json")
+            # Display chart image if tool result contains a PNG path
+            if isinstance(parsed, dict) and "path" in parsed:
+                img_path = Path(parsed["path"])
+                if img_path.exists() and img_path.suffix == ".png":
+                    st.image(str(img_path))
 
 
 async def stream_agent_turn(
@@ -268,9 +274,15 @@ async def stream_agent_turn(
                                 parsed = json.loads(tool_content)
                                 display = json.dumps(parsed, indent=2, ensure_ascii=False)
                             except json.JSONDecodeError:
+                                parsed = {}
                                 display = tool_content
                             with st.expander(f"Tool result: {tool_name}", expanded=False):
                                 st.code(display, language="json")
+                            # Display chart image if tool result contains a PNG path
+                            if isinstance(parsed, dict) and "path" in parsed:
+                                img_path = Path(parsed["path"])
+                                if img_path.exists() and img_path.suffix == ".png":
+                                    st.image(str(img_path))
 
                         tool_msg = {
                             "role": "tool",

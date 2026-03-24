@@ -210,7 +210,7 @@ def test_indicator_describe_all_have_formula() -> None:
 
 def test_indicator_list_count() -> None:
     result = indicator_list()
-    assert len(result["indicators"]) == 31
+    assert len(result["indicators"]) == 36
 
 
 def test_indicator_list_structure() -> None:

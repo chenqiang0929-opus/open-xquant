@@ -38,6 +38,9 @@ yfinance = [
 akshare = [
     "akshare>=1.10",
 ]
+chart = [
+    "mplfinance>=0.12",
+]
 talib = [
     "TA-Lib",
 ]
