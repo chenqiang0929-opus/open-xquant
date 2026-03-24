@@ -5,138 +5,26 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from oxq.core.registry import (
+    list_indicators,
+    list_portfolio_optimizers,
+    list_rules,
+    list_signals,
+)
 from oxq.core.strategy import Strategy
-from oxq.indicators.builtin import (
-    ADX,
-    AROON,
-    ATR,
-    CCI,
-    DEMA,
-    EMA,
-    MFI,
-    OBV,
-    PPO,
-    ROC,
-    RSI,
-    TEMA,
-    VWAP,
-    WMA,
-    BollingerLower,
-    BollingerUpper,
-    MACDHistogram,
-    MACDLine,
-    MACDSignal,
-    StochK,
-)
-from oxq.indicators.annualized_volatility import AnnualizedVolatility
-from oxq.indicators.hurst_exponent import HurstExponent
-from oxq.indicators.ichimoku import (
-    IchimokuChikou,
-    IchimokuKijun,
-    IchimokuSenkouA,
-    IchimokuSenkouB,
-    IchimokuTenkan,
-)
-from oxq.indicators.log_return import LogReturn
-from oxq.indicators.momentum import Momentum
-from oxq.indicators.nday_return import NdayReturn
-from oxq.indicators.power_ratio import PowerRatio
-from oxq.indicators.ratio import Ratio
-from oxq.indicators.rolling_mdd import RollingMDD
-from oxq.indicators.rolling_volatility import RollingVolatility
-from oxq.indicators.simple_momentum import SimpleMomentum
-from oxq.indicators.sma import SMA
-from oxq.portfolio.optimizers import (
-    EqualWeightOptimizer,
-    KellyOptimizer,
-    PctEquityOptimizer,
-    RiskParityOptimizer,
-    TopNRankingOptimizer,
-)
-from oxq.rules.constraint import BlacklistRule, MaxHoldingsRule, RebalanceFrequencyRule
-from oxq.rules.exit import ExitRule
-from oxq.rules.order import StopLossRule, TakeProfitRule, TrailingStopRule
-from oxq.rules.risk import DailyLossLimitRisk, MaxDrawdownRisk
-from oxq.signals.comparison import Comparison
-from oxq.signals.composite import Composite
-from oxq.signals.crossover import Crossover
-from oxq.signals.formula import Formula
-from oxq.signals.peak import Peak
-from oxq.signals.threshold import Threshold
-from oxq.signals.timestamp import Timestamp
+from oxq.portfolio.optimizers import EqualWeightOptimizer
 from oxq.tools import session
 from oxq.tools.registry import registry
 from oxq.universe.static import StaticUniverse
 
 # ---------------------------------------------------------------------------
-# Type registries (string → class mapping)
+# Type registries — delegated to core.registry
 # ---------------------------------------------------------------------------
 
-INDICATOR_TYPES: dict[str, type] = {
-    "ADX": ADX,
-    "AnnualizedVolatility": AnnualizedVolatility,
-    "AROON": AROON,
-    "ATR": ATR,
-    "BollingerLower": BollingerLower,
-    "BollingerUpper": BollingerUpper,
-    "CCI": CCI,
-    "DEMA": DEMA,
-    "EMA": EMA,
-    "HurstExponent": HurstExponent,
-    "IchimokuChikou": IchimokuChikou,
-    "IchimokuKijun": IchimokuKijun,
-    "IchimokuSenkouA": IchimokuSenkouA,
-    "IchimokuSenkouB": IchimokuSenkouB,
-    "IchimokuTenkan": IchimokuTenkan,
-    "LogReturn": LogReturn,
-    "MACDHistogram": MACDHistogram,
-    "MACDLine": MACDLine,
-    "MACDSignal": MACDSignal,
-    "MFI": MFI,
-    "Momentum": Momentum,
-    "NdayReturn": NdayReturn,
-    "OBV": OBV,
-    "PPO": PPO,
-    "PowerRatio": PowerRatio,
-    "ROC": ROC,
-    "RSI": RSI,
-    "Ratio": Ratio,
-    "RollingMDD": RollingMDD,
-    "RollingVolatility": RollingVolatility,
-    "SMA": SMA,
-    "SimpleMomentum": SimpleMomentum,
-    "StochK": StochK,
-    "TEMA": TEMA,
-    "VWAP": VWAP,
-    "WMA": WMA,
-}
-SIGNAL_TYPES: dict[str, type] = {
-    "Comparison": Comparison,
-    "Composite": Composite,
-    "Crossover": Crossover,
-    "Formula": Formula,
-    "Peak": Peak,
-    "Threshold": Threshold,
-    "Timestamp": Timestamp,
-}
-RULE_TYPES: dict[str, type] = {
-    "BlacklistRule": BlacklistRule,
-    "DailyLossLimitRisk": DailyLossLimitRisk,
-    "ExitRule": ExitRule,
-    "MaxDrawdownRisk": MaxDrawdownRisk,
-    "MaxHoldingsRule": MaxHoldingsRule,
-    "RebalanceFrequencyRule": RebalanceFrequencyRule,
-    "StopLossRule": StopLossRule,
-    "TakeProfitRule": TakeProfitRule,
-    "TrailingStopRule": TrailingStopRule,
-}
-PORTFOLIO_TYPES: dict[str, type] = {
-    "EqualWeight": EqualWeightOptimizer,
-    "RiskParity": RiskParityOptimizer,
-    "Kelly": KellyOptimizer,
-    "TopNRanking": TopNRankingOptimizer,
-    "PctEquity": PctEquityOptimizer,
-}
+INDICATOR_TYPES = list_indicators()
+SIGNAL_TYPES = list_signals()
+RULE_TYPES = list_rules()
+PORTFOLIO_TYPES = list_portfolio_optimizers()
 
 
 # ---------------------------------------------------------------------------
