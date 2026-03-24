@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -187,3 +188,33 @@ class TestRegisterAPI:
         d = list_indicators()
         d["GARBAGE"] = object()  # type: ignore[assignment]
         assert "GARBAGE" not in list_indicators()
+
+
+class TestEntryPointsDiscovery:
+    """Test _load_entry_points discovers and registers external components."""
+
+    def test_load_entry_points_success(self) -> None:
+        """Valid entry point should be registered."""
+        from oxq.core.registry import _load_entry_points, list_indicators
+
+        mock_ep = MagicMock()
+        mock_ep.name = "DummyEP"
+        mock_ep.load.return_value = _DummyIndicator
+
+        with patch("oxq.core.registry._entry_points", return_value={"oxq.indicators": [mock_ep]}):
+            _load_entry_points()
+
+        assert "DummyInd" in list_indicators()
+
+    def test_load_entry_points_failure_logs_warning(self) -> None:
+        """Broken entry point should log warning, not crash."""
+        from oxq.core.registry import _load_entry_points
+
+        mock_ep = MagicMock()
+        mock_ep.name = "BrokenEP"
+        mock_ep.load.side_effect = ImportError("no such module")
+
+        with patch("oxq.core.registry._entry_points", return_value={"oxq.indicators": [mock_ep]}):
+            with patch("oxq.core.registry.logger") as mock_logger:
+                _load_entry_points()  # should not raise
+                mock_logger.warning.assert_called()

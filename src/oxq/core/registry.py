@@ -8,10 +8,14 @@ and ``register_rule`` functions.
 
 from __future__ import annotations
 
+import importlib.metadata
 import inspect
+import logging
 from typing import Any
 
 from oxq.core.types import Indicator, PortfolioOptimizer, Rule, Signal
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Private registry dicts: name -> class
@@ -250,5 +254,47 @@ def _load_builtins() -> None:
         _register(cls, Rule, _RULE_REGISTRY)
 
 
-# Register built-ins at module load time.
+# ---------------------------------------------------------------------------
+# Entry-point discovery
+# ---------------------------------------------------------------------------
+
+def _entry_points() -> dict[str, list[Any]]:
+    """Wrapper for importlib.metadata.entry_points (mockable in tests)."""
+    result: dict[str, list[Any]] = {}
+    for group in ("oxq.indicators", "oxq.signals", "oxq.portfolio_optimizers", "oxq.rules"):
+        eps = importlib.metadata.entry_points(group=group)
+        if eps:
+            result[group] = list(eps)
+    return result
+
+
+_EP_GROUP_TO_REGISTER = {
+    "oxq.indicators": register_indicator,
+    "oxq.signals": register_signal,
+    "oxq.portfolio_optimizers": register_portfolio_optimizer,
+    "oxq.rules": register_rule,
+}
+
+
+def _load_entry_points() -> None:
+    """Discover and register components from installed entry points."""
+    for group, eps in _entry_points().items():
+        register_fn = _EP_GROUP_TO_REGISTER.get(group)
+        if not register_fn:
+            continue
+        for ep in eps:
+            try:
+                cls = ep.load()
+                register_fn(cls)
+            except Exception:
+                logger.warning(
+                    "Failed to load entry point %s from group %s",
+                    ep.name,
+                    group,
+                    exc_info=True,
+                )
+
+
+# Register built-ins at module load time, then discover entry points.
 _load_builtins()
+_load_entry_points()
