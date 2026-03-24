@@ -69,8 +69,30 @@ class {ClassName}:
 ```
 
 Rules:
-- Only import numpy, pandas, stdlib
+- Prefer numpy, pandas, stdlib. If a third-party library is required, see **Dependency Handling** below
 - Match existing code style exactly (docstrings, type hints, spacing)
+
+### Dependency Handling
+
+If the indicator requires a third-party library (e.g., `arch` for GARCH, `scipy` for special functions):
+
+1. **Check `pyproject.toml` `[project.optional-dependencies]`** — does a group for this library already exist?
+2. **If not, add a new optional group:**
+   ```toml
+   [project.optional-dependencies]
+   arch = ["arch>=7.0"]
+   ```
+3. **Use try/except import in the component code:**
+   ```python
+   try:
+       from arch import arch_model
+   except ImportError as e:
+       raise ImportError(
+           "arch is required for GarchVolatility. Install with: pip install open-xquant[arch]"
+       ) from e
+   ```
+4. **Install the dep before validation:** `uv pip install -e ".[arch]"` (or the appropriate group name)
+5. **Note the dependency in the design intent output** (Phase 1)
 
 ### Test file
 
@@ -179,7 +201,7 @@ uv run python -c "import oxq; from {module}.indicators.{snake_name} import {Clas
 - **Never skip design output (Phase 1)** — it is the audit record
 - **Never register before validation passes** — Phase 4 requires Phase 3 green
 - **Never modify existing indicators** — only create new ones
-- **Never use external dependencies** beyond numpy, pandas, stdlib
+- **Third-party deps must be optional** — use try/except import, add to `pyproject.toml` optional-dependencies
 - **Never exceed 3 retries** — escalate to user
 - **Never guess formulas** — if unsure, ask the user
 

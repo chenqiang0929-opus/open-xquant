@@ -58,7 +58,7 @@ Write the signal to `{target_dir}/signals/{snake_name}.py`.
   - Docstring on `compute()` describing what it returns
 - Output must be boolean (`True`/`False`) or categorical (a fixed set of string labels)
 - **Pure function** — no side effects, no state mutation, no I/O
-- No external dependencies beyond pandas and the Python stdlib
+- Prefer pandas + stdlib. If a third-party library is required, use try/except import and add to `pyproject.toml` optional-dependencies (see create-indicator.md Dependency Handling)
 
 **Example structure:**
 
@@ -224,7 +224,7 @@ These are hard constraints. Violating any of them means starting over.
 - **Never modify existing signals** — create new files only
 - **Never use random/non-deterministic data in tests** — hand-craft all test DataFrames
 - **Never copy output from a buggy implementation as expected values** — hand-calculate
-- **Never add external dependencies** — pandas + stdlib only
+- **Third-party deps must be optional** — use try/except import, add to `pyproject.toml` optional-dependencies
 - **All five test cases are mandatory** — protocol, name, output domain, trigger, no-trigger
 - **compute() must be pure** — no side effects, no state, no I/O
 

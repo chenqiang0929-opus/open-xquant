@@ -81,7 +81,7 @@ class {ClassName}:
 ```
 
 Rules:
-- Only import numpy, pandas, stdlib
+- Prefer numpy, pandas, stdlib. If a third-party library is required, use try/except import and add to `pyproject.toml` optional-dependencies (see create-indicator.md Dependency Handling)
 - Match existing code style exactly (docstrings, type hints, spacing)
 - Every code path must return weights that sum to 1.0
 - Every code path with no valid data must return `{"CASH": 1.0}`
@@ -220,7 +220,7 @@ uv run python -c "import oxq; from {module}.portfolio.{snake_name} import {Class
 - **Never skip design output (Phase 1)** — it is the audit record
 - **Never register before validation passes** — Phase 4 requires Phase 3 green
 - **Never modify existing optimizers** — only create new ones
-- **Never use external dependencies** beyond numpy, pandas, stdlib
+- **Third-party deps must be optional** — use try/except import, add to `pyproject.toml` optional-dependencies
 - **Never exceed 3 retries** — escalate to user
 - **Never guess allocation logic** — if unsure, ask the user
 - **Weights MUST sum to 1.0** — this is a hard invariant; every code path must guarantee it

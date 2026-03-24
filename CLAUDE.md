@@ -39,6 +39,16 @@ When fixing a bug or updating logic in one module, always check and update all r
 - Keep Indicator/Signal compute functions pure (no side effects)
 - **Do not add new top-level directories** — this is an open-source project; keep the root structure stable. New apps, demos, and tutorials go under `examples/`.
 
- ## Component Creation
-When a user needs an Indicator that doesn't exist in oxq (e.g., "I need a GARCH indicator"),
-read and follow `skills/component-creator.md` to autonomously create, validate, and register it.
+## Component Creation
+
+When a user needs a component that doesn't exist in oxq (Indicator, Signal, PortfolioOptimizer, or Rule),
+read and follow `skills/component-creator.md` to check the registry and route to the appropriate creation sub-skill.
+
+**In this project**, the sub-skills use placeholder `{target_dir}` — replace with these concrete paths:
+- Component code: `src/oxq/{component_type}/{snake_name}.py`
+- Test code: `tests/{component_type}/test_{snake_name}.py`
+- Module import path: `oxq.{component_type}.{snake_name}`
+
+After validation passes, also update these files to make it a built-in:
+1. `src/oxq/{component_type}/__init__.py` — add import + `__all__` entry
+2. `src/oxq/core/registry.py` `_load_builtins()` — add to the appropriate registration block

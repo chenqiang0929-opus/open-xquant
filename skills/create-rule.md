@@ -92,7 +92,7 @@ class {ClassName}:
 ```
 
 Rules:
-- Only import from `oxq.core.types` (Portfolio, RuleResult, Position, Constraint, Decimal as needed), pandas, numpy, stdlib
+- Prefer `oxq.core.types` (Portfolio, RuleResult, Position, Constraint, Decimal as needed), pandas, numpy, stdlib. If a third-party library is required, use try/except import and add to `pyproject.toml` optional-dependencies (see create-indicator.md Dependency Handling)
 - Match existing code style exactly (docstrings, type hints, spacing)
 - Import `Constraint` from `oxq.core.types` only if the rule uses the `constraints` field
 - Pre-trade rules: use `weights`, `constraints`, or `hold` fields in RuleResult
@@ -217,7 +217,7 @@ uv run python -c "import oxq; from {module}.rules.{snake_name} import {ClassName
 - **Never skip design output (Phase 1)** — it is the audit record
 - **Never register before validation passes** — Phase 4 requires Phase 3 green
 - **Never modify existing rules** — only create new ones
-- **Never use external dependencies** beyond numpy, pandas, stdlib
+- **Third-party deps must be optional** — use try/except import, add to `pyproject.toml` optional-dependencies
 - **Never exceed 3 retries** — escalate to user
 - **Never guess trigger logic** — if unsure, ask the user
 - **Must specify pre-trade vs post-trade in design** — this determines which RuleResult fields are valid
