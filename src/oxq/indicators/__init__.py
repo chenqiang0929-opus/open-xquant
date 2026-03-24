@@ -1,3 +1,4 @@
+from oxq.indicators.hurst_exponent import HurstExponent
 from oxq.indicators.builtin import (
     ADX,
     AROON,
@@ -41,6 +42,7 @@ __all__ = [
     "CCI",
     "DEMA",
     "EMA",
+    "HurstExponent",
     "LogReturn",
     "MACDHistogram",
     "MACDLine",
