@@ -8,6 +8,7 @@ and ``register_rule`` functions.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from oxq.core.types import Indicator, PortfolioOptimizer, Rule, Signal
@@ -29,21 +30,28 @@ _RULE_REGISTRY: dict[str, type] = {}
 def _register(cls: type, protocol: type, registry: dict[str, type]) -> None:
     """Validate *cls* against *protocol* and store it in *registry*.
 
-    Instantiates ``cls()`` and checks ``isinstance(instance, protocol)``.
-    If the class requires constructor arguments (raises ``TypeError``),
-    falls back to a structural check on the class itself.
+    Uses ``inspect.signature`` to determine whether the constructor requires
+    arguments.  If it does, validation falls back to a structural check so
+    that real ``TypeError``s raised during instantiation are never swallowed.
     """
-    try:
+    sig = inspect.signature(cls.__init__)
+    required_params = [
+        p
+        for name, p in sig.parameters.items()
+        if name != "self"
+        and p.default is inspect.Parameter.empty
+        and p.kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+
+    if required_params:
+        # Cannot instantiate without arguments — structural check only
+        _check_class_structure(cls, protocol)
+    else:
         instance = cls()
         if not isinstance(instance, protocol):
             msg = f"{cls.__name__} does not satisfy {protocol.__name__} protocol"
             raise TypeError(msg)
-    except TypeError as exc:
-        # Re-raise if the error came from our own protocol check
-        if "does not satisfy" in str(exc):
-            raise
-        # Constructor requires arguments — check class-level attributes instead
-        _check_class_structure(cls, protocol)
 
     name: str = getattr(cls, "name", cls.__name__)
     registry[name] = cls

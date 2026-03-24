@@ -158,6 +158,29 @@ class TestRegisterAPI:
         register_indicator(_AnotherInd)
         assert list_indicators()["DummyInd"] is _AnotherInd
 
+    def test_register_class_with_required_init_args(self) -> None:
+        """Classes requiring constructor args should still register via structural check."""
+
+        class _RequiredArgRule:
+            name = "RequiredArgRule"
+
+            def __init__(self, threshold: float) -> None:
+                self.threshold = threshold
+
+            def evaluate(
+                self,
+                symbol: str,
+                row: pd.Series,
+                portfolio: Portfolio,
+                prices: dict[str, Decimal] | None = None,
+            ) -> RuleResult:
+                return RuleResult()
+
+        from oxq.core.registry import list_rules, register_rule
+
+        register_rule(_RequiredArgRule)
+        assert "RequiredArgRule" in list_rules()
+
     def test_list_returns_copy(self) -> None:
         from oxq.core.registry import list_indicators
 
