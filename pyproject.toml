@@ -41,6 +41,9 @@ akshare = [
 chart = [
     "mplfinance>=0.12",
 ]
+scipy = [
+    "scipy>=1.11",
+]
 talib = [
     "TA-Lib",
 ]
