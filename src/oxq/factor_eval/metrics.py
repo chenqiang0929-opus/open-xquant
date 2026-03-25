@@ -53,12 +53,31 @@ def compute_rank_ic(
     min_obs: int = 3,
 ) -> dict[str, object]:
     """Compute Rank IC (mean per-period Spearman rank correlation)."""
-    raise NotImplementedError
+    ic_values: list[float] = []
+    for date in factor.index:
+        f = factor.loc[date]
+        r = forward_returns.loc[date]
+        mask = f.notna() & r.notna()
+        if mask.sum() < min_obs:
+            continue
+        corr, _ = stats.spearmanr(f[mask], r[mask])
+        ic_values.append(float(corr))
+
+    if not ic_values:
+        return {"mean": float("nan"), "std": float("nan"), "series": []}
+
+    return {
+        "mean": float(np.mean(ic_values)),
+        "std": float(np.std(ic_values, ddof=1)),
+        "series": ic_values,
+    }
 
 
 def compute_icir(ic_mean: float, ic_std: float) -> float:
     """Compute ICIR = IC mean / IC std."""
-    raise NotImplementedError
+    if ic_std == 0.0 or np.isnan(ic_mean) or np.isnan(ic_std):
+        return float("nan")
+    return ic_mean / ic_std
 
 
 def compute_decay(
