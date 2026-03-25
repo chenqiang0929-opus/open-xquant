@@ -103,12 +103,36 @@ def compute_decay(
     -------
     dict with keys: horizons (list[int]), ic_values (list[float]).
     """
-    raise NotImplementedError
+    ic_values: list[float] = []
+    for h in horizons:
+        fwd_ret = prices.pct_change(h).shift(-h)
+        result = compute_ic(factor, fwd_ret, min_obs=min_obs)
+        ic_values.append(float(result["mean"]))
+
+    return {"horizons": horizons, "ic_values": ic_values}
 
 
 def compute_turnover(factor: pd.DataFrame) -> float:
     """Compute average factor rank turnover.
 
-    Turnover = mean of per-period rank change ratios.
+    Turnover per period = mean(|rank_change|) / (N - 1), averaged across periods.
+    Normalized to [0, 1] range where 0 = no change, 1 = maximum displacement.
     """
-    raise NotImplementedError
+    ranks = factor.rank(axis=1)
+    n_symbols = factor.shape[1]
+    if n_symbols <= 1:
+        return 0.0
+
+    turnovers: list[float] = []
+    for i in range(1, len(ranks)):
+        prev = ranks.iloc[i - 1]
+        curr = ranks.iloc[i]
+        mask = prev.notna() & curr.notna()
+        if mask.sum() < 2:
+            continue
+        rank_change = (curr[mask] - prev[mask]).abs().mean()
+        turnovers.append(float(rank_change / (mask.sum() - 1)))
+
+    if not turnovers:
+        return float("nan")
+    return float(np.mean(turnovers))
