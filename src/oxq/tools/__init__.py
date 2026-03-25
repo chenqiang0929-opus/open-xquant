@@ -7,6 +7,7 @@ from oxq.tools import live as _live_tools  # noqa: F401
 from oxq.tools import observe as _observe_tools  # noqa: F401
 from oxq.tools import optimize as _optimize_tools  # noqa: F401
 from oxq.tools import strategy as _strategy_tools  # noqa: F401
+from oxq.tools import factor_eval as _factor_eval_tools  # noqa: F401
 from oxq.tools import universe as _universe_tools  # noqa: F401
 from oxq.tools.registry import ToolDef, ToolRegistry, registry
 
