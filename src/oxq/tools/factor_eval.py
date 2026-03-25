@@ -14,6 +14,7 @@ from oxq.factor_eval import (
     compute_ic,
     compute_icir,
     compute_rank_ic,
+    compute_ts_ic,
     compute_turnover,
 )
 from oxq.tools.registry import registry
@@ -101,6 +102,7 @@ def factor_evaluate(
     icir = compute_icir(float(ic_result["mean"]), float(ic_result["std"]))
     decay_result = compute_decay(factor_df, prices_df, decay_horizons, min_obs=min_obs)
     turnover = compute_turnover(factor_df)
+    ts_ic_result = compute_ts_ic(factor_df, fwd_returns, min_obs=max(min_obs, 30))
 
     # -- Assemble report --------------------------------------------------------
     return {
@@ -127,6 +129,12 @@ def factor_evaluate(
             },
             "turnover": {
                 "mean": float(turnover),
+            },
+            "ts_ic": {
+                "mean": float(ts_ic_result["mean"]),
+                "per_symbol": {
+                    k: float(v) for k, v in ts_ic_result["per_symbol"].items()
+                },
             },
         },
         "ic_series": {

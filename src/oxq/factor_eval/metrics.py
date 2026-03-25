@@ -112,6 +112,52 @@ def compute_decay(
     return {"horizons": horizons, "ic_values": ic_values}
 
 
+def compute_ts_ic(
+    factor: pd.DataFrame,
+    forward_returns: pd.DataFrame,
+    min_obs: int = 30,
+) -> dict[str, object]:
+    """Compute time-series IC: per-symbol Pearson correlation across time.
+
+    Unlike cross-sectional IC (which correlates across symbols within each date),
+    this correlates across dates within each symbol. Measures whether a factor
+    predicts an asset's own future returns — the relevant metric for rotation
+    and trend-following strategies.
+
+    Parameters
+    ----------
+    factor : pd.DataFrame
+        Factor values. index=date, columns=symbols.
+    forward_returns : pd.DataFrame
+        Forward returns aligned with factor. Same shape.
+    min_obs : int
+        Minimum valid observations per symbol. Symbols with fewer are skipped.
+
+    Returns
+    -------
+    dict with keys: mean (float), per_symbol (dict[str, float]).
+    """
+    per_symbol: dict[str, float] = {}
+    for sym in factor.columns:
+        if sym not in forward_returns.columns:
+            continue
+        f = factor[sym]
+        r = forward_returns[sym]
+        mask = f.notna() & r.notna()
+        if mask.sum() < min_obs:
+            continue
+        corr, _ = stats.pearsonr(f[mask], r[mask])
+        per_symbol[sym] = float(corr)
+
+    if not per_symbol:
+        return {"mean": float("nan"), "per_symbol": {}}
+
+    return {
+        "mean": float(np.mean(list(per_symbol.values()))),
+        "per_symbol": per_symbol,
+    }
+
+
 def compute_turnover(factor: pd.DataFrame) -> float:
     """Compute average factor rank turnover.
 

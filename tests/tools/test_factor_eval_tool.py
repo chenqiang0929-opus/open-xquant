@@ -62,6 +62,9 @@ def test_factor_evaluate_returns_structured_report(multi_symbol_data):
     assert "icir" in result["metrics"]
     assert "decay" in result["metrics"]
     assert "turnover" in result["metrics"]
+    assert "ts_ic" in result["metrics"]
+    assert "mean" in result["metrics"]["ts_ic"]
+    assert "per_symbol" in result["metrics"]["ts_ic"]
     assert "ic_series" in result
 
 
