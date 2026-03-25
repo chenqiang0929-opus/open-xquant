@@ -29,6 +29,7 @@ from oxq.indicators.builtin import (
     StochK,
 )
 from oxq.indicators.annualized_volatility import AnnualizedVolatility
+from oxq.indicators.garch_volatility import GarchVolatility
 from oxq.indicators.log_return import LogReturn
 from oxq.indicators.momentum import Momentum
 from oxq.indicators.nday_return import NdayReturn
@@ -49,6 +50,7 @@ __all__ = [
     "CCI",
     "DEMA",
     "EMA",
+    "GarchVolatility",
     "HurstExponent",
     "IchimokuChikou",
     "IchimokuKijun",

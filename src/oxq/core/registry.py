@@ -162,6 +162,7 @@ def _load_builtins() -> None:
         VWAP,
         WMA,
         AnnualizedVolatility,
+        GarchVolatility,
         BollingerLower,
         BollingerUpper,
         HurstExponent,
@@ -187,7 +188,7 @@ def _load_builtins() -> None:
 
     for cls in (
         ADX, AROON, ATR, CCI, DEMA, EMA, MFI, OBV, PPO, ROC, RSI, TEMA,
-        VWAP, WMA, AnnualizedVolatility, BollingerLower, BollingerUpper,
+        VWAP, WMA, AnnualizedVolatility, GarchVolatility, BollingerLower, BollingerUpper,
         HurstExponent, IchimokuChikou, IchimokuKijun, IchimokuSenkouA,
         IchimokuSenkouB, IchimokuTenkan, LogReturn, MACDHistogram, MACDLine,
         MACDSignal, Momentum, NdayReturn, PowerRatio, Ratio, RollingMDD,
