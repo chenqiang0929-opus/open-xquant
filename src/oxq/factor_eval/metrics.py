@@ -27,7 +27,24 @@ def compute_ic(
     -------
     dict with keys: mean, std, series (per-period IC values as list).
     """
-    raise NotImplementedError
+    ic_values: list[float] = []
+    for date in factor.index:
+        f = factor.loc[date]
+        r = forward_returns.loc[date]
+        mask = f.notna() & r.notna()
+        if mask.sum() < min_obs:
+            continue
+        corr, _ = stats.pearsonr(f[mask], r[mask])
+        ic_values.append(float(corr))
+
+    if not ic_values:
+        return {"mean": float("nan"), "std": float("nan"), "series": []}
+
+    return {
+        "mean": float(np.mean(ic_values)),
+        "std": float(np.std(ic_values, ddof=1)),
+        "series": ic_values,
+    }
 
 
 def compute_rank_ic(
