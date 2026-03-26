@@ -18,7 +18,6 @@ from oxq.factor_eval.preprocessing import (
     mark_suspension_days,
 )
 from oxq.factor_eval.returns import compute_forward_returns
-from oxq.factor_eval.tearsheet import generate_tearsheet
 
 __all__ = [
     # Data layer
@@ -42,6 +41,14 @@ __all__ = [
     "compute_decay_curve",
     "compute_hit_rate",
     "detect_lookahead_bias",
-    # Output
+    # Output (lazy import — requires matplotlib)
     "generate_tearsheet",
 ]
+
+
+def __getattr__(name: str):
+    if name == "generate_tearsheet":
+        from oxq.factor_eval.tearsheet import generate_tearsheet
+
+        return generate_tearsheet
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -85,6 +85,8 @@ def compute_decay_curve(
     inflection = _compute_inflection(periods, correlations)
 
     warning = None
+    if min_n == float("inf"):
+        min_n = 0
     if min_n < _MIN_SAMPLE_WARN:
         warning = f"Min sample size {int(min_n)} < {_MIN_SAMPLE_WARN}, results for reference only."
 

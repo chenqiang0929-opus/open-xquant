@@ -40,6 +40,7 @@ akshare = [
 ]
 chart = [
     "mplfinance>=0.12",
+    "matplotlib>=3.7",
 ]
 scipy = [
     "scipy>=1.11",

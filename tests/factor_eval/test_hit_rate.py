@@ -1,4 +1,3 @@
-# tests/factor_eval/test_hit_rate.py
 """Tests for hit rate computation."""
 
 from __future__ import annotations

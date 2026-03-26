@@ -54,7 +54,7 @@ def _forward_returns_with_suspension(
             else pd.Series(False, index=prices.index)
         )
         tradeable_indices = p.index[~susp]
-        for i, date in enumerate(p.index):
+        for date in p.index:
             # Find position of current date in tradeable days
             if date not in tradeable_indices:
                 continue

@@ -1,4 +1,3 @@
-# tests/factor_eval/test_decay_curve.py
 """Tests for factor decay curve computation."""
 
 from __future__ import annotations

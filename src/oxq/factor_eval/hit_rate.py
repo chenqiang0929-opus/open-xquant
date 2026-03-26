@@ -1,4 +1,3 @@
-# src/oxq/factor_eval/hit_rate.py
 """Hit rate computation for time-series factor evaluation."""
 
 from __future__ import annotations
@@ -104,7 +103,8 @@ def compute_hit_rate(
     short_hit_rate = float(short_hits / short_total) if short_total > 0 else float("nan")
 
     total_hits = long_hits + short_hits
-    total_hit_rate = float(total_hits / n)
+    signal_count = long_total + short_total
+    total_hit_rate = float(total_hits / signal_count) if signal_count > 0 else float("nan")
 
     # Rolling hit rate
     hit_flags = pd.Series(
