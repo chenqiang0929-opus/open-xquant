@@ -181,27 +181,32 @@ class WorldBankFetcher:
 # Backward-compatible alias
 WorldBankDownloader = WorldBankFetcher
 
-# Mapping: indicator name -> (akshare_source, chinese_metric_label)
-# "abstract" = stock_financial_abstract (per-symbol, all periods, pivot table)
-# "analysis" = stock_financial_analysis_indicator (per-symbol, all periods, flat table)
-EASTMONEY_FIELD_MAP: dict[str, tuple[str, str]] = {
-    "eps": ("abstract", "基本每股收益"),
-    "revenue": ("abstract", "营业总收入"),
-    "net_income": ("abstract", "净利润"),
-    "roe": ("abstract", "净资产收益率(ROE)"),
-    "book_value_per_share": ("abstract", "每股净资产"),
-    "operating_cash_flow": ("abstract", "经营现金流量净额"),
-    "total_assets": ("analysis", "总资产(元)"),
-    "total_shares": ("analysis", None),  # computed: total_assets / book_value_per_share_raw
+# Mapping: indicator name -> chinese metric label in stock_financial_abstract
+# None = computed from other metrics
+EASTMONEY_FIELD_MAP: dict[str, str | None] = {
+    "eps": "基本每股收益",
+    "revenue": "营业总收入",
+    "net_income": "净利润",
+    "roe": "净资产收益率(ROE)",
+    "book_value_per_share": "每股净资产",
+    "operating_cash_flow": "经营现金流量净额",
+    "total_assets": None,  # computed: equity * equity_multiplier
+    "total_shares": None,  # computed: equity / bvps
 }
+
+# Extra metrics needed for computed indicators
+_EASTMONEY_EXTRA_METRICS: list[str] = [
+    "股东权益合计(净资产)",
+    "权益乘数",
+]
 
 
 class EastMoneyFetcher:
     """Fetch A-share financial statement data via akshare (EastMoney source).
 
-    Uses two per-symbol akshare functions:
-    - ``stock_financial_abstract``: pivot table with metrics as rows, periods as columns
-    - ``stock_financial_analysis_indicator``: flat table with one row per period
+    Uses ``stock_financial_abstract`` (per-symbol, pivot table with metrics
+    as rows and report periods as columns).  All 8 indicators come from this
+    single API call — no notebook-incompatible tqdm widgets.
 
     Implements the ``FactorFetcher`` protocol.
     """
@@ -233,76 +238,81 @@ class EastMoneyFetcher:
         period: str = kwargs.get("period", "quarterly")
         wanted = set(requested) if requested else set(EASTMONEY_FIELD_MAP)
 
-        # Determine which data sources are needed
-        need_abstract = any(
-            EASTMONEY_FIELD_MAP[ind][0] == "abstract"
-            for ind in wanted
-            if ind in EASTMONEY_FIELD_MAP
-        )
-        need_analysis = any(
-            EASTMONEY_FIELD_MAP[ind][0] == "analysis"
-            for ind in wanted
-            if ind in EASTMONEY_FIELD_MAP
-        )
+        # Fetch the pivot table: rows = metrics, columns = report periods
+        abstract_df = ak.stock_financial_abstract(symbol=target)
+        date_cols = [c for c in abstract_df.columns if c not in ("选项", "指标")]
 
+        # Collect all needed metric labels (direct + extra for computed)
+        all_labels: set[str] = set()
+        for ind in wanted:
+            if ind not in EASTMONEY_FIELD_MAP:
+                continue
+            label = EASTMONEY_FIELD_MAP[ind]
+            if label is not None:
+                all_labels.add(label)
+        need_computed = bool(wanted & {"total_assets", "total_shares"})
+        if need_computed:
+            all_labels.update(_EASTMONEY_EXTRA_METRICS)
+            all_labels.add("每股净资产")  # needed for total_shares
+
+        # Build a lookup: label -> row values
+        label_data: dict[str, pd.Series] = {}
+        for label in all_labels:
+            match = abstract_df[abstract_df["指标"] == label]
+            if not match.empty:
+                label_data[label] = match.iloc[0]
+
+        # Build result rows per date
         result_rows: dict[pd.Timestamp, dict[str, Any]] = {}
+        for date_str in date_cols:
+            dt = pd.Timestamp(date_str)
+            if dt < pd.Timestamp(start) or dt > pd.Timestamp(end):
+                continue
 
-        # --- stock_financial_abstract: pivot table (metrics × periods) ---
-        if need_abstract:
-            abstract_df = ak.stock_financial_abstract(symbol=target)
-            # Date columns are like "20240630"; filter to date-like columns
-            date_cols = [c for c in abstract_df.columns if c not in ("选项", "指标")]
+            row: dict[str, Any] = {"publish_date": pd.NaT}
 
-            for date_str in date_cols:
-                dt = pd.Timestamp(date_str)
-                if dt < pd.Timestamp(start) or dt > pd.Timestamp(end):
+            # Direct-mapped indicators
+            for ind in wanted:
+                if ind not in EASTMONEY_FIELD_MAP:
                     continue
-                if dt not in result_rows:
-                    result_rows[dt] = {"publish_date": pd.NaT}
-
-                for ind in wanted:
-                    if ind not in EASTMONEY_FIELD_MAP:
-                        continue
-                    source, label = EASTMONEY_FIELD_MAP[ind]
-                    if source != "abstract" or label is None:
-                        continue
-                    # Find the row with matching metric label (take first match)
-                    match = abstract_df[abstract_df["指标"] == label]
-                    if match.empty:
-                        continue
-                    val = match.iloc[0][date_str]
-                    result_rows[dt][ind] = float(val) if pd.notna(val) else None
-
-        # --- stock_financial_analysis_indicator: flat table ---
-        if need_analysis:
-            start_year = str(pd.Timestamp(start).year)
-            analysis_df = ak.stock_financial_analysis_indicator(
-                symbol=target, start_year=start_year
-            )
-            for _, row in analysis_df.iterrows():
-                dt = pd.Timestamp(row["日期"])
-                if dt < pd.Timestamp(start) or dt > pd.Timestamp(end):
+                label = EASTMONEY_FIELD_MAP[ind]
+                if label is None:
                     continue
-                if dt not in result_rows:
-                    result_rows[dt] = {"publish_date": pd.NaT}
+                if label in label_data:
+                    val = label_data[label].get(date_str)
+                    row[ind] = float(val) if pd.notna(val) else None
+                else:
+                    row[ind] = None
 
-                if "total_assets" in wanted:
-                    val = row.get("总资产(元)")
-                    result_rows[dt]["total_assets"] = float(val) if pd.notna(val) else None
-
-                # Compute total_shares from total_assets and book_value_per_share
-                if "total_shares" in wanted:
-                    assets = row.get("总资产(元)")
-                    bvps_raw = row.get("每股净资产_调整前(元)")
-                    if pd.notna(assets) and pd.notna(bvps_raw) and float(bvps_raw) != 0:
-                        equity_ratio = row.get("股东权益比率(%)")
-                        if pd.notna(equity_ratio):
-                            equity = float(assets) * float(equity_ratio) / 100
-                            result_rows[dt]["total_shares"] = equity / float(bvps_raw)
-                        else:
-                            result_rows[dt]["total_shares"] = None
+            # Computed: total_assets = equity * equity_multiplier
+            if "total_assets" in wanted:
+                equity_s = label_data.get("股东权益合计(净资产)")
+                mult_s = label_data.get("权益乘数")
+                if equity_s is not None and mult_s is not None:
+                    eq = equity_s.get(date_str)
+                    mu = mult_s.get(date_str)
+                    if pd.notna(eq) and pd.notna(mu):
+                        row["total_assets"] = float(eq) * float(mu)
                     else:
-                        result_rows[dt]["total_shares"] = None
+                        row["total_assets"] = None
+                else:
+                    row["total_assets"] = None
+
+            # Computed: total_shares = equity / bvps
+            if "total_shares" in wanted:
+                equity_s = label_data.get("股东权益合计(净资产)")
+                bvps_s = label_data.get("每股净资产")
+                if equity_s is not None and bvps_s is not None:
+                    eq = equity_s.get(date_str)
+                    bv = bvps_s.get(date_str)
+                    if pd.notna(eq) and pd.notna(bv) and float(bv) != 0:
+                        row["total_shares"] = float(eq) / float(bv)
+                    else:
+                        row["total_shares"] = None
+                else:
+                    row["total_shares"] = None
+
+            result_rows[dt] = row
 
         if not result_rows:
             msg = f"No data returned for '{target}' ({start}-{end})."
