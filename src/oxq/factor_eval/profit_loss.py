@@ -77,12 +77,13 @@ def compute_profit_loss_ratio(
         ratio = avg_win / avg_loss
 
     # Rolling P/L ratio
-    long_ret_series = pd.Series(returns_arr, index=ret_dates)
-    long_flag_series = pd.Series(long_mask.astype(float), index=ret_dates)
+    idx = range(len(returns_arr))
+    long_ret_series = pd.Series(returns_arr, index=idx)
+    long_flag_arr = long_mask.astype(float)
 
     def _rolling_pl(window: pd.Series) -> float:
         rets = window.values
-        flags = long_flag_series.loc[window.index].values
+        flags = long_flag_arr[window.index]
         masked = rets[flags > 0]
         if len(masked) == 0:
             return float("nan")
