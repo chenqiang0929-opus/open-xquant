@@ -3,11 +3,13 @@ from __future__ import annotations
 import importlib
 import os
 from pathlib import Path
-from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
 from oxq.core.errors import DownloadError
+from oxq.data.providers import Downloader
+
+__all__ = ["AkShareDownloader", "Downloader", "YFinanceDownloader", "resolve_data_dir"]
 
 
 def resolve_data_dir(dest_dir: Path | None = None) -> Path:
@@ -18,27 +20,6 @@ def resolve_data_dir(dest_dir: Path | None = None) -> Path:
     if env:
         return Path(env) / "market"
     return Path.home() / ".oxq" / "data" / "market"
-
-
-@runtime_checkable
-class Downloader(Protocol):
-    """Data download protocol: fetch from external source and persist."""
-
-    def download(
-        self,
-        symbol: str,
-        start: str,
-        end: str,
-        dest_dir: Path | None = None,
-    ) -> Path: ...
-
-    def download_many(
-        self,
-        symbols: list[str],
-        start: str,
-        end: str,
-        dest_dir: Path | None = None,
-    ) -> dict[str, Path]: ...
 
 
 def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
