@@ -375,3 +375,86 @@ class TestReadFactor:
         _write_sample_factor(tmp_path, sub="financial")
         df = read_factor("gdp", data_dir=tmp_path, sub="financial")
         assert list(df.index) == [2020, 2021]
+
+
+# ---------------------------------------------------------------------------
+# read_factor — financial data with point_in_time
+# ---------------------------------------------------------------------------
+
+
+class TestReadFactorFinancial:
+    """Tests for read_factor with sub='financial' and point_in_time."""
+
+    def _write_financial_parquet(self, tmp_path: Path) -> Path:
+        factor_dir = tmp_path / "financial"
+        factor_dir.mkdir(parents=True)
+        df = pd.DataFrame(
+            {
+                "publish_date": pd.to_datetime(["2024-08-24", "2024-04-26"]),
+                "period": ["quarterly", "quarterly"],
+                "eps": [29.42, 16.16],
+                "revenue": [8.69e10, 4.59e10],
+            },
+            index=pd.DatetimeIndex(
+                ["2024-06-30", "2024-03-31"], name="report_date"
+            ),
+        )
+        df.to_parquet(factor_dir / "600519.parquet")
+        return tmp_path
+
+    def test_read_financial_all(self, tmp_path: Path) -> None:
+        data_dir = self._write_financial_parquet(tmp_path)
+        df = read_factor("600519", sub="financial", data_dir=data_dir)
+        assert len(df) == 2
+        assert "eps" in df.columns
+        assert "publish_date" in df.columns
+
+    def test_read_financial_filter_indicators(self, tmp_path: Path) -> None:
+        data_dir = self._write_financial_parquet(tmp_path)
+        df = read_factor(
+            "600519", sub="financial", indicators=["eps"], data_dir=data_dir
+        )
+        assert "eps" in df.columns
+        assert "revenue" not in df.columns
+        assert "publish_date" in df.columns  # metadata kept
+
+    def test_read_financial_point_in_time(self, tmp_path: Path) -> None:
+        """point_in_time=True filters by publish_date, not report_date."""
+        data_dir = self._write_financial_parquet(tmp_path)
+        # Q1 report published 2024-04-26, Q2 report published 2024-08-24
+        # At 2024-05-01, only Q1 data should be visible
+        df = read_factor(
+            "600519",
+            sub="financial",
+            end="2024-05-01",
+            point_in_time=True,
+            data_dir=data_dir,
+        )
+        assert len(df) == 1
+        assert df.index[0] == pd.Timestamp("2024-03-31")
+
+    def test_read_financial_no_point_in_time(self, tmp_path: Path) -> None:
+        """Without point_in_time, filters by report_date — gets both rows."""
+        data_dir = self._write_financial_parquet(tmp_path)
+        df = read_factor(
+            "600519",
+            sub="financial",
+            end="2024-06-30",
+            point_in_time=False,
+            data_dir=data_dir,
+        )
+        assert len(df) == 2
+
+    def test_read_macro_backward_compat(self, tmp_path: Path) -> None:
+        """Old-style call with start_year/end_year still works."""
+        factor_dir = tmp_path / "macro"
+        factor_dir.mkdir(parents=True)
+        df = pd.DataFrame(
+            {"CHN": [14.7e12], "USA": [21.3e12]},
+            index=pd.Index([2020], name="year"),
+        )
+        df.to_parquet(factor_dir / "gdp.parquet")
+        result = read_factor(
+            "gdp", sub="macro", start_year=2020, countries=["USA"], data_dir=tmp_path
+        )
+        assert list(result.columns) == ["USA"]

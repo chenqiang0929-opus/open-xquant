@@ -535,19 +535,21 @@ def read_factor(
     sub: str = "macro",
     indicators: list[str] | None = None,
     point_in_time: bool = False,
+    start: str | None = None,
+    end: str | None = None,
 ) -> pd.DataFrame:
     """Read local factor data.
 
     Parameters
     ----------
     target : str
-        Factor name (e.g. "gdp").
+        Factor name (e.g. "gdp") or stock symbol (e.g. "600519").
     countries : list[str] | None
         Filter to these countries. None returns all available.
     start_year : int | None
-        Filter start year (inclusive).
+        Filter start year (inclusive). Legacy param for macro data.
     end_year : int | None
-        Filter end year (inclusive).
+        Filter end year (inclusive). Legacy param for macro data.
     data_dir : Path | None
         Override factor data directory.
     sub : str
@@ -557,11 +559,18 @@ def read_factor(
         are kept automatically when present.
     point_in_time : bool
         When True, filter by publish_date instead of report_date/index.
+        Useful for avoiding look-ahead bias with financial data.
+    start : str | None
+        Start date string (inclusive), e.g. "2024-01-01".
+    end : str | None
+        End date string (inclusive), e.g. "2024-06-30".
+        When ``point_in_time=True``, filters rows where
+        ``publish_date <= end``.
 
     Returns
     -------
     pd.DataFrame
-        DataFrame with index=year (int), columns=country codes.
+        DataFrame with factor data.
     """
     factor_dir = resolve_factor_dir(data_dir, sub=sub)
     path = factor_dir / f"{target}.parquet"
@@ -577,16 +586,23 @@ def read_factor(
         keep += [c for c in metadata_cols if c in df.columns and c not in keep]
         df = df[keep]
 
+    # Date-based filtering (start/end strings)
     if point_in_time and "publish_date" in df.columns:
-        if start_year is not None:
-            df = df[df["publish_date"].dt.year >= start_year]
-        if end_year is not None:
-            df = df[df["publish_date"].dt.year <= end_year]
-    else:
-        if start_year is not None:
-            df = df[df.index >= start_year]
-        if end_year is not None:
-            df = df[df.index <= end_year]
+        if start is not None:
+            df = df[df["publish_date"] >= pd.Timestamp(start)]
+        if end is not None:
+            df = df[df["publish_date"] <= pd.Timestamp(end)]
+    elif start is not None or end is not None:
+        if start is not None:
+            df = df[df.index >= pd.Timestamp(start)]
+        if end is not None:
+            df = df[df.index <= pd.Timestamp(end)]
+
+    # Legacy year-based filtering (start_year/end_year ints)
+    if start_year is not None:
+        df = df[df.index >= start_year]
+    if end_year is not None:
+        df = df[df.index <= end_year]
 
     if countries is not None:
         available = [c for c in countries if c in df.columns]
