@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import urllib.request
@@ -179,6 +180,136 @@ class WorldBankFetcher:
 
 # Backward-compatible alias
 WorldBankDownloader = WorldBankFetcher
+
+# indicator -> (akshare_function, column_name)
+EASTMONEY_FIELD_MAP: dict[str, tuple[str, str]] = {
+    "eps": ("stock_yjbb_em", "基本每股收益"),
+    "revenue": ("stock_yjbb_em", "营业收入"),
+    "net_income": ("stock_yjbb_em", "净利润"),
+    "roe": ("stock_yjbb_em", "净资产收益率"),
+    "total_shares": ("stock_yjbb_em", "总股本"),
+    "total_assets": ("stock_zcfz_em", "资产总计"),
+    "book_value_per_share": ("stock_zcfz_em", "每股净资产"),
+    "operating_cash_flow": ("stock_xjll_em", "经营活动产生的现金流量净额"),
+}
+
+# Group indicators by akshare function to minimize API calls
+_EASTMONEY_FUNCTIONS: dict[str, list[str]] = {}
+for _ind, (_func, _col) in EASTMONEY_FIELD_MAP.items():
+    _EASTMONEY_FUNCTIONS.setdefault(_func, []).append(_ind)
+
+
+class EastMoneyFetcher:
+    """Fetch A-share financial statement data via akshare's EastMoney functions.
+
+    Implements the ``FactorFetcher`` protocol.
+    """
+
+    def fetch(
+        self,
+        target: str,
+        start: str,
+        end: str,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Fetch financial statement data for a stock.
+
+        Parameters
+        ----------
+        target : str
+            Stock symbol (e.g. "600519").
+        start : str
+            Start date (inclusive), e.g. "2024-01-01".
+        end : str
+            End date (inclusive), e.g. "2024-12-31".
+        **kwargs
+            indicators : list[str] | None — specific indicators to fetch.
+            period : str — "quarterly" (default) or "annual".
+        """
+        ak = globals().get("akshare") or importlib.import_module("akshare")
+
+        indicators: list[str] | None = kwargs.get("indicators")
+        period: str = kwargs.get("period", "quarterly")
+
+        # Determine which akshare functions to call
+        if indicators is not None:
+            needed_funcs: set[str] = set()
+            for ind in indicators:
+                if ind in EASTMONEY_FIELD_MAP:
+                    needed_funcs.add(EASTMONEY_FIELD_MAP[ind][0])
+        else:
+            needed_funcs = set(_EASTMONEY_FUNCTIONS.keys())
+
+        # Call each needed function and collect partial DataFrames
+        parts: list[pd.DataFrame] = []
+        for func_name in needed_funcs:
+            func = getattr(ak, func_name)
+            raw = func(symbol=target)
+
+            # Determine which columns to extract from this function
+            col_map: dict[str, str] = {}  # chinese -> english
+            for ind, (fn, cn_col) in EASTMONEY_FIELD_MAP.items():
+                if fn != func_name:
+                    continue
+                if indicators is not None and ind not in indicators:
+                    continue
+                col_map[cn_col] = ind
+
+            rename = {"报告期": "report_date"}
+            if "公告日期" in raw.columns:
+                rename["公告日期"] = "publish_date"
+            rename.update(col_map)
+
+            keep_cols = [c for c in rename if c in raw.columns]
+            part = raw[keep_cols].rename(columns=rename)
+            part["report_date"] = pd.to_datetime(part["report_date"])
+            if "publish_date" in part.columns:
+                part["publish_date"] = pd.to_datetime(part["publish_date"])
+            parts.append(part)
+
+        if not parts:
+            msg = f"No data returned for '{target}' ({start}-{end})."
+            raise DownloadError(msg)
+
+        # Merge all parts on report_date
+        merged = parts[0]
+        for part in parts[1:]:
+            # Drop publish_date from right side if already present
+            drop_cols = [c for c in ["publish_date"] if c in merged.columns and c in part.columns]
+            merged = merged.merge(
+                part.drop(columns=drop_cols, errors="ignore"),
+                on="report_date",
+                how="outer",
+            )
+
+        # Add period column
+        merged["period"] = merged["report_date"].dt.month.apply(
+            lambda m: "annual" if m == 12 else "quarterly"
+        )
+
+        # Filter by date range
+        merged = merged[
+            (merged["report_date"] >= pd.Timestamp(start))
+            & (merged["report_date"] <= pd.Timestamp(end))
+        ]
+
+        # Filter by period
+        if period == "annual":
+            merged = merged[merged["period"] == "annual"]
+        elif period == "quarterly":
+            merged = merged[merged["period"] == "quarterly"]
+
+        merged = merged.set_index("report_date").sort_index()
+
+        if merged.empty:
+            msg = f"No data returned for '{target}' ({start}-{end})."
+            raise DownloadError(msg)
+
+        return merged
+
+    def list_indicators(self) -> list[str]:
+        """Return sorted list of available indicator names."""
+        return sorted(EASTMONEY_FIELD_MAP)
 
 
 class FactorDownloader:
