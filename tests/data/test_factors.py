@@ -342,7 +342,7 @@ class TestBackwardCompat:
 
 class TestReadFactor:
     def test_read_all(self, tmp_path: Path) -> None:
-        factor_dir = _write_sample_factor(tmp_path, sub="macro")
+        _write_sample_factor(tmp_path, sub="macro")
         df = read_factor("gdp", data_dir=tmp_path)
         assert list(df.index) == [2020, 2021]
         assert sorted(df.columns) == ["CHN", "USA"]
