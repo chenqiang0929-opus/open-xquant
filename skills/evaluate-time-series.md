@@ -30,14 +30,48 @@ If the user wants to evaluate a composite factor (e.g., risk-adjusted momentum =
 
 Route to `component-creator` to create a registered indicator that encapsulates the composite logic. Once registered, use it like any other indicator. This is the clean, reusable approach.
 
-**Option B (Quick evaluation): Use engine_run + factor_column**
+**Option B (Quick evaluation): Use engine_run + run_id + factor_column**
 
-1. Build a minimal strategy with the composite indicator computed via signal dependencies
-2. Run `engine_run(strategy=..., run_through="indicator")` to populate mktdata with the composite column
-3. Export the DataFrame to parquet (or use the column name directly)
-4. Call `factor_evaluate_ts(factor_column="composite_col", ...)`
+1. Build a minimal strategy with the composite indicator as a signal dependency
+2. Run `engine_run(strategy=..., run_through="indicator")` to compute all indicator columns → returns `run_id`
+3. Call `factor_evaluate_ts(run_id="...", factor_column="composite_col", symbols=[...], ...)`
 
-This is faster for one-off exploration but the factor isn't reusable.
+The tool reads mktdata directly from the engine's session result — no file export needed.
+
+Example workflow:
+```
+# Step 1: Create strategy with composite indicator dependencies
+strategy_create(name="eval_tmp", ...)
+strategy_add_signal(
+    strategy="eval_tmp",
+    name="dummy",
+    type="Threshold",
+    params={"column": "risk_adj_momentum", "threshold": 0, "direction": "above"},
+    indicators={
+        "momentum": {"type": "Momentum", "params": {"period": 20}},
+        "volatility": {"type": "RollingVolatility", "params": {"period": 20}},
+        "risk_adj_momentum": {"type": "Ratio", "params": {"numerator": "momentum", "denominator": "volatility"}},
+    },
+)
+
+# Step 2: Run engine to compute indicator columns
+engine_run(strategy="eval_tmp", start="2022-01-01", end="2024-12-31",
+           symbols=["AAPL"], run_through="indicator")
+# → returns run_id like "eval_tmp_20240101_20241231"
+
+# Step 3: Evaluate the composite column directly from session
+factor_evaluate_ts(
+    run_id="eval_tmp_20240101_20241231",
+    factor_column="risk_adj_momentum",
+    symbols=["AAPL"],
+    start="2022-01-01",
+    end="2024-12-31",
+    forward_periods=[1, 5, 10, 20],
+    t1_offset=false
+)
+```
+
+This is faster for one-off exploration but the factor isn't reusable across sessions.
 
 ---
 
@@ -87,9 +121,22 @@ factor_evaluate_ts(
 )
 ```
 
-### Pre-computed Factor Column
+### Pre-computed Factor Column (from parquet)
 ```
 factor_evaluate_ts(
+    factor_column="risk_adj_momentum",
+    symbols=["AAPL"],
+    start="2022-01-01",
+    end="2024-12-31",
+    forward_periods=[1, 5, 10, 20],
+    t1_offset=false
+)
+```
+
+### Composite Factor (from engine_run)
+```
+factor_evaluate_ts(
+    run_id="eval_tmp_20220101_20241231",
     factor_column="risk_adj_momentum",
     symbols=["AAPL"],
     start="2022-01-01",

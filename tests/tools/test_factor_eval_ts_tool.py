@@ -178,6 +178,61 @@ class TestFactorEvaluateTs:
         )
         assert "error" in result
 
+    def test_run_id_mode(self, data_dir: str) -> None:
+        """Mode 3: read factor column from engine_run result via session."""
+        from dataclasses import dataclass, field
+
+        from oxq.tools import session
+
+        # Create a mock RunResult with mktdata containing a custom column
+        dates = pd.date_range("2023-01-01", periods=300, freq="B")
+        prices = 100 * np.exp(np.cumsum(np.random.RandomState(42).randn(300) * 0.01))
+        df = pd.DataFrame(
+            {
+                "open": prices * 0.99,
+                "high": prices * 1.01,
+                "low": prices * 0.98,
+                "close": prices,
+                "volume": np.random.RandomState(42).randint(1000, 10000, 300).astype(float),
+                "my_composite": np.random.RandomState(42).randn(300),
+            },
+            index=dates,
+        )
+
+        @dataclass
+        class MockRunResult:
+            mktdata: dict = field(default_factory=dict)
+
+        mock_result = MockRunResult(mktdata={"AAPL": df})
+        session._run_results["test_run_123"] = mock_result
+
+        try:
+            result = factor_evaluate_ts(
+                run_id="test_run_123",
+                factor_column="my_composite",
+                symbols=["AAPL"],
+                start="2023-01-01",
+                end="2023-12-31",
+                forward_periods=[1, 5],
+                t1_offset=False,
+            )
+            assert "error" not in result, result.get("error")
+            assert result["indicator"] == "my_composite"
+            assert "hit_rate" in result["metrics"]
+        finally:
+            session._run_results.pop("test_run_123", None)
+
+    def test_run_id_not_found_returns_error(self, data_dir: str) -> None:
+        result = factor_evaluate_ts(
+            run_id="nonexistent_run",
+            factor_column="col",
+            symbols=["AAPL"],
+            start="2023-01-01",
+            end="2023-12-31",
+        )
+        assert "error" in result
+        assert "nonexistent_run" in result["error"]
+
     def test_config_in_result(self, data_dir: str) -> None:
         result = factor_evaluate_ts(
             indicator="SMA",

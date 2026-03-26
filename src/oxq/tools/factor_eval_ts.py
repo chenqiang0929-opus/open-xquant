@@ -18,6 +18,7 @@ from oxq.factor_eval.preprocessing import (
     mark_suspension_days,
 )
 from oxq.factor_eval.tearsheet import generate_tearsheet
+from oxq.tools import session
 from oxq.tools.registry import registry
 
 
@@ -106,17 +107,21 @@ def factor_evaluate_ts(
     market_state_params: dict[str, Any] | None = None,
     exclude_limit_days: bool = False,
     factor_column: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Evaluate an indicator's time-series predictive power.
 
-    Two usage modes:
+    Three usage modes:
 
     Mode 1 — Registered indicator:
         factor_evaluate_ts(indicator="SMA", params={"period": 20}, symbols=["AAPL"], ...)
 
-    Mode 2 — Pre-computed factor column:
+    Mode 2 — Pre-computed factor column from parquet:
         factor_evaluate_ts(factor_column="risk_adj_momentum", symbols=["AAPL"], ...)
-        The column must exist in the symbol's parquet file (e.g. added by engine_run).
+
+    Mode 3 — Factor column from engine_run result (composite indicators):
+        engine_run(strategy="...", run_through="indicator")  # → run_id
+        factor_evaluate_ts(run_id="...", factor_column="composite_col", ...)
     """
     if symbols is None or start is None or end is None:
         return {"error": "symbols, start, and end are required."}
@@ -130,9 +135,9 @@ def factor_evaluate_ts(
     if params is None:
         params = {}
 
-    # -- Resolve indicator class (Mode 1) or validate factor_column (Mode 2) ---
+    # -- Resolve indicator class (Mode 1) or validate factor_column (Mode 2/3) -
     ind_instance = None
-    if indicator is not None and factor_column is None:
+    if indicator is not None and factor_column is None and run_id is None:
         indicators = list_indicators()
         if indicator not in indicators:
             return {"error": f"Unknown indicator '{indicator}'. Available: {sorted(indicators)}"}
@@ -140,18 +145,30 @@ def factor_evaluate_ts(
         ind_instance = ind_cls()
 
     # -- Load market data -------------------------------------------------------
-    # Load full data (not sliced by end) so prices extend beyond factor dates
-    # for forward return computation.
-    data_path = resolve_data_dir(Path(data_dir) if data_dir else None)
     mktdata_full: dict[str, pd.DataFrame] = {}
     errors: list[str] = []
-    for sym in symbols:
-        parquet = data_path / f"{sym}.parquet"
-        if not parquet.exists():
-            errors.append(f"No data for '{sym}'")
-            continue
-        df = pd.read_parquet(parquet)
-        mktdata_full[sym] = df.loc[start:]
+
+    if run_id is not None:
+        # Mode 3: load from engine_run session result
+        run_result = session._run_results.get(run_id)
+        if run_result is None:
+            available = sorted(session._run_results.keys())
+            return {"error": f"Run '{run_id}' not found. Available: {available}"}
+        for sym in symbols:
+            if sym in run_result.mktdata:
+                mktdata_full[sym] = run_result.mktdata[sym].loc[start:]
+            else:
+                errors.append(f"Symbol '{sym}' not in run result")
+    else:
+        # Mode 1/2: load from parquet files
+        data_path = resolve_data_dir(Path(data_dir) if data_dir else None)
+        for sym in symbols:
+            parquet = data_path / f"{sym}.parquet"
+            if not parquet.exists():
+                errors.append(f"No data for '{sym}'")
+                continue
+            df = pd.read_parquet(parquet)
+            mktdata_full[sym] = df.loc[start:]
 
     if not mktdata_full:
         return {"error": f"No data found. {'; '.join(errors)}"}
