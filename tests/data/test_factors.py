@@ -1,25 +1,28 @@
-"""Tests for oxq.data.factors — WorldBankDownloader and read_factor."""
+"""Tests for oxq.data.factors — WorldBankFetcher, FactorDownloader, and read_factor."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
 from oxq.data.factors import (
-    INDICATOR_MAP,
-    WorldBankDownloader,
+    MACRO_INDICATOR_MAP,
+    FactorDownloader,
+    WorldBankFetcher,
     _records_to_dataframe,
     read_factor,
     resolve_factor_dir,
 )
+from oxq.data.providers import FactorFetcher
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 def _make_wb_response(
     indicator_code: str,
@@ -48,13 +51,18 @@ def _make_wb_response(
     return [metadata, records]
 
 
-def _write_sample_factor(tmp_path: Path, indicator: str = "gdp") -> Path:
+def _write_sample_factor(
+    tmp_path: Path, indicator: str = "gdp", sub: str | None = None,
+) -> Path:
     """Write a small sample factor parquet for read tests."""
     df = pd.DataFrame(
         {"CHN": [14.7e12, 17.7e12], "USA": [21.3e12, 23.3e12]},
         index=pd.Index([2020, 2021], name="year"),
     )
-    factor_dir = tmp_path / "factor"
+    if sub is not None:
+        factor_dir = tmp_path / sub
+    else:
+        factor_dir = tmp_path / "factor"
     factor_dir.mkdir(parents=True, exist_ok=True)
     path = factor_dir / f"{indicator}.parquet"
     df.to_parquet(path)
@@ -64,6 +72,7 @@ def _write_sample_factor(tmp_path: Path, indicator: str = "gdp") -> Path:
 # ---------------------------------------------------------------------------
 # resolve_factor_dir
 # ---------------------------------------------------------------------------
+
 
 class TestResolveFactorDir:
     def test_explicit_dir(self, tmp_path: Path) -> None:
@@ -78,10 +87,21 @@ class TestResolveFactorDir:
         result = resolve_factor_dir()
         assert result == Path.home() / ".oxq" / "data" / "factor"
 
+    def test_sub_appended(self, tmp_path: Path) -> None:
+        assert resolve_factor_dir(tmp_path, sub="macro") == tmp_path / "macro"
+
+    def test_sub_with_env(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OXQ_DATA_DIR", str(tmp_path))
+        assert resolve_factor_dir(sub="financial") == tmp_path / "factor" / "financial"
+
+    def test_sub_none_no_change(self, tmp_path: Path) -> None:
+        assert resolve_factor_dir(tmp_path, sub=None) == tmp_path
+
 
 # ---------------------------------------------------------------------------
 # _records_to_dataframe
 # ---------------------------------------------------------------------------
+
 
 class TestRecordsToDataframe:
     def test_basic_conversion(self) -> None:
@@ -106,14 +126,13 @@ class TestRecordsToDataframe:
 
 
 # ---------------------------------------------------------------------------
-# WorldBankDownloader
+# WorldBankFetcher
 # ---------------------------------------------------------------------------
 
-class TestWorldBankDownloader:
-    def _mock_urlopen(self, response_data: list):
-        """Create a mock for urllib.request.urlopen."""
-        from unittest.mock import MagicMock
 
+class TestWorldBankFetcher:
+    def _mock_urlopen(self, response_data: list) -> MagicMock:
+        """Create a mock for urllib.request.urlopen."""
         body = json.dumps(response_data).encode()
         mock_resp = MagicMock()
         mock_resp.read.return_value = body
@@ -121,20 +140,137 @@ class TestWorldBankDownloader:
         mock_resp.__exit__ = lambda s, *a: None
         return mock_resp
 
-    def test_download_gdp(self, tmp_path: Path) -> None:
+    def test_satisfies_protocol(self) -> None:
+        fetcher: FactorFetcher = WorldBankFetcher()
+        assert isinstance(fetcher, FactorFetcher)
+
+    def test_list_indicators(self) -> None:
+        fetcher = WorldBankFetcher()
+        indicators = fetcher.list_indicators()
+        assert "gdp" in indicators
+        assert "cpi" in indicators
+
+    def test_fetch_returns_dataframe(self) -> None:
+        wb_response = _make_wb_response("NY.GDP.MKTP.CD", {
+            ("USA", 2020): 21.3e12,
+            ("CHN", 2020): 14.7e12,
+        })
+        mock_resp = self._mock_urlopen(wb_response)
+        with patch("oxq.data.factors.urllib.request.urlopen", return_value=mock_resp):
+            fetcher = WorldBankFetcher()
+            df = fetcher.fetch("gdp", "2020", "2020", countries=["USA", "CHN"])
+        assert df.index.name == "year"
+        assert "USA" in df.columns
+
+    def test_unknown_indicator_raises_value_error(self) -> None:
+        fetcher = WorldBankFetcher()
+        with pytest.raises(ValueError, match="Unknown indicator 'fake'"):
+            fetcher.fetch("fake", "2020", "2020", countries=["USA"])
+
+    def test_empty_response_raises_download_error(self) -> None:
+        from oxq.core.errors import DownloadError
+
+        wb_response = [{"page": 1, "total": 0}, None]
+        mock_resp = self._mock_urlopen(wb_response)
+
+        with patch("oxq.data.factors.urllib.request.urlopen", return_value=mock_resp):
+            fetcher = WorldBankFetcher()
+            with pytest.raises(DownloadError, match="No data returned"):
+                fetcher.fetch("gdp", "2020", "2020", countries=["USA"])
+
+    def test_network_error_raises_download_error(self) -> None:
+        from oxq.core.errors import DownloadError
+
+        with patch(
+            "oxq.data.factors.urllib.request.urlopen",
+            side_effect=ConnectionError("timeout"),
+        ):
+            fetcher = WorldBankFetcher()
+            with pytest.raises(DownloadError, match="Failed to download"):
+                fetcher.fetch("gdp", "2020", "2020", countries=["USA"])
+
+
+# ---------------------------------------------------------------------------
+# FactorDownloader
+# ---------------------------------------------------------------------------
+
+
+class TestFactorDownloader:
+    def test_download_creates_parquet(self, tmp_path: Path) -> None:
+        df = pd.DataFrame(
+            {"USA": [21.3e12], "CHN": [14.7e12]},
+            index=pd.Index([2020], name="year"),
+        )
+
+        class StubFetcher:
+            def fetch(self, target: str, start: str, end: str, **kwargs: object) -> pd.DataFrame:
+                return df
+
+            def list_indicators(self) -> list[str]:
+                return ["gdp"]
+
+        dl = FactorDownloader(StubFetcher(), sub="macro")
+        path = dl.download("gdp", "2020", "2020", dest_dir=tmp_path)
+        assert path == tmp_path / "macro" / "gdp.parquet"
+        assert path.exists()
+
+    def test_download_merges_with_existing(self, tmp_path: Path) -> None:
+        sub_dir = tmp_path / "macro"
+        sub_dir.mkdir(parents=True)
+        existing = pd.DataFrame(
+            {"USA": [21.3e12]}, index=pd.Index([2020], name="year"),
+        )
+        existing.to_parquet(sub_dir / "gdp.parquet")
+
+        new_data = pd.DataFrame(
+            {"USA": [23.3e12]}, index=pd.Index([2021], name="year"),
+        )
+
+        class StubFetcher:
+            def fetch(self, target: str, start: str, end: str, **kwargs: object) -> pd.DataFrame:
+                return new_data
+
+            def list_indicators(self) -> list[str]:
+                return ["gdp"]
+
+        dl = FactorDownloader(StubFetcher(), sub="macro")
+        path = dl.download("gdp", "2021", "2021", dest_dir=tmp_path)
+        result = pd.read_parquet(path)
+        assert list(result.index) == [2020, 2021]
+
+    def test_list_available(self) -> None:
+        class StubFetcher:
+            def fetch(self, target: str, start: str, end: str, **kwargs: object) -> pd.DataFrame:
+                return pd.DataFrame()
+
+            def list_indicators(self) -> list[str]:
+                return ["gdp", "cpi"]
+
+        dl = FactorDownloader(StubFetcher(), sub="macro")
+        assert dl.list_available() == ["gdp", "cpi"]
+
+    def test_download_via_fetcher_and_downloader(self, tmp_path: Path) -> None:
+        """Integration: WorldBankFetcher + FactorDownloader replaces old download flow."""
         wb_response = _make_wb_response("NY.GDP.MKTP.CD", {
             ("USA", 2020): 21.3e12,
             ("USA", 2021): 23.3e12,
             ("CHN", 2020): 14.7e12,
             ("CHN", 2021): 17.7e12,
         })
-        mock_resp = self._mock_urlopen(wb_response)
+        body = json.dumps(wb_response).encode()
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = body
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = lambda s, *a: None
 
         with patch("oxq.data.factors.urllib.request.urlopen", return_value=mock_resp):
-            dl = WorldBankDownloader()
-            path = dl.download("gdp", ["USA", "CHN"], 2020, 2021, dest_dir=tmp_path)
+            fetcher = WorldBankFetcher()
+            dl = FactorDownloader(fetcher, sub="macro")
+            path = dl.download(
+                "gdp", "2020", "2021", dest_dir=tmp_path, countries=["USA", "CHN"],
+            )
 
-        assert path == tmp_path / "gdp.parquet"
+        assert path == tmp_path / "macro" / "gdp.parquet"
         assert path.exists()
         df = pd.read_parquet(path)
         assert list(df.index) == [2020, 2021]
@@ -142,79 +278,83 @@ class TestWorldBankDownloader:
 
     def test_download_all_indicators(self, tmp_path: Path) -> None:
         """Verify all 4 indicators can be downloaded (with mocked API)."""
-        for indicator, code in INDICATOR_MAP.items():
+        for indicator, code in MACRO_INDICATOR_MAP.items():
             wb_response = _make_wb_response(code, {
                 ("USA", 2023): 100.0,
                 ("CHN", 2023): 200.0,
             })
-            mock_resp = self._mock_urlopen(wb_response)
+            body = json.dumps(wb_response).encode()
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = body
+            mock_resp.__enter__ = lambda s: s
+            mock_resp.__exit__ = lambda s, *a: None
 
             with patch("oxq.data.factors.urllib.request.urlopen", return_value=mock_resp):
-                dl = WorldBankDownloader()
-                path = dl.download(indicator, ["USA", "CHN"], 2023, 2023, dest_dir=tmp_path)
+                fetcher = WorldBankFetcher()
+                dl = FactorDownloader(fetcher, sub="macro")
+                path = dl.download(
+                    indicator, "2023", "2023",
+                    dest_dir=tmp_path, countries=["USA", "CHN"],
+                )
 
             assert path.exists()
             assert path.name == f"{indicator}.parquet"
 
-    def test_unknown_indicator_raises_value_error(self, tmp_path: Path) -> None:
-        dl = WorldBankDownloader()
-        with pytest.raises(ValueError, match="Unknown indicator 'fake'"):
-            dl.download("fake", ["USA"], dest_dir=tmp_path)
 
-    def test_empty_response_raises_download_error(self, tmp_path: Path) -> None:
-        from oxq.core.errors import DownloadError
+# ---------------------------------------------------------------------------
+# Backward compatibility
+# ---------------------------------------------------------------------------
 
-        wb_response = [{"page": 1, "total": 0}, None]
-        mock_resp = self._mock_urlopen(wb_response)
 
-        with patch("oxq.data.factors.urllib.request.urlopen", return_value=mock_resp):
-            dl = WorldBankDownloader()
-            with pytest.raises(DownloadError, match="No data returned"):
-                dl.download("gdp", ["USA"], dest_dir=tmp_path)
+class TestBackwardCompat:
+    def test_alias_exists(self) -> None:
+        from oxq.data.factors import WorldBankDownloader
 
-    def test_network_error_raises_download_error(self, tmp_path: Path) -> None:
-        from oxq.core.errors import DownloadError
+        assert WorldBankDownloader is WorldBankFetcher
 
-        with patch(
-            "oxq.data.factors.urllib.request.urlopen",
-            side_effect=ConnectionError("timeout"),
-        ):
-            dl = WorldBankDownloader()
-            with pytest.raises(DownloadError, match="Failed to download"):
-                dl.download("gdp", ["USA"], dest_dir=tmp_path)
+    def test_indicator_map_alias(self) -> None:
+        from oxq.data.factors import INDICATOR_MAP
+
+        assert INDICATOR_MAP is MACRO_INDICATOR_MAP
 
 
 # ---------------------------------------------------------------------------
 # read_factor
 # ---------------------------------------------------------------------------
 
+
 class TestReadFactor:
     def test_read_all(self, tmp_path: Path) -> None:
-        factor_dir = _write_sample_factor(tmp_path)
-        df = read_factor("gdp", data_dir=factor_dir)
+        factor_dir = _write_sample_factor(tmp_path, sub="macro")
+        df = read_factor("gdp", data_dir=tmp_path)
         assert list(df.index) == [2020, 2021]
         assert sorted(df.columns) == ["CHN", "USA"]
 
     def test_filter_countries(self, tmp_path: Path) -> None:
-        factor_dir = _write_sample_factor(tmp_path)
-        df = read_factor("gdp", countries=["USA"], data_dir=factor_dir)
+        _write_sample_factor(tmp_path, sub="macro")
+        df = read_factor("gdp", countries=["USA"], data_dir=tmp_path)
         assert list(df.columns) == ["USA"]
 
     def test_filter_missing_country_ignored(self, tmp_path: Path) -> None:
-        factor_dir = _write_sample_factor(tmp_path)
-        df = read_factor("gdp", countries=["USA", "JPN"], data_dir=factor_dir)
+        _write_sample_factor(tmp_path, sub="macro")
+        df = read_factor("gdp", countries=["USA", "JPN"], data_dir=tmp_path)
         assert list(df.columns) == ["USA"]
 
     def test_filter_year_range(self, tmp_path: Path) -> None:
-        factor_dir = _write_sample_factor(tmp_path)
-        df = read_factor("gdp", start_year=2021, data_dir=factor_dir)
+        _write_sample_factor(tmp_path, sub="macro")
+        df = read_factor("gdp", start_year=2021, data_dir=tmp_path)
         assert list(df.index) == [2021]
 
     def test_filter_end_year(self, tmp_path: Path) -> None:
-        factor_dir = _write_sample_factor(tmp_path)
-        df = read_factor("gdp", end_year=2020, data_dir=factor_dir)
+        _write_sample_factor(tmp_path, sub="macro")
+        df = read_factor("gdp", end_year=2020, data_dir=tmp_path)
         assert list(df.index) == [2020]
 
     def test_file_not_found(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="Factor file not found"):
             read_factor("gdp", data_dir=tmp_path)
+
+    def test_sub_parameter(self, tmp_path: Path) -> None:
+        _write_sample_factor(tmp_path, sub="financial")
+        df = read_factor("gdp", data_dir=tmp_path, sub="financial")
+        assert list(df.index) == [2020, 2021]
