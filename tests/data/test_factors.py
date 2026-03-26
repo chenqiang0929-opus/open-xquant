@@ -276,6 +276,23 @@ class TestFactorDownloader:
         assert list(df.index) == [2020, 2021]
         assert sorted(df.columns) == ["CHN", "USA"]
 
+    def test_download_many(self, tmp_path: Path) -> None:
+        call_log: list[str] = []
+
+        class StubFetcher:
+            def fetch(self, target: str, start: str, end: str, **kwargs: object) -> pd.DataFrame:
+                call_log.append(target)
+                return pd.DataFrame({"USA": [100.0]}, index=pd.Index([2020], name="year"))
+
+            def list_indicators(self) -> list[str]:
+                return ["gdp", "cpi"]
+
+        dl = FactorDownloader(StubFetcher(), sub="macro")
+        paths = dl.download_many(["gdp", "cpi"], "2020", "2020", dest_dir=tmp_path)
+        assert set(paths.keys()) == {"gdp", "cpi"}
+        assert all(p.exists() for p in paths.values())
+        assert set(call_log) == {"gdp", "cpi"}
+
     def test_download_all_indicators(self, tmp_path: Path) -> None:
         """Verify all 4 indicators can be downloaded (with mocked API)."""
         for indicator, code in MACRO_INDICATOR_MAP.items():
