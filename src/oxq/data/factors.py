@@ -181,26 +181,27 @@ class WorldBankFetcher:
 # Backward-compatible alias
 WorldBankDownloader = WorldBankFetcher
 
-# indicator -> (akshare_function, column_name)
+# Mapping: indicator name -> (akshare_source, chinese_metric_label)
+# "abstract" = stock_financial_abstract (per-symbol, all periods, pivot table)
+# "analysis" = stock_financial_analysis_indicator (per-symbol, all periods, flat table)
 EASTMONEY_FIELD_MAP: dict[str, tuple[str, str]] = {
-    "eps": ("stock_yjbb_em", "基本每股收益"),
-    "revenue": ("stock_yjbb_em", "营业收入"),
-    "net_income": ("stock_yjbb_em", "净利润"),
-    "roe": ("stock_yjbb_em", "净资产收益率"),
-    "total_shares": ("stock_yjbb_em", "总股本"),
-    "total_assets": ("stock_zcfz_em", "资产总计"),
-    "book_value_per_share": ("stock_zcfz_em", "每股净资产"),
-    "operating_cash_flow": ("stock_xjll_em", "经营活动产生的现金流量净额"),
+    "eps": ("abstract", "基本每股收益"),
+    "revenue": ("abstract", "营业总收入"),
+    "net_income": ("abstract", "净利润"),
+    "roe": ("abstract", "净资产收益率(ROE)"),
+    "book_value_per_share": ("abstract", "每股净资产"),
+    "operating_cash_flow": ("abstract", "经营现金流量净额"),
+    "total_assets": ("analysis", "总资产(元)"),
+    "total_shares": ("analysis", None),  # computed: total_assets / book_value_per_share_raw
 }
-
-# Group indicators by akshare function to minimize API calls
-_EASTMONEY_FUNCTIONS: dict[str, list[str]] = {}
-for _ind, (_func, _col) in EASTMONEY_FIELD_MAP.items():
-    _EASTMONEY_FUNCTIONS.setdefault(_func, []).append(_ind)
 
 
 class EastMoneyFetcher:
-    """Fetch A-share financial statement data via akshare's EastMoney functions.
+    """Fetch A-share financial statement data via akshare (EastMoney source).
+
+    Uses two per-symbol akshare functions:
+    - ``stock_financial_abstract``: pivot table with metrics as rows, periods as columns
+    - ``stock_financial_analysis_indicator``: flat table with one row per period
 
     Implements the ``FactorFetcher`` protocol.
     """
@@ -212,7 +213,7 @@ class EastMoneyFetcher:
         end: str,
         **kwargs: Any,
     ) -> pd.DataFrame:
-        """Fetch financial statement data for a stock.
+        """Fetch financial statement data for an A-share stock.
 
         Parameters
         ----------
@@ -228,81 +229,100 @@ class EastMoneyFetcher:
         """
         ak = globals().get("akshare") or importlib.import_module("akshare")
 
-        indicators: list[str] | None = kwargs.get("indicators")
+        requested: list[str] | None = kwargs.get("indicators")
         period: str = kwargs.get("period", "quarterly")
+        wanted = set(requested) if requested else set(EASTMONEY_FIELD_MAP)
 
-        # Determine which akshare functions to call
-        if indicators is not None:
-            needed_funcs: set[str] = set()
-            for ind in indicators:
-                if ind in EASTMONEY_FIELD_MAP:
-                    needed_funcs.add(EASTMONEY_FIELD_MAP[ind][0])
-        else:
-            needed_funcs = set(_EASTMONEY_FUNCTIONS.keys())
+        # Determine which data sources are needed
+        need_abstract = any(
+            EASTMONEY_FIELD_MAP[ind][0] == "abstract"
+            for ind in wanted
+            if ind in EASTMONEY_FIELD_MAP
+        )
+        need_analysis = any(
+            EASTMONEY_FIELD_MAP[ind][0] == "analysis"
+            for ind in wanted
+            if ind in EASTMONEY_FIELD_MAP
+        )
 
-        # Call each needed function and collect partial DataFrames
-        parts: list[pd.DataFrame] = []
-        for func_name in needed_funcs:
-            func = getattr(ak, func_name)
-            raw = func(symbol=target)
-            if raw.empty:
-                continue
+        result_rows: dict[pd.Timestamp, dict[str, Any]] = {}
 
-            # Determine which columns to extract from this function
-            col_map: dict[str, str] = {}  # chinese -> english
-            for ind, (fn, cn_col) in EASTMONEY_FIELD_MAP.items():
-                if fn != func_name:
+        # --- stock_financial_abstract: pivot table (metrics × periods) ---
+        if need_abstract:
+            abstract_df = ak.stock_financial_abstract(symbol=target)
+            # Date columns are like "20240630"; filter to date-like columns
+            date_cols = [c for c in abstract_df.columns if c not in ("选项", "指标")]
+
+            for date_str in date_cols:
+                dt = pd.Timestamp(date_str)
+                if dt < pd.Timestamp(start) or dt > pd.Timestamp(end):
                     continue
-                if indicators is not None and ind not in indicators:
+                if dt not in result_rows:
+                    result_rows[dt] = {"publish_date": pd.NaT}
+
+                for ind in wanted:
+                    if ind not in EASTMONEY_FIELD_MAP:
+                        continue
+                    source, label = EASTMONEY_FIELD_MAP[ind]
+                    if source != "abstract" or label is None:
+                        continue
+                    # Find the row with matching metric label (take first match)
+                    match = abstract_df[abstract_df["指标"] == label]
+                    if match.empty:
+                        continue
+                    val = match.iloc[0][date_str]
+                    result_rows[dt][ind] = float(val) if pd.notna(val) else None
+
+        # --- stock_financial_analysis_indicator: flat table ---
+        if need_analysis:
+            start_year = str(pd.Timestamp(start).year)
+            analysis_df = ak.stock_financial_analysis_indicator(
+                symbol=target, start_year=start_year
+            )
+            for _, row in analysis_df.iterrows():
+                dt = pd.Timestamp(row["日期"])
+                if dt < pd.Timestamp(start) or dt > pd.Timestamp(end):
                     continue
-                col_map[cn_col] = ind
+                if dt not in result_rows:
+                    result_rows[dt] = {"publish_date": pd.NaT}
 
-            rename = {"报告期": "report_date"}
-            if "公告日期" in raw.columns:
-                rename["公告日期"] = "publish_date"
-            rename.update(col_map)
+                if "total_assets" in wanted:
+                    val = row.get("总资产(元)")
+                    result_rows[dt]["total_assets"] = float(val) if pd.notna(val) else None
 
-            keep_cols = [c for c in rename if c in raw.columns]
-            part = raw[keep_cols].rename(columns=rename)
-            part["report_date"] = pd.to_datetime(part["report_date"])
-            if "publish_date" in part.columns:
-                part["publish_date"] = pd.to_datetime(part["publish_date"])
-            parts.append(part)
+                # Compute total_shares from total_assets and book_value_per_share
+                if "total_shares" in wanted:
+                    assets = row.get("总资产(元)")
+                    bvps_raw = row.get("每股净资产_调整前(元)")
+                    if pd.notna(assets) and pd.notna(bvps_raw) and float(bvps_raw) != 0:
+                        equity_ratio = row.get("股东权益比率(%)")
+                        if pd.notna(equity_ratio):
+                            equity = float(assets) * float(equity_ratio) / 100
+                            result_rows[dt]["total_shares"] = equity / float(bvps_raw)
+                        else:
+                            result_rows[dt]["total_shares"] = None
+                    else:
+                        result_rows[dt]["total_shares"] = None
 
-        if not parts:
+        if not result_rows:
             msg = f"No data returned for '{target}' ({start}-{end})."
             raise DownloadError(msg)
 
-        # Merge all parts on report_date
-        merged = parts[0]
-        for part in parts[1:]:
-            # Drop publish_date from right side if already present
-            drop_cols = [c for c in ["publish_date"] if c in merged.columns and c in part.columns]
-            merged = merged.merge(
-                part.drop(columns=drop_cols, errors="ignore"),
-                on="report_date",
-                how="outer",
-            )
+        # Build DataFrame
+        df = pd.DataFrame.from_dict(result_rows, orient="index")
+        df.index.name = "report_date"
+        df = df.sort_index()
 
         # Add period column
-        merged["period"] = merged["report_date"].dt.month.apply(
-            lambda m: "annual" if m == 12 else "quarterly"
-        )
-
-        # Filter by date range
-        merged = merged[
-            (merged["report_date"] >= pd.Timestamp(start))
-            & (merged["report_date"] <= pd.Timestamp(end))
-        ]
+        df["period"] = df.index.month.map(lambda m: "annual" if m == 12 else "quarterly")
 
         # Filter by period
         if period == "annual":
-            merged = merged[merged["period"] == "annual"]
+            df = df[df["period"] == "annual"]
         elif period == "quarterly":
-            merged = merged[merged["period"] == "quarterly"]
+            df = df[df["period"] == "quarterly"]
 
-        merged = merged.set_index("report_date").sort_index()
-        return merged
+        return df
 
     def list_indicators(self) -> list[str]:
         """Return sorted list of available indicator names."""
