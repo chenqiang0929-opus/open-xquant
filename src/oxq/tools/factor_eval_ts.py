@@ -86,15 +86,18 @@ def _make_json_safe(obj: Any) -> Any:
         "Evaluate an indicator's time-series predictive power for one or more assets. "
         "Computes hit rate, decay curve, profit/loss ratio, cash period value, "
         "and optionally market state conditional analysis and multi-asset comparison. "
-        "Returns a structured evaluation report with PNG chart paths."
+        "Returns a structured evaluation report with PNG chart paths. "
+        "Supports two modes: (1) pass indicator name + params to compute factor values "
+        "automatically, or (2) pass factor_column to read pre-computed factor values "
+        "from a column in the market data (useful for composite/custom factors)."
     ),
 )
 def factor_evaluate_ts(
-    indicator: str,
-    params: dict[str, Any],
-    symbols: list[str],
-    start: str,
-    end: str,
+    indicator: str | None = None,
+    params: dict[str, Any] | None = None,
+    symbols: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
     data_dir: str | None = None,
     forward_periods: list[int] | None = None,
     signal_threshold: float = 0.0,
@@ -102,18 +105,39 @@ def factor_evaluate_ts(
     market_state_method: str | None = None,
     market_state_params: dict[str, Any] | None = None,
     exclude_limit_days: bool = False,
+    factor_column: str | None = None,
 ) -> dict[str, Any]:
-    """Evaluate an indicator's time-series predictive power."""
+    """Evaluate an indicator's time-series predictive power.
+
+    Two usage modes:
+
+    Mode 1 — Registered indicator:
+        factor_evaluate_ts(indicator="SMA", params={"period": 20}, symbols=["AAPL"], ...)
+
+    Mode 2 — Pre-computed factor column:
+        factor_evaluate_ts(factor_column="risk_adj_momentum", symbols=["AAPL"], ...)
+        The column must exist in the symbol's parquet file (e.g. added by engine_run).
+    """
+    if symbols is None or start is None or end is None:
+        return {"error": "symbols, start, and end are required."}
+
+    if indicator is None and factor_column is None:
+        return {"error": "Either indicator or factor_column must be provided."}
+
     if forward_periods is None:
         forward_periods = [1, 3, 5, 10, 20]
 
-    # -- Resolve indicator class ------------------------------------------------
-    indicators = list_indicators()
-    if indicator not in indicators:
-        return {"error": f"Unknown indicator '{indicator}'. Available: {sorted(indicators)}"}
+    if params is None:
+        params = {}
 
-    ind_cls = indicators[indicator]
-    ind_instance = ind_cls()
+    # -- Resolve indicator class (Mode 1) or validate factor_column (Mode 2) ---
+    ind_instance = None
+    if indicator is not None and factor_column is None:
+        indicators = list_indicators()
+        if indicator not in indicators:
+            return {"error": f"Unknown indicator '{indicator}'. Available: {sorted(indicators)}"}
+        ind_cls = indicators[indicator]
+        ind_instance = ind_cls()
 
     # -- Load market data -------------------------------------------------------
     # Load full data (not sliced by end) so prices extend beyond factor dates
@@ -132,12 +156,25 @@ def factor_evaluate_ts(
     if not mktdata_full:
         return {"error": f"No data found. {'; '.join(errors)}"}
 
-    # -- Compute indicator per symbol -------------------------------------------
-    # Compute indicator on the user-specified date range only.
+    # -- Compute or extract factor values per symbol ----------------------------
     factor_parts: list[pd.Series] = []
     for sym, df_full in mktdata_full.items():
         df_range = df_full.loc[:end]
-        vals = ind_instance.compute(df_range, **params)
+
+        if factor_column is not None:
+            # Mode 2: read pre-computed column
+            if factor_column not in df_range.columns:
+                return {
+                    "error": (
+                        f"Column '{factor_column}' not found in {sym}. "
+                        f"Available: {sorted(df_range.columns.tolist())}"
+                    ),
+                }
+            vals = df_range[factor_column]
+        else:
+            # Mode 1: compute indicator
+            vals = ind_instance.compute(df_range, **params)
+
         # Tag with (date, asset) MultiIndex
         mi = pd.MultiIndex.from_arrays(
             [vals.index, [sym] * len(vals)],
@@ -203,8 +240,8 @@ def factor_evaluate_ts(
     cp = summary["cash_period"]
 
     result = {
-        "indicator": indicator,
-        "params": params,
+        "indicator": indicator or factor_column,
+        "params": params if indicator else {"column": factor_column},
         "symbols": list(mktdata_full.keys()),
         "symbols_count": len(mktdata_full),
         "date_range": {"start": start, "end": end},

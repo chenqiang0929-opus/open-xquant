@@ -135,6 +135,49 @@ class TestFactorEvaluateTs:
         assert result["metrics"]["conditional"] is not None
         assert result["metrics"]["conditional"]["skipped"] is False
 
+    def test_factor_column_mode(self, data_dir: str) -> None:
+        """Mode 2: evaluate a pre-computed column instead of a registered indicator."""
+        # Add a custom factor column to the parquet files
+        for sym in ["AAPL"]:
+            path = Path(data_dir) / f"{sym}.parquet"
+            df = pd.read_parquet(path)
+            df["my_factor"] = df["close"].pct_change(5)
+            df.to_parquet(path)
+
+        result = factor_evaluate_ts(
+            factor_column="my_factor",
+            symbols=["AAPL"],
+            start="2023-01-01",
+            end="2023-12-31",
+            data_dir=data_dir,
+            forward_periods=[1, 5],
+            t1_offset=False,
+        )
+        assert "error" not in result
+        assert result["indicator"] == "my_factor"
+        assert "hit_rate" in result["metrics"]
+
+    def test_factor_column_missing_returns_error(self, data_dir: str) -> None:
+        result = factor_evaluate_ts(
+            factor_column="nonexistent_column",
+            symbols=["AAPL"],
+            start="2023-01-01",
+            end="2023-12-31",
+            data_dir=data_dir,
+            forward_periods=[1, 5],
+        )
+        assert "error" in result
+        assert "nonexistent_column" in result["error"]
+
+    def test_neither_indicator_nor_column_returns_error(self, data_dir: str) -> None:
+        result = factor_evaluate_ts(
+            symbols=["AAPL"],
+            start="2023-01-01",
+            end="2023-12-31",
+            data_dir=data_dir,
+        )
+        assert "error" in result
+
     def test_config_in_result(self, data_dir: str) -> None:
         result = factor_evaluate_ts(
             indicator="SMA",

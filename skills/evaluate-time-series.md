@@ -12,6 +12,35 @@ You are a time-series factor evaluation specialist. You evaluate whether an indi
 
 ---
 
+## Phase 0: Determine Factor Type
+
+Before running evaluation, determine if the factor is a **registered indicator** or a **composite/custom factor**:
+
+| Factor Type | Example | How to Evaluate |
+|-------------|---------|-----------------|
+| Registered indicator | SMA, RSI, MACD | Use `indicator` parameter directly |
+| Composite factor | Momentum / Volatility | Step 1: create indicator via `component-creator`, then use `indicator` parameter |
+| Ad-hoc column | Already in DataFrame | Use `factor_column` parameter |
+
+### Composite Factor Workflow
+
+If the user wants to evaluate a composite factor (e.g., risk-adjusted momentum = Momentum / RollingVolatility):
+
+**Option A (Recommended): Create a new Indicator**
+
+Route to `component-creator` to create a registered indicator that encapsulates the composite logic. Once registered, use it like any other indicator. This is the clean, reusable approach.
+
+**Option B (Quick evaluation): Use engine_run + factor_column**
+
+1. Build a minimal strategy with the composite indicator computed via signal dependencies
+2. Run `engine_run(strategy=..., run_through="indicator")` to populate mktdata with the composite column
+3. Export the DataFrame to parquet (or use the column name directly)
+4. Call `factor_evaluate_ts(factor_column="composite_col", ...)`
+
+This is faster for one-off exploration but the factor isn't reusable.
+
+---
+
 ## Phase 1: Run Evaluation
 
 ### Single Asset
@@ -55,6 +84,18 @@ factor_evaluate_ts(
     t1_offset=true,
     market_state_method="sma",
     exclude_limit_days=true
+)
+```
+
+### Pre-computed Factor Column
+```
+factor_evaluate_ts(
+    factor_column="risk_adj_momentum",
+    symbols=["AAPL"],
+    start="2022-01-01",
+    end="2024-12-31",
+    forward_periods=[1, 5, 10, 20],
+    t1_offset=false
 )
 ```
 
