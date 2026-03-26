@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from oxq.data.factors import INDICATOR_MAP, resolve_factor_dir
+from oxq.data.factors import MACRO_INDICATOR_MAP as INDICATOR_MAP, resolve_factor_dir
 from oxq.data.loaders import Downloader, resolve_data_dir
 from oxq.tools.registry import registry
 
@@ -109,12 +109,15 @@ def factor_download(
     data_dir: str | None = None,
 ) -> dict[str, Any]:
     """Download a macro indicator from World Bank and save locally."""
-    from oxq.data.factors import WorldBankDownloader
+    from oxq.data.factors import FactorDownloader, WorldBankFetcher
 
     dest = Path(data_dir) if data_dir else None
-    dl = WorldBankDownloader()
+    dl = FactorDownloader(WorldBankFetcher(), sub="macro")
     try:
-        path = dl.download(indicator, countries, start_year, end_year, dest_dir=dest)
+        path = dl.download(
+            indicator, str(start_year), str(end_year),
+            dest_dir=dest, countries=countries,
+        )
     except (ValueError, Exception) as exc:
         return {"error": str(exc)}
 
@@ -134,7 +137,8 @@ def factor_download(
 )
 def factor_list(data_dir: str | None = None) -> dict[str, Any]:
     """List locally available factor data files."""
-    path = resolve_factor_dir(Path(data_dir) if data_dir else None)
+    dest = Path(data_dir) if data_dir else None
+    path = resolve_factor_dir(dest, sub="macro")
     if not path.exists():
         return {"factors": [], "count": 0, "data_dir": str(path)}
     factors = sorted(p.stem for p in path.glob("*.parquet"))
@@ -150,7 +154,8 @@ def factor_inspect(
     data_dir: str | None = None,
 ) -> dict[str, Any]:
     """Inspect a locally stored factor file."""
-    path = resolve_factor_dir(Path(data_dir) if data_dir else None)
+    dest = Path(data_dir) if data_dir else None
+    path = resolve_factor_dir(dest, sub="macro")
     parquet_path = path / f"{indicator}.parquet"
     if not parquet_path.exists():
         return {
@@ -165,5 +170,108 @@ def factor_inspect(
         "year_range": [int(df.index.min()), int(df.index.max())],
         "rows": len(df),
         "missing_values": int(df.isna().sum().sum()),
+        "sample": df.tail(3).reset_index().astype(str).to_dict(orient="records"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Financial tools
+# ---------------------------------------------------------------------------
+
+
+@registry.tool(
+    name="financial_download",
+    description="Download financial statement data (eps, roe, revenue, etc.) for a stock",
+)
+def financial_download(
+    symbol: str,
+    start: str,
+    end: str,
+    source: str = "eastmoney",  # "eastmoney" | "yfinance"
+    indicators: list[str] | None = None,
+    period: str = "quarterly",
+    data_dir: str | None = None,
+) -> dict[str, Any]:
+    """Download financial data for a stock symbol."""
+    from oxq.data.factors import (
+        EastMoneyFetcher,
+        FactorDownloader,
+        YFinanceFinancialFetcher,
+        resolve_factor_dir,
+    )
+
+    dest = Path(data_dir) if data_dir else None
+
+    if source == "eastmoney":
+        fetcher = EastMoneyFetcher()
+    elif source == "yfinance":
+        fetcher = YFinanceFinancialFetcher()
+    else:
+        return {"error": f"Unknown source '{source}'. Use 'eastmoney' or 'yfinance'."}
+
+    dl = FactorDownloader(fetcher, sub="financial")
+    try:
+        path = dl.download(
+            symbol, start, end, dest_dir=dest,
+            indicators=indicators, period=period,
+        )
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    df = pd.read_parquet(path)
+    indicator_cols = [c for c in df.columns if c not in ("publish_date", "period")]
+    return {
+        "symbol": symbol,
+        "indicators": indicator_cols,
+        "rows": len(df),
+        "date_range": [str(df.index.min().date()), str(df.index.max().date())] if len(df) > 0 else [],
+        "path": str(path),
+    }
+
+
+@registry.tool(
+    name="financial_list",
+    description="List locally available financial data files",
+)
+def financial_list(data_dir: str | None = None) -> dict[str, Any]:
+    """List locally available financial data files."""
+    from oxq.data.factors import resolve_factor_dir
+
+    dest = Path(data_dir) if data_dir else None
+    path = resolve_factor_dir(dest, sub="financial")
+    if not path.exists():
+        return {"symbols": [], "count": 0, "data_dir": str(path)}
+    symbols = sorted(p.stem for p in path.glob("*.parquet"))
+    return {"symbols": symbols, "count": len(symbols), "data_dir": str(path)}
+
+
+@registry.tool(
+    name="financial_inspect",
+    description="Inspect financial data for a symbol (date range, indicators, sample)",
+)
+def financial_inspect(
+    symbol: str,
+    data_dir: str | None = None,
+) -> dict[str, Any]:
+    """Inspect a symbol's financial data."""
+    from oxq.data.factors import resolve_factor_dir
+
+    dest = Path(data_dir) if data_dir else None
+    path = resolve_factor_dir(dest, sub="financial")
+    parquet_path = path / f"{symbol}.parquet"
+    if not parquet_path.exists():
+        return {
+            "symbol": symbol,
+            "error": f"No financial data for '{symbol}'. Run financial_download first.",
+        }
+    df = pd.read_parquet(parquet_path)
+    indicator_cols = [c for c in df.columns if c not in ("publish_date", "period")]
+    return {
+        "symbol": symbol,
+        "rows": len(df),
+        "indicators": indicator_cols,
+        "date_range": [str(df.index.min().date()), str(df.index.max().date())] if len(df) > 0 else [],
+        "periods": sorted(df["period"].unique().tolist()) if "period" in df.columns else [],
+        "missing_values": int(df[indicator_cols].isna().sum().sum()),
         "sample": df.tail(3).reset_index().astype(str).to_dict(orient="records"),
     }

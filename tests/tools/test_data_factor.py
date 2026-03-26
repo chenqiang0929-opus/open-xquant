@@ -36,7 +36,7 @@ def _mock_urlopen(response_data: list) -> MagicMock:
 
 
 def _write_factor(tmp_path: Path, name: str = "gdp") -> Path:
-    factor_dir = tmp_path / "factor"
+    factor_dir = tmp_path / "macro"
     factor_dir.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(
         {"CHN": [14.7e12], "USA": [21.3e12]},
@@ -55,6 +55,8 @@ class TestFactorDownload:
         assert result["indicator"] == "gdp"
         assert sorted(result["countries"]) == ["CHN", "USA"]
         assert result["rows"] == 1
+        # Verify file is saved under macro subdirectory
+        assert (tmp_path / "macro" / "gdp.parquet").exists()
 
     def test_unknown_indicator(self, tmp_path: Path) -> None:
         result = factor_download("fake", ["USA"], data_dir=str(tmp_path))
@@ -69,17 +71,17 @@ class TestFactorList:
         assert result["count"] == 0
 
     def test_with_files(self, tmp_path: Path) -> None:
-        factor_dir = _write_factor(tmp_path, "gdp")
+        _write_factor(tmp_path, "gdp")
         _write_factor(tmp_path, "cpi")  # writes to same factor_dir
-        result = factor_list(data_dir=str(factor_dir))
+        result = factor_list(data_dir=str(tmp_path))
         assert sorted(result["factors"]) == ["cpi", "gdp"]
         assert result["count"] == 2
 
 
 class TestFactorInspect:
     def test_existing_factor(self, tmp_path: Path) -> None:
-        factor_dir = _write_factor(tmp_path, "gdp")
-        result = factor_inspect("gdp", data_dir=str(factor_dir))
+        _write_factor(tmp_path, "gdp")
+        result = factor_inspect("gdp", data_dir=str(tmp_path))
         assert result["indicator"] == "gdp"
         assert sorted(result["countries"]) == ["CHN", "USA"]
         assert result["rows"] == 1
