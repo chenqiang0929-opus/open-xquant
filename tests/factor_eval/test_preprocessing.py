@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from oxq.factor_eval.preprocessing import (
     apply_t1_offset,

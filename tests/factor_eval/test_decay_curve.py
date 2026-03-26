@@ -24,8 +24,6 @@ class TestComputeDecayCurve:
         dates = pd.date_range("2024-01-01", periods=80, freq="B")
         returns = np.random.randn(80) * 0.02
         prices_vals = 100 * np.exp(np.cumsum(returns))
-        prices = pd.DataFrame({"a": prices_vals}, index=dates)
-
         # Factor = next day return (shifted by -1)
         factor_values = pd.Series(
             returns[1:51],

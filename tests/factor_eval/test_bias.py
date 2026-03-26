@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from oxq.factor_eval.bias import detect_lookahead_bias
 
