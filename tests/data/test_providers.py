@@ -2,7 +2,7 @@ from typing import Any
 
 import pandas as pd
 
-from oxq.data.providers import Downloader, FactorFetcher, MarketDataProvider
+from oxq.data.providers import FactorFetcher, MarketDataProvider
 
 
 class FakeProvider:
@@ -42,7 +42,7 @@ class TestFactorFetcherProtocol:
 
 class TestDownloaderReexport:
     def test_import_from_providers(self) -> None:
-        from oxq.data.providers import Downloader as D1
-        from oxq.data.loaders import Downloader as D2
+        from oxq.data.loaders import Downloader as LoadersDownloader
+        from oxq.data.providers import Downloader as ProvidersDownloader
 
-        assert D1 is D2
+        assert ProvidersDownloader is LoadersDownloader

@@ -29,7 +29,12 @@ class TestFinancialInspect:
         fin_dir = tmp_path / "financial"
         fin_dir.mkdir(parents=True)
         df = pd.DataFrame(
-            {"publish_date": pd.to_datetime(["2024-08-24"]), "period": ["quarterly"], "eps": [29.42], "revenue": [8.69e10]},
+            {
+                "publish_date": pd.to_datetime(["2024-08-24"]),
+                "period": ["quarterly"],
+                "eps": [29.42],
+                "revenue": [8.69e10],
+            },
             index=pd.DatetimeIndex(["2024-06-30"], name="report_date"),
         )
         df.to_parquet(fin_dir / "600519.parquet")
@@ -45,5 +50,8 @@ class TestFinancialInspect:
 
 class TestFinancialDownload:
     def test_unknown_source(self, tmp_path: Path) -> None:
-        result = financial_download(symbol="600519", start="2024-01-01", end="2024-12-31", source="bloomberg", data_dir=str(tmp_path))
+        result = financial_download(
+            symbol="600519", start="2024-01-01", end="2024-12-31",
+            source="bloomberg", data_dir=str(tmp_path),
+        )
         assert "error" in result

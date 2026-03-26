@@ -7,7 +7,8 @@ from typing import Any
 
 import pandas as pd
 
-from oxq.data.factors import MACRO_INDICATOR_MAP as INDICATOR_MAP, resolve_factor_dir
+from oxq.data.factors import MACRO_INDICATOR_MAP as INDICATOR_MAP
+from oxq.data.factors import resolve_factor_dir
 from oxq.data.loaders import Downloader, resolve_data_dir
 from oxq.tools.registry import registry
 
@@ -197,7 +198,6 @@ def financial_download(
         EastMoneyFetcher,
         FactorDownloader,
         YFinanceFinancialFetcher,
-        resolve_factor_dir,
     )
 
     dest = Path(data_dir) if data_dir else None
