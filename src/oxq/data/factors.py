@@ -245,6 +245,8 @@ class EastMoneyFetcher:
         for func_name in needed_funcs:
             func = getattr(ak, func_name)
             raw = func(symbol=target)
+            if raw.empty:
+                continue
 
             # Determine which columns to extract from this function
             col_map: dict[str, str] = {}  # chinese -> english
@@ -300,11 +302,6 @@ class EastMoneyFetcher:
             merged = merged[merged["period"] == "quarterly"]
 
         merged = merged.set_index("report_date").sort_index()
-
-        if merged.empty:
-            msg = f"No data returned for '{target}' ({start}-{end})."
-            raise DownloadError(msg)
-
         return merged
 
     def list_indicators(self) -> list[str]:
