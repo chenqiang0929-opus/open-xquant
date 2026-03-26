@@ -309,6 +309,156 @@ class EastMoneyFetcher:
         return sorted(EASTMONEY_FIELD_MAP)
 
 
+# indicator -> (report_property, field_name) or None (computed)
+YFINANCE_FIELD_MAP: dict[str, tuple[str, str] | None] = {
+    "eps": ("financials", "Basic EPS"),
+    "revenue": ("financials", "Total Revenue"),
+    "net_income": ("financials", "Net Income"),
+    "roe": None,  # computed: net_income / equity
+    "total_assets": ("balance_sheet", "Total Assets"),
+    "book_value_per_share": None,  # computed: equity / shares
+    "operating_cash_flow": ("cashflow", "Operating Cash Flow"),
+    "total_shares": ("balance_sheet", "Ordinary Shares Number"),
+}
+
+# Fields needed for computed indicators
+_YFINANCE_EXTRA_FIELDS: dict[str, list[tuple[str, str]]] = {
+    "roe": [("financials", "Net Income"), ("balance_sheet", "Stockholders Equity")],
+    "book_value_per_share": [
+        ("balance_sheet", "Stockholders Equity"),
+        ("balance_sheet", "Ordinary Shares Number"),
+    ],
+}
+
+
+class YFinanceFinancialFetcher:
+    """Fetch US stock financial data via yfinance.
+
+    Implements the ``FactorFetcher`` protocol.
+    """
+
+    def fetch(
+        self,
+        target: str,
+        start: str,
+        end: str,
+        **kwargs: Any,
+    ) -> pd.DataFrame:
+        """Fetch financial statement data for a US stock.
+
+        Parameters
+        ----------
+        target : str
+            Ticker symbol (e.g. "AAPL").
+        start : str
+            Start date (inclusive), e.g. "2024-01-01".
+        end : str
+            End date (inclusive), e.g. "2024-12-31".
+        **kwargs
+            period : str — "quarterly" (default) or "annual".
+        """
+        yf = globals().get("yfinance") or importlib.import_module("yfinance")
+
+        period: str = kwargs.get("period", "quarterly")
+        ticker = yf.Ticker(target)
+
+        # Choose quarterly or annual properties
+        if period == "annual":
+            reports = {
+                "financials": ticker.financials,
+                "balance_sheet": ticker.balance_sheet,
+                "cashflow": ticker.cashflow,
+            }
+        else:
+            reports = {
+                "financials": ticker.quarterly_financials,
+                "balance_sheet": ticker.quarterly_balance_sheet,
+                "cashflow": ticker.quarterly_cashflow,
+            }
+
+        # Collect all needed (report, field) pairs
+        needed: set[tuple[str, str]] = set()
+        for ind, mapping in YFINANCE_FIELD_MAP.items():
+            if mapping is not None:
+                needed.add(mapping)
+            else:
+                for pair in _YFINANCE_EXTRA_FIELDS[ind]:
+                    needed.add(pair)
+
+        # Gather all report dates from all reports
+        all_dates: set[pd.Timestamp] = set()
+        for report_key, report_df in reports.items():
+            if report_df is not None and not report_df.empty:
+                all_dates.update(report_df.columns)
+
+        # Build rows for each report date
+        rows: list[dict[str, Any]] = []
+        for dt in sorted(all_dates):
+            row: dict[str, Any] = {"report_date": dt, "publish_date": pd.NaT}
+
+            # Determine period label
+            if period == "annual":
+                row["period"] = "annual"
+            else:
+                row["period"] = "annual" if dt.month == 12 else "quarterly"
+
+            # Extract raw values from reports
+            raw: dict[tuple[str, str], float | None] = {}
+            for report_key, field_name in needed:
+                report_df = reports.get(report_key)
+                if (
+                    report_df is not None
+                    and not report_df.empty
+                    and field_name in report_df.index
+                    and dt in report_df.columns
+                ):
+                    raw[(report_key, field_name)] = float(report_df.loc[field_name, dt])
+                else:
+                    raw[(report_key, field_name)] = None
+
+            # Fill direct-mapped indicators
+            for ind, mapping in YFINANCE_FIELD_MAP.items():
+                if mapping is not None:
+                    row[ind] = raw.get(mapping)
+
+            # Compute derived indicators
+            net_income = raw.get(("financials", "Net Income"))
+            equity = raw.get(("balance_sheet", "Stockholders Equity"))
+            shares = raw.get(("balance_sheet", "Ordinary Shares Number"))
+
+            if net_income is not None and equity and equity != 0:
+                row["roe"] = net_income / equity
+            else:
+                row["roe"] = None
+
+            if equity is not None and shares and shares != 0:
+                row["book_value_per_share"] = equity / shares
+            else:
+                row["book_value_per_share"] = None
+
+            rows.append(row)
+
+        if not rows:
+            msg = f"No data returned for '{target}' ({start}-{end})."
+            raise DownloadError(msg)
+
+        df = pd.DataFrame(rows)
+        df["report_date"] = pd.to_datetime(df["report_date"])
+
+        # Filter by date range
+        df = df[
+            (df["report_date"] >= pd.Timestamp(start))
+            & (df["report_date"] <= pd.Timestamp(end))
+        ]
+
+        df = df.set_index("report_date").sort_index()
+        return df
+
+    def list_indicators(self) -> list[str]:
+        """Return sorted list of available indicator names."""
+        return sorted(YFINANCE_FIELD_MAP)
+
+
 class FactorDownloader:
     """Download factor data via a FactorFetcher and persist locally.
 
