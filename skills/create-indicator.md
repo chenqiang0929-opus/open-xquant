@@ -72,6 +72,49 @@ Rules:
 - Prefer numpy, pandas, stdlib. If a third-party library is required, see **Dependency Handling** below
 - Match existing code style exactly (docstrings, type hints, spacing)
 
+### Composite Indicator Pattern
+
+When the user needs an indicator that combines multiple base indicators (e.g., risk-adjusted momentum = Momentum / RollingVolatility), create a **self-contained** indicator that internally computes its dependencies:
+
+```python
+"""Risk-adjusted momentum indicator."""
+
+from __future__ import annotations
+
+import pandas as pd
+
+from oxq.indicators.momentum import Momentum
+from oxq.indicators.rolling_volatility import RollingVolatility
+
+
+class RiskAdjustedMomentum:
+    """Momentum normalized by rolling volatility.
+
+    RiskAdjMom = Momentum_N / RollingVol_N
+    """
+
+    name = "RiskAdjustedMomentum"
+    formula = r"RiskAdjMom = \frac{Mom_N}{\sigma_N}"
+
+    def compute(
+        self,
+        mktdata: pd.DataFrame,
+        column: str = "close",
+        momentum_period: int = 20,
+        vol_period: int = 20,
+    ) -> pd.Series:
+        """Return momentum / volatility ratio."""
+        mom = Momentum().compute(mktdata, column=column, period=momentum_period)
+        vol = RollingVolatility().compute(mktdata, column=column, period=vol_period)
+        return mom / vol
+```
+
+**Key rules for composite indicators:**
+- Import and instantiate base indicators **inside the module** — do NOT assume they exist in mktdata columns
+- The `compute()` method must be self-contained: given raw mktdata (OHLCV), return the final result
+- Do NOT use `Ratio` or other column-referencing indicators — those require the Engine's dependency chain
+- Expose each base indicator's parameters separately (e.g., `momentum_period`, `vol_period`)
+
 ### Dependency Handling
 
 If the indicator requires a third-party library (e.g., `arch` for GARCH, `scipy` for special functions):

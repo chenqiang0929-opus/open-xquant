@@ -18,29 +18,50 @@ Before running evaluation, determine if the factor is a **registered indicator**
 
 | Factor Type | Example | How to Evaluate |
 |-------------|---------|-----------------|
-| Registered indicator | SMA, RSI, MACD | Use `indicator` parameter directly |
-| Composite factor | Momentum / Volatility | Step 1: create indicator via `component-creator`, then use `indicator` parameter |
-| Ad-hoc column | Already in DataFrame | Use `factor_column` parameter |
+| Registered indicator | SMA, RSI, MACD | Mode 1: `indicator` parameter directly |
+| Composite factor (reusable) | Momentum / Volatility | Create via `component-creator` first, then Mode 1 |
+| Composite factor (one-off) | Quick exploration | Mode 3: `engine_run` + `run_id` + `factor_column` |
+| Ad-hoc column | Already in parquet | Mode 2: `factor_column` parameter |
 
-### Composite Factor Workflow
+### Composite Factor: Option A (Recommended) — Create a Self-Contained Indicator
 
-If the user wants to evaluate a composite factor (e.g., risk-adjusted momentum = Momentum / RollingVolatility):
+Route to `component-creator` → `create-indicator`. The key is to create a **self-contained** composite indicator that internally computes its base indicators. Example:
 
-**Option A (Recommended): Create a new Indicator**
+```python
+# This is what component-creator will generate:
+class RiskAdjustedMomentum:
+    name = "RiskAdjustedMomentum"
 
-Route to `component-creator` to create a registered indicator that encapsulates the composite logic. Once registered, use it like any other indicator. This is the clean, reusable approach.
-
-**Option B (Quick evaluation): Use engine_run + run_id + factor_column**
-
-1. Build a minimal strategy with the composite indicator as a signal dependency
-2. Run `engine_run(strategy=..., run_through="indicator")` to compute all indicator columns → returns `run_id`
-3. Call `factor_evaluate_ts(run_id="...", factor_column="composite_col", symbols=[...], ...)`
-
-The tool reads mktdata directly from the engine's session result — no file export needed.
-
-Example workflow:
+    def compute(self, mktdata, column="close", momentum_period=20, vol_period=20):
+        mom = Momentum().compute(mktdata, column=column, period=momentum_period)
+        vol = RollingVolatility().compute(mktdata, column=column, period=vol_period)
+        return mom / vol
 ```
-# Step 1: Create strategy with composite indicator dependencies
+
+**Why this works:** The `compute()` method receives raw mktdata (OHLCV), internally creates and calls base Indicator instances, and returns the final result. No Engine dependency chain needed.
+
+**Why `Ratio` indicator doesn't work here:** `Ratio` expects `col_a` and `col_b` to already exist as columns in mktdata. When `factor_evaluate_ts` loads parquet data, only OHLCV columns exist — the base indicator columns haven't been computed yet. `Ratio` is designed for the Engine pipeline (which computes dependencies in order), not for standalone evaluation.
+
+After the indicator is created and registered, evaluate directly:
+```
+factor_evaluate_ts(
+    indicator="RiskAdjustedMomentum",
+    params={"momentum_period": 20, "vol_period": 20},
+    symbols=["AAPL"],
+    ...
+)
+```
+
+### Composite Factor: Option B (Quick One-Off) — engine_run + run_id
+
+For quick exploration without creating a reusable indicator:
+
+1. Build a minimal strategy that declares the full indicator dependency chain
+2. Run `engine_run(run_through="indicator")` — the Engine resolves the chain and writes all columns to mktdata → returns `run_id`
+3. Call `factor_evaluate_ts(run_id="...", factor_column="...")` — reads mktdata from session
+
+```
+# Step 1: Create strategy with indicator dependency chain
 strategy_create(name="eval_tmp", ...)
 strategy_add_signal(
     strategy="eval_tmp",
@@ -50,18 +71,18 @@ strategy_add_signal(
     indicators={
         "momentum": {"type": "Momentum", "params": {"period": 20}},
         "volatility": {"type": "RollingVolatility", "params": {"period": 20}},
-        "risk_adj_momentum": {"type": "Ratio", "params": {"numerator": "momentum", "denominator": "volatility"}},
+        "risk_adj_momentum": {"type": "Ratio", "params": {"col_a": "momentum", "col_b": "volatility"}},
     },
 )
 
-# Step 2: Run engine to compute indicator columns
+# Step 2: Engine computes full dependency chain
 engine_run(strategy="eval_tmp", start="2022-01-01", end="2024-12-31",
            symbols=["AAPL"], run_through="indicator")
-# → returns run_id like "eval_tmp_20240101_20241231"
+# → returns run_id
 
-# Step 3: Evaluate the composite column directly from session
+# Step 3: Evaluate the composite column from session
 factor_evaluate_ts(
-    run_id="eval_tmp_20240101_20241231",
+    run_id="eval_tmp_...",
     factor_column="risk_adj_momentum",
     symbols=["AAPL"],
     start="2022-01-01",
@@ -71,7 +92,9 @@ factor_evaluate_ts(
 )
 ```
 
-This is faster for one-off exploration but the factor isn't reusable across sessions.
+**When to use Option A vs B:**
+- Option A: User will reuse this factor across multiple evaluations or strategies
+- Option B: Quick one-off exploration, or the composite logic is too complex to encapsulate
 
 ---
 
