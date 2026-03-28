@@ -32,6 +32,7 @@ open-xquant/
 │   ├── rules/                      # 交易规则（止损、止盈、追踪止损、回撤熔断、条件退出）
 │   ├── portfolio/                  # 组合管理（组合优化器、持仓、订单簿、记账、绩效分析）
 │   ├── optimize/                   # 参数优化（网格/随机/贝叶斯搜索、滚动前推、统计检验）
+│   ├── factor_eval/                # 因子评估（IC、ICIR、衰减、换手率、Tearsheet）
 │   ├── trade/                      # 交易执行（SimBroker、LiveBroker、费率、滑点、OrderGenerator）
 │   ├── contrib/                    # 第三方券商/数据源集成（按券商组织）
 │   │   └── alpaca/                # Alpaca 集成（AlpacaClient、AlpacaMarketDataProvider）
@@ -40,8 +41,11 @@ open-xquant/
 │   ├── observe/                    # 可观测性（追踪、日志、事件总线、审计）
 │   └── tools/                      # 协议无关的 Tool 定义（核心资产）
 │
-├── mcp_server/                     # MCP 协议适配层（可选分发渠道）
-├── skills/                         # Agent Skill 定义（markdown）
+├── agent/                          # Agent 层（Skill + 分发 + 启动配置）
+│   ├── skills/                     # Agent Skill 定义（markdown 工作流）
+│   ├── mcp_server/                 # MCP 协议适配层（可选分发渠道）
+│   └── bootstrap/                  # Agent 启动文件（OpenClaw 等龙虾类 Agent）
+│
 ├── examples/                       # 示例策略、demo 应用、教程
 ├── tests/                          # 测试（镜像 src/oxq/ 结构）
 ├── docs/                           # 文档
@@ -56,17 +60,20 @@ open-xquant/
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│              Skill Layer (skill.md)                   │  ← Agent 工作流指导
-│  strategy-builder / engine-runner / tuner ...          │
+│              Agent Layer  (agent/)                     │  ← Agent 交付面
+│  ┌─────────────────┐  ┌──────────────────────────┐   │
+│  │ Skills (skill.md)│  │ Bootstrap (AGENT/SOUL/…) │   │
+│  │ 工作流指导        │  │ 龙虾类 Agent 启动配置     │   │
+│  └────────┬────────┘  └──────────────────────────┘   │
+│           ┆                                           │
+│     ┌─────┴─────────────────┐                        │
+│     │ MCP Server (可选分发层) │  ← 非 Coding AI 客户端 │
+│     │ agent/mcp_server/      │    协议适配             │
+│     └───────────────────────┘                        │
 ├──────────────────────────────────────────────────────┤
 │              SDK + Tool Layer                         │  ← 核心资产
 │  oxq.universe / oxq.core / oxq.trade / ...           │  Python SDK
 │  oxq.tools (协议无关的 Tool 定义)                     │  Tool 定义
-│          ┆                                            │
-│     ┌────┴──────────────────────┐                    │
-│     │ MCP Server (可选分发层)    │  ← 非 Coding AI    │
-│     │ mcp_server/               │    客户端适配       │
-│     └───────────────────────────┘                    │
 ├──────────────────────────────────────────────────────┤
 │              Engine Layer                             │  ← 纯计算，无 I/O
 │  Indicator → Universe → Signal → Portfolio → Rule → Broker │
@@ -553,7 +560,41 @@ wfa_results = walk_forward(strategy, paramset, data,
     optimize_metric="sharpe_ratio", anchored=False)
 ```
 
-### 5.11 统计检验 (oxq.optimize.validation)
+### 5.11 因子评估 (oxq.factor_eval)
+
+因子评估模块衡量 Indicator 作为 factor 的预测能力，分为截面评估和时序评估两个维度。
+
+核心数据结构：
+
+- **FactorBundle**：对齐的因子-行情数据容器，持有因子值、价格、前向收益率，并跟踪数据状态（对齐报告、涨跌停标记、停牌标记）
+- **AlignmentReport**：数据对齐质量报告（丢失率、多余日期、涨跌停/停牌天数）
+
+截面评估指标：
+
+| 指标 | 说明 |
+|------|------|
+| `compute_ic()` | 信息系数（因子与前向收益的 Pearson 相关） |
+| `compute_rank_ic()` | 排名 IC（Spearman 相关） |
+| `compute_icir()` | IC 信息比率（IC 均值 / IC 标准差） |
+| `compute_decay()` | IC 衰减分析（多持有期） |
+| `compute_turnover()` | 因子换手率 |
+
+时序评估指标：
+
+| 指标 | 说明 |
+|------|------|
+| `compute_hit_rate()` | 因子信号命中率 |
+| `compute_decay_curve()` | 多持有期衰减曲线 |
+| `compute_profit_loss_ratio()` | 盈亏比分析 |
+| `compute_cash_period_value()` | 空仓期价值 |
+| `compute_conditional_analysis()` | 条件分析（按市场状态分组） |
+| `compute_asset_comparison()` | 跨资产对比 |
+
+数据预处理：`apply_t1_offset()`（T+1 偏移）、`mark_limit_days()`（涨跌停标记）、`mark_suspension_days()`（停牌标记）。
+
+输出：`generate_tearsheet()` 生成完整评估报告（PNG 可视化）。
+
+### 5.12 统计检验 (oxq.optimize.validation)
 
 | 方法 | 用途 |
 |------|------|
@@ -565,7 +606,7 @@ wfa_results = walk_forward(strategy, paramset, data,
 | `cscv()` | 组合对称交叉验证 |
 | `oos_deterioration()` | 样本外退化度量 |
 
-### 5.12 可观测性 (oxq.observe)
+### 5.13 可观测性 (oxq.observe)
 
 - **DefaultTracer**：执行追踪，生命周期钩子（on_run_start、on_indicator、on_signal、on_rule、on_run_end），生成 TraceSpan
 - **AuditRecord**：审计日志，包含策略配置快照 + 四维哈希（mktdata_hash、trades_hash、equity_hash、result_hash）用于确定性验证
@@ -609,6 +650,8 @@ Tool 定义是框架的核心资产之一，与传输协议无关。每个 Tool 
 | **optimize** | `paramset_create` / `paramset_list` | 参数空间管理 |
 | | `grid_search` / `walk_forward` | 搜索方法 |
 | | `cross_validate` / `overfit_analysis` | 统计检验 |
+| **factor_eval** | `factor_evaluate` | 截面因子评估（IC、ICIR、RankIC、衰减、换手率） |
+| | `factor_evaluate_ts` | 时序因子评估（命中率、衰减曲线、盈亏比、Tearsheet） |
 | **observe** | `observe_trace` / `observe_audit_*` | 追踪与审计 |
 | | `observe_monitor_*` | 策略监控 |
 | | `observe_experiment_*` | 实验日志 |
@@ -618,26 +661,51 @@ Tool 定义是框架的核心资产之一，与传输协议无关。每个 Tool 
 
 ### 6.2 MCP Server（可选分发层）
 
-MCP Server 是 `oxq.tools` 的 MCP 协议适配，用于支持不能执行代码的 AI 客户端。MCP Server 不包含业务逻辑，只做协议适配和自动注册。Coding Agent 直接 `import oxq` 即可，不需要 MCP Server。
+MCP Server 位于 `agent/mcp_server/`，是 `oxq.tools` 的 MCP 协议适配，用于支持不能执行代码的 AI 客户端。MCP Server 不包含业务逻辑，只做协议适配和自动注册。Coding Agent 直接 `import oxq` 即可，不需要 MCP Server。
+
+除自动注册 SDK tools 外，MCP Server 还提供两个 MCP-only 工具：`get_current_date`（获取当前日期）和 `skill_list` / `skill_load`（列出和加载 Agent Skill）。
 
 ---
 
-## 7. Agent Skills
+## 7. Agent Layer（agent/）
+
+Agent 层是框架的 **Agent-First 交付面**，集中管理所有面向 AI Agent 的资源：Skills（工作流）、MCP Server（协议适配）、Bootstrap（启动配置）。
+
+### 7.1 Agent Skills（agent/skills/）
 
 每个 skill.md 描述一个完整的 Agent 工作流，指导 AI Agent 如何组合 tools 完成任务。
 
-| Skill | 状态 | 核心工作流 |
-|-------|------|-----------|
-| `strategy-builder.md` | 已实现 | 约束 → 目标 → 假设 → 数据 → 逐层构建 → 回测 |
-| `data-explorer.md` | 已实现 | 检查数据 → 下载行情/因子 → 质量检查 |
-| `backtest-runner.md` | 已重定向 | → strategy-builder |
-| `parameter-tuner.md` | 模板 | 参数优化 + 统计检验 |
-| `performance-reviewer.md` | 模板 | 绩效分析 + 归因 |
-| `risk-analyzer.md` | 模板 | 回撤分析 + 压力测试 |
-| `trade-executor.md` | 模板 | 订单生成 → 确认 → 监控 |
-| `strategy-monitor.md` | 模板 | 实盘监控 + 偏离检测 |
-| `universe-builder.md` | 模板 | Universe 构建 |
-| `live-trader.md` | 模板 | 实盘交易 |
+| Skill | 说明 |
+|-------|------|
+| `strategy-builder` | 约束 → 目标 → 假设 → 数据 → 逐层构建 → 回测 |
+| `data-explorer` | 检查数据 → 下载行情/因子 → 质量检查 |
+| `backtest-runner` | → 重定向至 strategy-builder |
+| `parameter-tuner` | 参数优化 + 统计检验 |
+| `performance-reviewer` | 绩效分析 + 归因 |
+| `trade-executor` | 订单生成 → 确认 → 监控 |
+| `strategy-monitor` | 实盘监控 + 偏离检测 |
+| `universe-builder` | Universe 构建 |
+| `live-trader` | Alpaca 模拟/实盘交易 |
+| `rule-builder` | 风控熔断、止损止盈、退出条件配置 + 回测 |
+| `chart-indicator` | 蜡烛图 + 指标叠加可视化 |
+| `component-creator` | 组件创建路由（检查注册中心 → 分发到子 skill） |
+| `create-indicator` | 创建 Indicator 组件（设计 → 编码 → 验证 → 注册） |
+| `create-signal` | 创建 Signal 组件 |
+| `create-rule` | 创建 Rule 组件 |
+| `create-portfolio-optimizer` | 创建 PortfolioOptimizer 组件 |
+| `factor-evaluator` | 因子评估路由（截面 vs 时序） |
+| `evaluate-cross-sectional` | 截面因子评估（IC、ICIR、RankIC、衰减、换手率） |
+| `evaluate-time-series` | 时序因子评估（命中率、衰减曲线、盈亏比、Tearsheet） |
+
+### 7.2 Bootstrap（agent/bootstrap/）
+
+为 OpenClaw 等龙虾类 Agent 提供启动配置文件：
+
+| 文件 | 用途 |
+|------|------|
+| `AGENT.md` | 标准操作规程（启动流程、工作流、红线） |
+| `SOUL.md` | Agent 人格与专业定位（量化研究专精） |
+| `TOOLS.md` | 环境与工具参考（MCP Server、Python 环境、示例目录） |
 
 ---
 
@@ -669,11 +737,13 @@ MCP Server 是 `oxq.tools` 的 MCP 协议适配，用于支持不能执行代码
 - `oxq.trade`: SimBroker, FeeModel, SlippageModel, OrderGenerator
 - `oxq.data`: LocalMarketDataProvider, YFinanceDownloader, AkShareDownloader, WorldBank 因子
 - `oxq.tools`: 40+ 个协议无关 Tool
-- `mcp_server`: FastMCP 适配层
-- `skills/`: strategy-builder, data-explorer 等 10 个 skill
+- `agent/mcp_server`: FastMCP 适配层
+- `agent/skills/`: strategy-builder, data-explorer, factor-evaluator 等 18 个 skill
+- `agent/bootstrap/`: OpenClaw 等龙虾类 Agent 启动配置
 
-### Phase 2: 参数优化 + 统计检验 ✅ 已完成
+### Phase 2: 参数优化 + 统计检验 + 因子评估 ✅ 已完成
 - `oxq.optimize`: ParameterSet, GridSearch, WalkForward, TimeSeriesCV, 过拟合分析
+- `oxq.factor_eval`: FactorBundle、截面评估（IC/ICIR/RankIC/衰减/换手率）、时序评估（命中率/衰减曲线/盈亏比/Tearsheet）
 - 未完成: `IndexUniverse`（Point-in-Time）
 
 ### Phase 3: 交易执行 + 可观测性 🔄 部分完成

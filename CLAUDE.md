@@ -7,8 +7,10 @@ open-xquant is an Agent First quantitative trading framework. See `README.md` fo
 ## Project Structure
 
 - `src/oxq/` — main Python package (pip install open-xquant)
-- `mcp_server/` — MCP protocol server exposing oxq as tools
-- `skills/` — Agent skill definitions (markdown)
+- `agent/` — Agent layer (skills, MCP server, bootstrap configs)
+  - `agent/skills/` — Agent skill definitions (markdown workflows)
+  - `agent/mcp_server/` — MCP protocol server exposing oxq as tools
+  - `agent/bootstrap/` — Agent startup files (OpenClaw etc.)
 - `examples/` — example strategies, demo apps, tutorials
 - `tests/` — mirrors src/oxq/ structure
 - `docs/` — documentation
@@ -42,7 +44,7 @@ When fixing a bug or updating logic in one module, always check and update all r
 ## Component Creation
 
 When a user needs a component that doesn't exist in oxq (Indicator, Signal, PortfolioOptimizer, or Rule),
-read and follow `skills/component-creator.md` to check the registry and route to the appropriate creation sub-skill.
+read and follow `agent/skills/component-creator.md` to check the registry and route to the appropriate creation sub-skill.
 
 **In this project**, the sub-skills use placeholder `{target_dir}` — replace with these concrete paths:
 - Component code: `src/oxq/{component_type}/{snake_name}.py`
