@@ -94,3 +94,38 @@ class TestFlattenEquity:
         df = _flatten_equity([])
         assert list(df.columns) == ["value"]
         assert len(df) == 0
+
+
+class TestFlattenTrades:
+    def test_basic(self) -> None:
+        from oxq.observe.export import _flatten_trades
+
+        result = _make_result()
+        df = _flatten_trades(result.trades)
+        assert len(df) == 2
+        assert list(df.columns) == [
+            "filled_at", "symbol", "side", "shares", "order_type",
+            "limit_price", "stop_price", "filled_price", "fee",
+        ]
+        # First trade: market order, no limit/stop
+        row0 = df.iloc[0]
+        assert row0["symbol"] == "AAPL"
+        assert row0["side"] == "BUY"
+        assert row0["shares"] == 100
+        assert row0["filled_price"] == 150.0
+        assert row0["fee"] == 0.0
+        assert pd.isna(row0["limit_price"])
+        assert pd.isna(row0["stop_price"])
+        # Second trade: limit order
+        row1 = df.iloc[1]
+        assert row1["symbol"] == "GOOG"
+        assert row1["order_type"] == "limit"
+        assert row1["limit_price"] == 100.50
+        assert row1["fee"] == 9.95
+
+    def test_empty(self) -> None:
+        from oxq.observe.export import _flatten_trades
+
+        df = _flatten_trades([])
+        assert len(df) == 0
+        assert "symbol" in df.columns
