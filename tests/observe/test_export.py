@@ -129,3 +129,37 @@ class TestFlattenTrades:
         df = _flatten_trades([])
         assert len(df) == 0
         assert "symbol" in df.columns
+
+
+class TestFlattenSnapshots:
+    def test_basic(self) -> None:
+        from oxq.observe.export import _flatten_snapshots
+
+        result = _make_result()
+        df = _flatten_snapshots(result.snapshots)
+        assert len(df) == 2
+        # Fixed columns
+        assert "cash" in df.columns
+        assert "total_value" in df.columns
+        # Dynamic columns for AAPL and GOOG
+        assert "tw_AAPL" in df.columns
+        assert "aw_AAPL" in df.columns
+        assert "pos_AAPL_shares" in df.columns
+        assert "pos_AAPL_avg_cost" in df.columns
+        assert "tw_GOOG" in df.columns
+        # Values from first snapshot
+        row0 = df.iloc[0]
+        assert row0["cash"] == 45000.0
+        assert row0["total_value"] == 100000.0
+        assert row0["tw_AAPL"] == 0.6
+        assert row0["aw_AAPL"] == 0.55
+        assert row0["pos_AAPL_shares"] == 100
+        assert row0["pos_AAPL_avg_cost"] == 150.0
+
+    def test_empty(self) -> None:
+        from oxq.observe.export import _flatten_snapshots
+
+        df = _flatten_snapshots([])
+        assert len(df) == 0
+        assert "cash" in df.columns
+        assert "total_value" in df.columns

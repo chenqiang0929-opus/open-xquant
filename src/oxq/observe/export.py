@@ -6,7 +6,7 @@ from typing import Any
 
 import pandas as pd
 
-from oxq.core.types import Fill
+from oxq.core.types import BarSnapshot, Fill
 
 _TRADE_COLUMNS = [
     "filled_at", "symbol", "side", "shares", "order_type",
@@ -32,6 +32,28 @@ def _flatten_trades(trades: list[Fill]) -> pd.DataFrame:
             "fee": float(f.fee),
         })
     return pd.DataFrame(rows, columns=_TRADE_COLUMNS)
+
+
+def _flatten_snapshots(snapshots: list[BarSnapshot]) -> pd.DataFrame:
+    """Flatten BarSnapshot list to a wide DataFrame with date index."""
+    if not snapshots:
+        return pd.DataFrame(columns=["date", "cash", "total_value"]).set_index("date")
+    rows = []
+    for snap in snapshots:
+        row: dict[str, Any] = {
+            "date": snap.date,
+            "cash": snap.cash,
+            "total_value": snap.total_value,
+        }
+        for sym in sorted(snap.target_weights):
+            row[f"tw_{sym}"] = snap.target_weights.get(sym, 0.0)
+            row[f"aw_{sym}"] = snap.adjusted_weights.get(sym, 0.0)
+        for sym in sorted(snap.positions):
+            ps = snap.positions[sym]
+            row[f"pos_{sym}_shares"] = ps.shares
+            row[f"pos_{sym}_avg_cost"] = ps.avg_cost
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("date")
 
 
 def _flatten_equity(equity_curve: list[tuple[Any, float]]) -> pd.DataFrame:
