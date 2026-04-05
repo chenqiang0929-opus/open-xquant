@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 from decimal import Decimal
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -163,3 +166,156 @@ class TestFlattenSnapshots:
         assert len(df) == 0
         assert "cash" in df.columns
         assert "total_value" in df.columns
+
+
+class TestSaveRunOutput:
+    def _make_audit(self, result: RunResult) -> "AuditRecord":
+        from oxq.observe.audit import AuditRecord
+        from oxq.observe.tracer import DefaultTracer
+
+        tracer = DefaultTracer()
+        tracer.on_run_start("test_strat", {"signals": {}})
+        tracer.on_run_end("ok")
+        return AuditRecord.build(
+            tracer=tracer,
+            result=result,
+            strategy_name="test_strat",
+            strategy_config={"signals": {}},
+            start_date="2024-01-01",
+            end_date="2024-01-07",
+            initial_cash=100_000.0,
+        )
+
+    def test_writes_all_files(self) -> None:
+        from oxq.observe.export import save_run_output
+
+        result = _make_result()
+        audit = self._make_audit(result)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            save_run_output(out, result, audit)
+
+            assert (out / "result.json").exists()
+            assert (out / "snapshots.parquet").exists()
+            assert (out / "trades.parquet").exists()
+            assert (out / "equity_curve.parquet").exists()
+            assert (out / "trace_spans.json").exists()
+            assert (out / "mktdata" / "AAPL.parquet").exists()
+            assert (out / "mktdata" / "GOOG.parquet").exists()
+
+    def test_result_json_structure(self) -> None:
+        from oxq.observe.export import save_run_output
+
+        result = _make_result()
+        audit = self._make_audit(result)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            save_run_output(out, result, audit)
+
+            data = json.loads((out / "result.json").read_text())
+            # metrics present
+            assert "metrics" in data
+            m = data["metrics"]
+            assert "total_return" in m
+            assert "sharpe_ratio" in m
+            assert "max_drawdown" in m
+            assert "annualized_return" in m
+            # audit_record present and recoverable
+            assert "audit_record" in data
+            from oxq.observe.audit import AuditRecord
+            recovered = AuditRecord.from_dict(data["audit_record"])
+            assert recovered.run_id == audit.run_id
+
+    def test_parquet_roundtrip(self) -> None:
+        from oxq.observe.export import save_run_output
+
+        result = _make_result()
+        audit = self._make_audit(result)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            save_run_output(out, result, audit)
+
+            eq = pd.read_parquet(out / "equity_curve.parquet")
+            assert len(eq) == 5
+            tr = pd.read_parquet(out / "trades.parquet")
+            assert len(tr) == 2
+            sn = pd.read_parquet(out / "snapshots.parquet")
+            assert len(sn) == 2
+            aapl = pd.read_parquet(out / "mktdata" / "AAPL.parquet")
+            assert len(aapl) == 5
+
+    def test_trace_spans_json(self) -> None:
+        from oxq.observe.export import save_run_output
+
+        result = _make_result()
+        audit = self._make_audit(result)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            save_run_output(out, result, audit)
+
+            spans = json.loads((out / "trace_spans.json").read_text())
+            assert isinstance(spans, list)
+            for span in spans:
+                assert "trace_id" in span
+                assert "component" in span
+
+    def test_mktdata_hash_matches_audit(self) -> None:
+        from oxq.observe.export import save_run_output
+        from oxq.observe.hashing import hash_mktdata
+
+        result = _make_result()
+        audit = self._make_audit(result)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            save_run_output(out, result, audit)
+
+            reloaded = {
+                p.stem: pd.read_parquet(p)
+                for p in (out / "mktdata").glob("*.parquet")
+            }
+            assert hash_mktdata(reloaded) == audit.mktdata_hash
+
+    def test_empty_result(self) -> None:
+        from oxq.observe.export import save_run_output
+
+        empty_result = RunResult(
+            portfolio=Portfolio(cash=Decimal("100000")),
+            trades=[],
+            equity_curve=[],
+            mktdata={},
+            snapshots=[],
+        )
+        audit = self._make_audit(empty_result)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            save_run_output(out, result=empty_result, audit=audit)
+
+            assert (out / "result.json").exists()
+            assert (out / "mktdata").is_dir()
+            eq = pd.read_parquet(out / "equity_curve.parquet")
+            assert len(eq) == 0
+
+    def test_metric_failure_writes_null(self) -> None:
+        from oxq.observe.export import save_run_output
+
+        one_point = RunResult(
+            portfolio=Portfolio(cash=Decimal("100000")),
+            trades=[],
+            equity_curve=[("2024-01-01", 100_000.0)],
+            mktdata={},
+            snapshots=[],
+        )
+        audit = self._make_audit(one_point)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            save_run_output(out, result=one_point, audit=audit)
+
+            data = json.loads((out / "result.json").read_text())
+            assert data["metrics"]["total_return"] == 0.0

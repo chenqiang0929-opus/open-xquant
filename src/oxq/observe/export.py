@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
+import json
+from dataclasses import asdict
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from oxq.core.types import BarSnapshot, Fill
+
+if TYPE_CHECKING:
+    from oxq.observe.audit import AuditRecord
+    from oxq.portfolio.analytics import RunResult
 
 _TRADE_COLUMNS = [
     "filled_at", "symbol", "side", "shares", "order_type",
@@ -62,3 +69,52 @@ def _flatten_equity(equity_curve: list[tuple[Any, float]]) -> pd.DataFrame:
         return pd.DataFrame(columns=["value"])
     dates, values = zip(*equity_curve)
     return pd.DataFrame({"value": values}, index=pd.Index(dates, name="date"))
+
+
+def save_run_output(
+    output_dir: Path, result: RunResult, audit: AuditRecord,
+) -> None:
+    """Write a complete engine run to a directory.
+
+    Files written:
+        result.json          — metrics + audit_record
+        mktdata/{symbol}.parquet  — market data per symbol
+        snapshots.parquet    — BarSnapshot sequence (flattened)
+        trades.parquet       — Fill records (flattened)
+        equity_curve.parquet — equity curve
+        trace_spans.json     — TraceSpan list
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    mktdata_dir = output_dir / "mktdata"
+    mktdata_dir.mkdir(exist_ok=True)
+
+    # -- metrics + audit → result.json --
+    metrics: dict[str, Any] = {}
+    for name in ("total_return", "sharpe_ratio", "max_drawdown", "annualized_return"):
+        try:
+            metrics[name] = getattr(result, name)()
+        except Exception:
+            metrics[name] = None
+
+    result_data = {
+        "metrics": metrics,
+        "audit_record": audit.to_dict(),
+    }
+    (output_dir / "result.json").write_text(
+        json.dumps(result_data, indent=2, default=str)
+    )
+
+    # -- mktdata --
+    for symbol, df in result.mktdata.items():
+        df.to_parquet(mktdata_dir / f"{symbol}.parquet")
+
+    # -- snapshots, trades, equity --
+    _flatten_snapshots(result.snapshots).to_parquet(output_dir / "snapshots.parquet")
+    _flatten_trades(result.trades).to_parquet(output_dir / "trades.parquet")
+    _flatten_equity(result.equity_curve).to_parquet(output_dir / "equity_curve.parquet")
+
+    # -- trace_spans --
+    spans = [asdict(s) for s in audit.trace_spans]
+    (output_dir / "trace_spans.json").write_text(
+        json.dumps(spans, indent=2, default=str)
+    )
