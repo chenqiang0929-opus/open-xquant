@@ -9,6 +9,7 @@ import pandas as pd
 
 from oxq.core.registry import list_indicators
 from oxq.data.loaders import resolve_data_dir
+from oxq.tools._coerce import coerce_compute_params
 from oxq.factor_eval import (
     compute_decay,
     compute_ic,
@@ -52,6 +53,7 @@ def factor_evaluate(
 
     ind_cls = indicators[indicator]
     ind_instance = ind_cls()
+    params = coerce_compute_params(ind_instance, params)
 
     # -- Load market data -------------------------------------------------------
     data_path = resolve_data_dir(Path(data_dir) if data_dir else None)

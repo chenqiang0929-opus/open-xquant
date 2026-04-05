@@ -11,6 +11,7 @@ import pandas as pd
 
 from oxq.core.registry import list_indicators
 from oxq.data.loaders import resolve_data_dir
+from oxq.tools._coerce import coerce_compute_params
 from oxq.factor_eval.bundle import create_bundle
 from oxq.factor_eval.preprocessing import (
     apply_t1_offset,
@@ -143,6 +144,7 @@ def factor_evaluate_ts(
             return {"error": f"Unknown indicator '{indicator}'. Available: {sorted(indicators)}"}
         ind_cls = indicators[indicator]
         ind_instance = ind_cls()
+        params = coerce_compute_params(ind_instance, params)
 
     # -- Load market data -------------------------------------------------------
     mktdata_full: dict[str, pd.DataFrame] = {}

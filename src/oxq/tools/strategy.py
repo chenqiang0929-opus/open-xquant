@@ -39,6 +39,8 @@ def _build_required_indicators(
 
     Returns a dict of (instance, params) tuples, or an error string.
     """
+    from oxq.tools._coerce import coerce_compute_params
+
     result: dict[str, tuple] = {}
     for ind_name, ind_def in indicators.items():
         ind_type = ind_def.get("type")
@@ -47,7 +49,9 @@ def _build_required_indicators(
         cls = INDICATOR_TYPES.get(ind_type)
         if cls is None:
             return f"Unknown indicator type '{ind_type}'. Available: {sorted(INDICATOR_TYPES)}"
-        result[ind_name] = (cls(), ind_def.get("params", {}))
+        instance = cls()
+        params = coerce_compute_params(instance, ind_def.get("params", {}))
+        result[ind_name] = (instance, params)
     return result
 
 

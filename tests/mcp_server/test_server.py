@@ -19,7 +19,7 @@ PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 def server_params() -> StdioServerParameters:
     return StdioServerParameters(
         command=sys.executable,
-        args=["-m", "mcp_server.server"],
+        args=["-m", "agent.mcp_server.server"],
         cwd=PROJECT_ROOT,
     )
 
