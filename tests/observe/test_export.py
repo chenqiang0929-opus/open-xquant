@@ -319,3 +319,10 @@ class TestSaveRunOutput:
 
             data = json.loads((out / "result.json").read_text())
             assert data["metrics"]["total_return"] == 0.0
+
+
+class TestPublicImport:
+    def test_import_from_observe(self) -> None:
+        from oxq.observe import save_run_output  # noqa: F401
+
+        assert callable(save_run_output)

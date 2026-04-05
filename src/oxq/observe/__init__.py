@@ -9,6 +9,7 @@ __all__ = [
     "MarketStateDetector",
     "StrategyMonitor",
     "TraceSpan",
+    "save_run_output",
 ]
 
 _IMPORTS = {
@@ -20,6 +21,7 @@ _IMPORTS = {
     "MarketStateDetector": "oxq.observe.detector",
     "StrategyMonitor": "oxq.observe.monitor",
     "TraceSpan": "oxq.observe.tracer",
+    "save_run_output": "oxq.observe.export",
 }
 
 
