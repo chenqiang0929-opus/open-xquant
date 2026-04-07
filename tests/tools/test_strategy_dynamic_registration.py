@@ -84,3 +84,77 @@ def test_strategy_add_signal_resolves_post_import_indicator():
     )
     assert "error" not in result, result
     assert result["signal"] == "probe"
+
+
+def test_strategy_inspect_output_is_json_safe():
+    """Plan 035 (xquant-studio wall #8): strategy_inspect must NEVER
+    return live Indicator instances or raw `(instance, params)` tuples
+    in any nested params dict. The cleaned shape is already surfaced
+    under the separate `indicators` key; the raw shape under
+    `params.required_indicators` was leaking into JSON consumers and
+    crashing SQLAlchemy autoflush."""
+    import json
+    from oxq.tools.strategy import (
+        strategy_add_rule,
+        strategy_add_signal,
+        strategy_create,
+        strategy_inspect,
+        strategy_set_portfolio,
+        strategy_set_universe,
+    )
+
+    register_indicator(_MockBetaInd)
+
+    strategy_create(
+        name="ji_strat",
+        hypothesis="json safety",
+        objectives={"sharpe": {"min": 0.0}},
+    )
+    strategy_set_universe(
+        strategy="ji_strat", type="static", symbols=["AAA", "BBB"]
+    )
+    strategy_add_signal(
+        strategy="ji_strat",
+        name="sig",
+        type="Threshold",
+        params={"column": "x", "threshold": 0, "direction": "above"},
+        indicators={"x": {"type": "Plan027MockBeta", "params": {"period": 60}}},
+    )
+    # TopNRanking with indicators — the wall #8 path.
+    strategy_set_portfolio(
+        strategy="ji_strat",
+        type="TopNRanking",
+        params={"score_col": "x", "n": 1},
+        indicators={"x": {"type": "Plan027MockBeta", "params": {"period": 60}}},
+    )
+    strategy_add_rule(
+        strategy="ji_strat",
+        name="rebal",
+        type="RebalanceFrequencyRule",
+        params={"interval_days": 5},
+    )
+
+    out = strategy_inspect(strategy="ji_strat")
+    assert "error" not in out, out
+
+    # Must round-trip through JSON without raising.
+    blob = json.dumps(out, default=str)
+    parsed = json.loads(blob)
+
+    # And no raw object addresses anywhere.
+    assert "object at 0x" not in blob, blob
+
+    # The portfolio's params dict must NOT contain required_indicators
+    # (the cleaned version lives under portfolio.indicators).
+    portfolio = parsed.get("portfolio", {})
+    portfolio_params = portfolio.get("params", {})
+    assert "required_indicators" not in portfolio_params, (
+        f"portfolio.params still leaks required_indicators: {portfolio_params}"
+    )
+
+    # Same for any rule.
+    for rule in parsed.get("rules", []):
+        rule_params = rule.get("params", {})
+        assert "required_indicators" not in rule_params, (
+            f"rule.params still leaks required_indicators: {rule_params}"
+        )

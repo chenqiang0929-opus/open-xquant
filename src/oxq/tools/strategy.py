@@ -248,10 +248,14 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
         signals_info[k] = info
 
     portfolio_info: dict[str, Any] = {"type": strat.portfolio.name}
-    # Show portfolio constructor params
+    # Show portfolio constructor params. Skip required_indicators here:
+    # the cleaned dict is surfaced separately under "indicators" via
+    # _fmt_indicators below, and the raw `(instance, params)` tuple
+    # format would crash any JSON consumer downstream
+    # (xquant-studio plan 035 wall #8).
     port_params = {
         k: v for k, v in vars(strat.portfolio).items()
-        if not k.startswith("_") and k != "name"
+        if not k.startswith("_") and k != "name" and k != "required_indicators"
     }
     if port_params:
         portfolio_info["params"] = port_params
@@ -262,10 +266,11 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
     rules_info = []
     for r in pending_rules:
         rule_item: dict[str, Any] = {"type": r.__class__.__name__, "name": r.name}
-        # Show rule constructor params
+        # Same skip as portfolio above — the raw tuple format would
+        # leak live Indicator instances into JSON consumers.
         rule_params = {
             k: v for k, v in vars(r).items()
-            if not k.startswith("_") and k != "name"
+            if not k.startswith("_") and k != "name" and k != "required_indicators"
         }
         if rule_params:
             rule_item["params"] = rule_params
