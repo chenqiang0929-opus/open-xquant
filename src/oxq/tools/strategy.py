@@ -20,11 +20,19 @@ from oxq.universe.static import StaticUniverse
 # ---------------------------------------------------------------------------
 # Type registries — delegated to core.registry
 # ---------------------------------------------------------------------------
-
-INDICATOR_TYPES = list_indicators()
-SIGNAL_TYPES = list_signals()
-RULE_TYPES = list_rules()
-PORTFOLIO_TYPES = list_portfolio_optimizers()
+#
+# INTENTIONAL: every consumer below calls list_indicators() / list_signals()
+# / list_rules() / list_portfolio_optimizers() PER CALL, not via a module-
+# level snapshot. Downstream consumers (notably xquant-studio's
+# component_create) register new components at runtime; a module-level
+# snapshot taken at import time would freeze the available set to the
+# built-ins and silently hide everything registered afterwards.
+#
+# Do not "optimize" this by reintroducing INDICATOR_TYPES / SIGNAL_TYPES /
+# RULE_TYPES / PORTFOLIO_TYPES module-level dicts. The cost of one dict()
+# copy per tool call is negligible (~50 entries); the cost of a stale
+# snapshot is a multi-hour debugging session — see
+# xquant-studio/docs/plans/2026-04-07-027-impl-component-create-registration-visibility.md.
 
 
 # ---------------------------------------------------------------------------
@@ -41,14 +49,16 @@ def _build_required_indicators(
     """
     from oxq.tools._coerce import coerce_compute_params
 
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
+    indicator_types = list_indicators()
     result: dict[str, tuple] = {}
     for ind_name, ind_def in indicators.items():
         ind_type = ind_def.get("type")
         if not ind_type:
             return f"Indicator '{ind_name}' missing 'type' field"
-        cls = INDICATOR_TYPES.get(ind_type)
+        cls = indicator_types.get(ind_type)
         if cls is None:
-            return f"Unknown indicator type '{ind_type}'. Available: {sorted(INDICATOR_TYPES)}"
+            return f"Unknown indicator type '{ind_type}'. Available: {sorted(indicator_types)}"
         instance = cls()
         params = coerce_compute_params(instance, ind_def.get("params", {}))
         result[ind_name] = (instance, params)
@@ -133,9 +143,11 @@ def strategy_add_signal(
     if strat is None:
         return {"error": f"Strategy '{strategy}' not found"}
 
-    cls = SIGNAL_TYPES.get(type)
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
+    signal_types = list_signals()
+    cls = signal_types.get(type)
     if cls is None:
-        return {"error": f"Unknown signal type '{type}'. Available: {sorted(SIGNAL_TYPES)}"}
+        return {"error": f"Unknown signal type '{type}'. Available: {sorted(signal_types)}"}
 
     signal = cls()
 
@@ -175,9 +187,11 @@ def strategy_add_rule(
     if strat is None:
         return {"error": f"Strategy '{strategy}' not found"}
 
-    cls = RULE_TYPES.get(type)
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
+    rule_types = list_rules()
+    cls = rule_types.get(type)
     if cls is None:
-        return {"error": f"Unknown rule type '{type}'. Available: {sorted(RULE_TYPES)}"}
+        return {"error": f"Unknown rule type '{type}'. Available: {sorted(rule_types)}"}
 
     rule_params = params or {}
     try:
@@ -283,9 +297,11 @@ def strategy_inspect(strategy: str) -> dict[str, Any]:
 )
 def indicator_describe(type: str) -> dict[str, Any]:
     """Return indicator metadata including LaTeX formula."""
-    cls = INDICATOR_TYPES.get(type)
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
+    indicator_types = list_indicators()
+    cls = indicator_types.get(type)
     if cls is None:
-        return {"error": f"Unknown indicator '{type}'. Available: {sorted(INDICATOR_TYPES)}"}
+        return {"error": f"Unknown indicator '{type}'. Available: {sorted(indicator_types)}"}
 
     sig = inspect.signature(cls().compute)
     params = {
@@ -309,6 +325,7 @@ def indicator_describe(type: str) -> dict[str, Any]:
 )
 def indicator_list() -> dict[str, Any]:
     """Return all indicator types with names, formulas, and descriptions."""
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
     return {
         "indicators": [
             {
@@ -316,7 +333,7 @@ def indicator_list() -> dict[str, Any]:
                 "formula": getattr(cls, "formula", ""),
                 "description": (cls.__doc__ or "").split("\n")[0].strip(),
             }
-            for name, cls in sorted(INDICATOR_TYPES.items())
+            for name, cls in sorted(list_indicators().items())
         ],
     }
 
@@ -332,9 +349,11 @@ def indicator_list() -> dict[str, Any]:
 )
 def signal_describe(type: str) -> dict[str, Any]:
     """Return signal metadata including parameters."""
-    cls = SIGNAL_TYPES.get(type)
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
+    signal_types = list_signals()
+    cls = signal_types.get(type)
     if cls is None:
-        return {"error": f"Unknown signal '{type}'. Available: {sorted(SIGNAL_TYPES)}"}
+        return {"error": f"Unknown signal '{type}'. Available: {sorted(signal_types)}"}
 
     sig = inspect.signature(cls().compute)
     params = {
@@ -356,13 +375,14 @@ def signal_describe(type: str) -> dict[str, Any]:
 )
 def signal_list() -> dict[str, Any]:
     """Return all signal types with names and descriptions."""
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
     return {
         "signals": [
             {
                 "name": name,
                 "description": (cls.__doc__ or "").split("\n")[0].strip(),
             }
-            for name, cls in sorted(SIGNAL_TYPES.items())
+            for name, cls in sorted(list_signals().items())
         ],
     }
 
@@ -378,9 +398,11 @@ def signal_list() -> dict[str, Any]:
 )
 def rule_describe(type: str) -> dict[str, Any]:
     """Return rule metadata including constructor parameters."""
-    cls = RULE_TYPES.get(type)
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
+    rule_types = list_rules()
+    cls = rule_types.get(type)
     if cls is None:
-        return {"error": f"Unknown rule '{type}'. Available: {sorted(RULE_TYPES)}"}
+        return {"error": f"Unknown rule '{type}'. Available: {sorted(rule_types)}"}
 
     sig = inspect.signature(cls.__init__)
     params = {
@@ -402,13 +424,14 @@ def rule_describe(type: str) -> dict[str, Any]:
 )
 def rule_list() -> dict[str, Any]:
     """Return all rule types with names and descriptions."""
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
     return {
         "rules": [
             {
                 "name": name,
                 "description": (cls.__doc__ or "").split("\n")[0].strip(),
             }
-            for name, cls in sorted(RULE_TYPES.items())
+            for name, cls in sorted(list_rules().items())
         ],
     }
 
@@ -489,9 +512,11 @@ def strategy_set_portfolio(
     if strat is None:
         return {"error": f"Strategy '{strategy}' not found"}
 
-    cls = PORTFOLIO_TYPES.get(type)
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
+    portfolio_types = list_portfolio_optimizers()
+    cls = portfolio_types.get(type)
     if cls is None:
-        return {"error": f"Unknown portfolio type '{type}'. Available: {sorted(PORTFOLIO_TYPES)}"}
+        return {"error": f"Unknown portfolio type '{type}'. Available: {sorted(portfolio_types)}"}
 
     try:
         optimizer = cls(**(params or {}))
@@ -520,13 +545,14 @@ def strategy_set_portfolio(
 )
 def portfolio_list() -> dict[str, Any]:
     """Return all portfolio optimizer types with descriptions."""
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
     return {
         "optimizers": [
             {
                 "name": name,
                 "description": (cls.__doc__ or "").split("\n")[0].strip(),
             }
-            for name, cls in sorted(PORTFOLIO_TYPES.items())
+            for name, cls in sorted(list_portfolio_optimizers().items())
         ],
     }
 
@@ -537,9 +563,11 @@ def portfolio_list() -> dict[str, Any]:
 )
 def portfolio_describe(type: str) -> dict[str, Any]:
     """Return portfolio optimizer metadata including constructor parameters."""
-    cls = PORTFOLIO_TYPES.get(type)
+    # Live registry per call — see module-top INTENTIONAL note (plan 027).
+    portfolio_types = list_portfolio_optimizers()
+    cls = portfolio_types.get(type)
     if cls is None:
-        return {"error": f"Unknown portfolio optimizer '{type}'. Available: {sorted(PORTFOLIO_TYPES)}"}
+        return {"error": f"Unknown portfolio optimizer '{type}'. Available: {sorted(portfolio_types)}"}
 
     sig = inspect.signature(cls.__init__)
     params = {

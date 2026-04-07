@@ -36,7 +36,7 @@ from oxq.indicators.ratio import Ratio
 from oxq.indicators.rolling_mdd import RollingMDD
 from oxq.indicators.rolling_volatility import RollingVolatility
 from oxq.indicators.sma import SMA
-from oxq.tools.strategy import INDICATOR_TYPES
+from oxq.core.registry import list_indicators
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -673,11 +673,13 @@ def test_indicator_has_formula(cls: type) -> None:
 
 
 def test_indicator_types_count() -> None:
-    """INDICATOR_TYPES registry should contain exactly 37 indicators."""
-    assert len(INDICATOR_TYPES) == 47
+    """The indicator registry should contain at least 47 built-in indicators."""
+    # >= rather than == because plan 027 makes the registry mutable at runtime;
+    # other tests in the same process may have registered mocks before this runs.
+    assert len(list_indicators()) >= 47
 
 
-@pytest.mark.parametrize("name,cls", sorted(INDICATOR_TYPES.items()), ids=lambda x: x if isinstance(x, str) else x.name)
+@pytest.mark.parametrize("name,cls", sorted(list_indicators().items()), ids=lambda x: x if isinstance(x, str) else x.name)
 def test_registry_indicator_has_formula(name: str, cls: type) -> None:
     """Every registered indicator must have a non-empty formula."""
     assert hasattr(cls, "formula"), f"{name} missing 'formula'"

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import pytest
 
+from oxq.core.registry import list_indicators, list_rules
 from oxq.tools import session
 from oxq.tools.strategy import (
-    INDICATOR_TYPES,
-    RULE_TYPES,
     indicator_describe,
     indicator_list,
     strategy_add_rule,
@@ -197,7 +196,7 @@ def test_indicator_describe_unknown() -> None:
 
 def test_indicator_describe_all_have_formula() -> None:
     """Every indicator returned by describe should have a non-empty formula."""
-    for name in INDICATOR_TYPES:
+    for name in list_indicators():
         result = indicator_describe(type=name)
         assert "error" not in result, f"{name} returned error"
         assert len(result["formula"]) > 0, f"{name} has empty formula"
@@ -210,7 +209,9 @@ def test_indicator_describe_all_have_formula() -> None:
 
 def test_indicator_list_count() -> None:
     result = indicator_list()
-    assert len(result["indicators"]) == 47
+    # >= rather than == because plan 027 made the registry mutable at runtime;
+    # other tests in the same process may have registered mocks before this runs.
+    assert len(result["indicators"]) >= 47
 
 
 def test_indicator_list_structure() -> None:
@@ -339,4 +340,4 @@ def test_rule_types_registry_completeness() -> None:
         "TakeProfitRule",
         "TrailingStopRule",
     }
-    assert set(RULE_TYPES.keys()) == expected
+    assert set(list_rules().keys()) == expected
