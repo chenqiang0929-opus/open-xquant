@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from oxq.data.factors import MACRO_INDICATOR_MAP as INDICATOR_MAP
@@ -45,6 +47,116 @@ def inspect_symbol(symbol: str, data_dir: str | None = None) -> dict[str, Any]:
         "missing_values": int(df.isna().sum().sum()),
         "sample_head": df.head(3).reset_index().astype(str).to_dict(orient="records"),
     }
+
+
+@registry.tool(
+    name="data_generate_mock",
+    description=(
+        "Generate synthetic OHLCV market data for the given symbols using a "
+        "geometric Brownian motion model. Writes parquet files into the data "
+        "dir, exactly where data_load_symbols would put real downloads. Use "
+        "when real market data is unavailable (e.g. yfinance not installed, "
+        "geo-blocked, or rate-limited) and the goal is to verify a strategy "
+        "pipeline rather than its actual returns. Deterministic given the seed."
+    ),
+)
+def data_generate_mock(
+    symbols: list[str],
+    start: str,
+    end: str,
+    seed: int = 42,
+    annualized_drift: float = 0.05,
+    annualized_vol: float = 0.20,
+    initial_price: float = 100.0,
+    data_dir: str | None = None,
+) -> dict[str, Any]:
+    """Generate synthetic OHLCV parquet files for *symbols* via GBM.
+
+    Each symbol gets its own deterministic path derived from
+    ``seed + (hash(symbol) & 0xffff)`` so the same call produces the same
+    data on every machine, but different symbols have different paths.
+
+    Output schema matches data_load_symbols / YFinanceDownloader exactly:
+    DatetimeIndex named 'date', columns ['open', 'high', 'low', 'close',
+    'volume'] with volume as int64. Daily, business-day frequency.
+    """
+    dest = Path(data_dir) if data_dir else None
+    out_dir = resolve_data_dir(dest)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    dates = pd.bdate_range(start=start, end=end, name="date")
+    n = len(dates)
+    if n == 0:
+        return {
+            "symbols": [],
+            "rows": {},
+            "data_dir": str(out_dir),
+            "errors": {sym: "empty date range" for sym in symbols},
+        }
+
+    mu_daily = annualized_drift / 252.0
+    sigma_daily = annualized_vol / math.sqrt(252.0)
+
+    rows: dict[str, int] = {}
+    errors: dict[str, str] = {}
+    for sym in symbols:
+        try:
+            sym_seed = (seed + (hash(sym) & 0xFFFF)) & 0xFFFFFFFF
+            rng = np.random.default_rng(sym_seed)
+
+            # Daily log-returns ~ N(mu_daily - 0.5*sigma^2, sigma_daily)
+            # (the -0.5*sigma^2 drift correction makes E[exp(r)] = exp(mu).)
+            log_rets = rng.normal(
+                loc=mu_daily - 0.5 * sigma_daily**2,
+                scale=sigma_daily,
+                size=n,
+            )
+            close = initial_price * np.exp(np.cumsum(log_rets))
+
+            # Open: close[t-1] perturbed by a small overnight jitter, with
+            # close[0]'s open seeded from initial_price.
+            overnight = rng.normal(loc=0.0, scale=sigma_daily * 0.5, size=n)
+            open_ = np.empty(n, dtype=float)
+            open_[0] = initial_price * float(np.exp(overnight[0]))
+            open_[1:] = close[:-1] * np.exp(overnight[1:])
+
+            # Intraday range jitter: build high/low to envelope (open, close).
+            range_jitter = np.abs(
+                rng.normal(loc=0.0, scale=sigma_daily * 0.7, size=n)
+            )
+            body_max = np.maximum(open_, close)
+            body_min = np.minimum(open_, close)
+            high = body_max * np.exp(range_jitter)
+            low = body_min * np.exp(-range_jitter)
+
+            # Volume: lognormal around a fixed mean. int64 per oxq schema.
+            vol_log = rng.normal(loc=14.0, scale=0.4, size=n)
+            volume = np.exp(vol_log).astype("int64")
+
+            df = pd.DataFrame(
+                {
+                    "open": open_,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": volume,
+                },
+                index=dates,
+            )
+            path = out_dir / f"{sym}.parquet"
+            df.to_parquet(path)
+            rows[sym] = len(df)
+        except Exception as exc:  # noqa: BLE001
+            errors[sym] = str(exc)
+
+    result: dict[str, Any] = {
+        "symbols": list(rows.keys()),
+        "rows": rows,
+        "data_dir": str(out_dir),
+    }
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 @registry.tool(
