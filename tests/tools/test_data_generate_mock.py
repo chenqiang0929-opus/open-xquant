@@ -32,7 +32,11 @@ def test_writes_parquet_with_correct_shape(tmp_path: Path):
         path = tmp_path / f"{sym}.parquet"
         assert path.exists(), f"{sym}.parquet missing"
         df = pd.read_parquet(path)
-        assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+        # Plan 036A: market column is now part of the standard schema
+        # so cross-asset indicators (CAPM Beta, market-neutral spreads,
+        # relative strength) can compute against a benchmark series
+        # without needing a separate data source.
+        assert set(df.columns) == {"open", "high", "low", "close", "volume", "market"}
         assert df.index.name == "date"
         assert df["volume"].dtype == "int64"
         assert len(df) > 0
@@ -93,6 +97,65 @@ def test_returns_same_shape_as_data_load_symbols(tmp_path: Path):
     for sym in ["S1", "S2", "S3"]:
         assert sym in result["rows"]
         assert result["rows"][sym] > 0
+
+
+def test_market_column_is_shared_across_symbols(tmp_path: Path):
+    """Plan 036A: every symbol's parquet must contain a 'market' column,
+    and that column must be IDENTICAL across all symbols (not symbol-
+    specific noise). This is the contract that lets cross-asset
+    indicators like CAPM Beta compute against a single benchmark
+    series via mktdata['market']."""
+    data_generate_mock(
+        symbols=["A", "B", "C"],
+        start="2024-01-01",
+        end="2024-06-30",
+        seed=99,
+        data_dir=str(tmp_path),
+    )
+    df_a = pd.read_parquet(tmp_path / "A.parquet")
+    df_b = pd.read_parquet(tmp_path / "B.parquet")
+    df_c = pd.read_parquet(tmp_path / "C.parquet")
+
+    assert "market" in df_a.columns
+    pd.testing.assert_series_equal(df_a["market"], df_b["market"], check_names=False)
+    pd.testing.assert_series_equal(df_a["market"], df_c["market"], check_names=False)
+
+    # Sanity: not constant, not NaN, same length as close column.
+    assert df_a["market"].notna().all()
+    assert df_a["market"].nunique() > 1
+    assert len(df_a["market"]) == len(df_a["close"])
+    # Market column index must align with the price index.
+    pd.testing.assert_index_equal(df_a["market"].index, df_a["close"].index)
+
+
+def test_market_column_enables_capm_beta_computation(tmp_path: Path):
+    """Plan 036A+B: a CAPM-style RollingBeta indicator must be
+    computable against the schema data_generate_mock now produces.
+    This pins the contract referenced in create-indicator.md so that
+    a regression in either side breaks the test."""
+    import pandas as pd
+
+    data_generate_mock(
+        symbols=["X", "Y"],
+        start="2023-01-01",
+        end="2024-12-31",
+        seed=7,
+        data_dir=str(tmp_path),
+    )
+    df_x = pd.read_parquet(tmp_path / "X.parquet")
+
+    # The exact RollingBeta template from create-indicator.md.
+    asset_returns = df_x["close"].pct_change()
+    market_returns = df_x["market"].pct_change()
+    period = 60
+    cov = asset_returns.rolling(period).cov(market_returns)
+    var = market_returns.rolling(period).var()
+    beta = cov / var
+
+    # Beyond the warm-up window, beta is finite and not all-zero.
+    tail = beta.iloc[period + 5:]
+    assert tail.notna().all()
+    assert tail.abs().sum() > 0
 
 
 def test_inspect_and_list_symbols_find_mock_data(tmp_path: Path):

@@ -97,6 +97,13 @@ def data_generate_mock(
     mu_daily = annualized_drift / 252.0
     sigma_daily = annualized_vol / math.sqrt(252.0)
 
+    # Plan 036A: Generate per-symbol DataFrames in pass 1, compute the
+    # synthetic market series (cross-sectional mean of close prices) in
+    # the middle, then write out parquet files in pass 2 with the market
+    # column attached. Cross-asset indicators (CAPM Beta, market-neutral
+    # spreads, relative strength) can read mktdata['market'] directly
+    # without needing a separate data source.
+    per_symbol: dict[str, pd.DataFrame] = {}
     rows: dict[str, int] = {}
     errors: dict[str, str] = {}
     for sym in symbols:
@@ -133,7 +140,7 @@ def data_generate_mock(
             vol_log = rng.normal(loc=14.0, scale=0.4, size=n)
             volume = np.exp(vol_log).astype("int64")
 
-            df = pd.DataFrame(
+            per_symbol[sym] = pd.DataFrame(
                 {
                     "open": open_,
                     "high": high,
@@ -143,6 +150,27 @@ def data_generate_mock(
                 },
                 index=dates,
             )
+        except Exception as exc:  # noqa: BLE001
+            errors[sym] = str(exc)
+
+    # Plan 036A: synthetic market series — cross-sectional mean of all
+    # successfully generated symbols' close prices. Single shared series,
+    # same index as the per-symbol price columns. Identical across every
+    # symbol so cross-asset indicators see one consistent benchmark.
+    if per_symbol:
+        market_series = (
+            pd.concat(
+                [df["close"].rename(sym) for sym, df in per_symbol.items()],
+                axis=1,
+            ).mean(axis=1)
+        )
+    else:
+        market_series = pd.Series(dtype=float, index=dates)
+
+    for sym, df in per_symbol.items():
+        try:
+            df = df.copy()
+            df["market"] = market_series
             path = out_dir / f"{sym}.parquet"
             df.to_parquet(path)
             rows[sym] = len(df)
