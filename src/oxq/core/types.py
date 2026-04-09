@@ -52,6 +52,7 @@ class Order:
     symbol: str
     side: Literal["BUY", "SELL"]
     shares: int
+    currency: str = "CNY"
     order_type: Literal[
         "market", "limit", "stop", "stop_limit", "trailing_stop"
     ] = "market"
@@ -125,8 +126,8 @@ class BarSnapshot:
 
     Attributes
     ----------
-    date : object
-        Bar date (pd.Timestamp or str).
+    date : pd.Timestamp
+        Bar date with timezone.
     target_weights : dict[str, float]
         Raw optimizer output (before rules).
     adjusted_weights : dict[str, float]
@@ -139,7 +140,7 @@ class BarSnapshot:
         Total portfolio value (cash + positions).
     """
 
-    date: object
+    date: pd.Timestamp
     target_weights: dict[str, float]
     adjusted_weights: dict[str, float]
     positions: dict[str, PositionSnapshot]
@@ -160,6 +161,7 @@ class Portfolio:
     """
 
     cash: Decimal
+    currency: str = "CNY"
     positions: dict[str, Position] = field(default_factory=dict)
     bar_prices: dict[str, Decimal] = field(default_factory=dict)
 

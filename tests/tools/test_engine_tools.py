@@ -23,7 +23,7 @@ def _reset_session():
 def sample_data_dir(tmp_path):
     """Create 120-bar trending data as AAPL.parquet."""
     n = 120
-    dates = pd.bdate_range("2024-01-01", periods=n)
+    dates = pd.bdate_range("2024-01-01", periods=n, tz="UTC")
     closes: list[float] = []
     for i in range(50):
         closes.append(200 - i * 2)       # 200 -> 102

@@ -95,13 +95,10 @@ class Engine:
         """
         self._strategy = strategy
         self._broker = broker
-        self._portfolio = Portfolio(cash=Decimal(str(initial_cash)))
         self._tracer = tracer
         self._rules: list[Rule] = rules or []
         self._lot_size = lot_size
         self._cash_annual_return = cash_annual_return
-        self._step_start = pd.Timestamp(start)
-
         if tracer:
             tracer.on_run_start(
                 strategy_name=strategy.name,
@@ -115,10 +112,42 @@ class Engine:
         for symbol in self._universe.symbols:
             load_start = data_start or start
             self._mktdata[symbol] = market.get_bars(symbol, load_start, end).copy()
+            # Require tz-aware index — data providers must supply timezone
+            if hasattr(self._mktdata[symbol].index, "tz") and self._mktdata[symbol].index.tz is None:
+                msg = (
+                    f"Market data for '{symbol}' has no timezone on index. "
+                    f"Data providers must supply tz-aware DatetimeIndex."
+                )
+                raise ValueError(msg)
             if "timezone" not in self._mktdata[symbol].attrs:
-                self._mktdata[symbol].attrs["timezone"] = "Asia/Shanghai"
+                tz = getattr(self._mktdata[symbol].index, "tz", None)
+                if tz is not None:
+                    self._mktdata[symbol].attrs["timezone"] = str(tz)
             if "currency" not in self._mktdata[symbol].attrs:
                 self._mktdata[symbol].attrs["currency"] = "CNY"
+
+        # -- Currency validation: all symbols must share same currency (v1) --
+        currencies = {
+            sym: self._mktdata[sym].attrs["currency"]
+            for sym in self._universe.symbols
+        }
+        unique_currencies = set(currencies.values())
+        if len(unique_currencies) > 1:
+            msg = (
+                f"Mixed currencies detected: {currencies}. "
+                f"v1 requires all symbols to share the same currency."
+            )
+            raise ValueError(msg)
+        run_currency = next(iter(unique_currencies))
+
+        self._portfolio = Portfolio(
+            cash=Decimal(str(initial_cash)), currency=run_currency,
+        )
+
+        # Set _step_start with matching timezone from the loaded data
+        first_sym = self._universe.symbols[0]
+        data_tz = getattr(self._mktdata[first_sym].index, "tz", None)
+        self._step_start = pd.Timestamp(start, tz=data_tz)
 
         # -- Benchmark data (recorded for post-run analysis) ----------
         self._benchmark_prices: dict[str, pd.Series] = {}
@@ -280,6 +309,7 @@ class Engine:
                 prices=bar_prices,
                 total_capital=total_capital,
                 lot_size=self._lot_size,
+                currency=portfolio.currency,
             )
             for p in planned:
                 broker.submit_order(p.order)
@@ -319,7 +349,7 @@ class Engine:
                 target_shares = int(pos.shares * target_ratio)
                 sell_shares = pos.shares - target_shares
                 if sell_shares > 0:
-                    broker.submit_order(Order(symbol=sym, side="SELL", shares=sell_shares))
+                    broker.submit_order(Order(symbol=sym, side="SELL", shares=sell_shares, currency=portfolio.currency))
 
             # ── Step 8: Broker executes exit orders ───────────────────
             broker.on_bar_close(mktdata, date)

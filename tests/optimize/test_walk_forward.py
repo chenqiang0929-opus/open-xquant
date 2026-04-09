@@ -36,7 +36,7 @@ class FakeMarketDataProvider:
 
     def get_bars(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         df = self._data[symbol]
-        return df[(df.index >= start) & (df.index <= end)]
+        return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
 
     def get_latest(self, symbol: str) -> pd.Series:
         return self._data[symbol].iloc[-1]
@@ -58,7 +58,7 @@ def _make_long_data(start: str, end: str) -> dict[str, pd.DataFrame]:
 
     Trending pattern: up -> down -> up cycle to ensure SMA crossovers.
     """
-    dates = pd.bdate_range(start, end)
+    dates = pd.bdate_range(start, end, tz="UTC")
     n = len(dates)
     # Create a sine-like pattern on top of an uptrend
     t = np.arange(n, dtype=float)

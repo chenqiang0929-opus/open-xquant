@@ -37,7 +37,7 @@ class FakeMarketDataProvider:
 
     def get_bars(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         df = self._data[symbol]
-        return df[(df.index >= start) & (df.index <= end)]
+        return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
 
     def get_latest(self, symbol: str) -> pd.Series:
         return self._data[symbol].iloc[-1]
@@ -56,7 +56,7 @@ def _make_result(values: list[float]) -> RunResult:
 
 def _make_long_data(start: str, end: str) -> dict[str, pd.DataFrame]:
     """Create market data spanning the given date range."""
-    dates = pd.bdate_range(start, end)
+    dates = pd.bdate_range(start, end, tz="UTC")
     n = len(dates)
     t = np.arange(n, dtype=float)
     closes = 100.0 + 0.1 * t + 20.0 * np.sin(2 * np.pi * t / 120)

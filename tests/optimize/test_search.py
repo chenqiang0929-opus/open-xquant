@@ -40,7 +40,7 @@ class FakeMarketDataProvider:
 
     def get_bars(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         df = self._data[symbol]
-        return df[(df.index >= start) & (df.index <= end)]
+        return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
 
     def get_latest(self, symbol: str) -> pd.Series:
         return self._data[symbol].iloc[-1]
@@ -60,7 +60,7 @@ def _make_result(values: list[float]) -> RunResult:
 
 def _make_trending_data(n: int = 120) -> dict[str, pd.DataFrame]:
     """Trending price data: down → up → down for SMA crossover signals."""
-    dates = pd.bdate_range("2024-01-01", periods=n)
+    dates = pd.bdate_range("2024-01-01", periods=n, tz="UTC")
     closes: list[float] = []
     for i in range(50):
         closes.append(200 - i * 2)       # 200 → 102

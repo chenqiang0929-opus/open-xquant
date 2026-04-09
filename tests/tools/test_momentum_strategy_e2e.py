@@ -41,7 +41,7 @@ def _reset_session():
 def data_dir(tmp_path):
     """Generate synthetic data for 3 ETFs with warmup period."""
     np.random.seed(42)
-    dates = pd.bdate_range(DATA_START, END)
+    dates = pd.bdate_range(DATA_START, END, tz="UTC")
     n = len(dates)
 
     # 513100: strong uptrend (like Nasdaq)

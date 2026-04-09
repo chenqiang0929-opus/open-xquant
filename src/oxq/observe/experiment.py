@@ -90,6 +90,7 @@ class ExperimentLog:
             "sharpe_ratio": result.sharpe_ratio(),
             "max_drawdown": result.max_drawdown(),
             "annualized_return": result.annualized_return(),
+            "currency": result.portfolio.currency,
         }
 
         for key in strategy.objectives:

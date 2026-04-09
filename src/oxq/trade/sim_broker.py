@@ -132,7 +132,7 @@ class SimBroker:
                 if triggered and order.stop_price is not None:
                     fill_price = self._apply_slippage(order, order.stop_price)
                     fee = self._calc_fee(order, fill_price)
-                    fill = self._order_book.fill(managed, fill_price, str(date), fee)
+                    fill = self._order_book.fill(managed, fill_price, date.isoformat(), fee)
                     self._fills.append(fill)
 
             elif order.order_type == "limit":
@@ -140,7 +140,7 @@ class SimBroker:
                 if triggered and order.limit_price is not None:
                     fill_price = order.limit_price
                     fee = self._calc_fee(order, fill_price)
-                    fill = self._order_book.fill(managed, fill_price, str(date), fee)
+                    fill = self._order_book.fill(managed, fill_price, date.isoformat(), fee)
                     self._fills.append(fill)
 
             elif order.order_type == "trailing_stop":
@@ -153,7 +153,7 @@ class SimBroker:
                 if close <= stop_level:
                     fill_price = self._apply_slippage(order, stop_level)
                     fee = self._calc_fee(order, fill_price)
-                    fill = self._order_book.fill(managed, fill_price, str(date), fee)
+                    fill = self._order_book.fill(managed, fill_price, date.isoformat(), fee)
                     self._fills.append(fill)
 
     def fill_market_orders(
@@ -177,7 +177,7 @@ class SimBroker:
                 continue
             fill_price = self._apply_slippage(order, raw_price)
             fee = self._calc_fee(order, fill_price)
-            fill = self._order_book.fill(managed, fill_price, str(date), fee)
+            fill = self._order_book.fill(managed, fill_price, date.isoformat(), fee)
             self._fills.append(fill)
         self._pending_market = still_pending
 

@@ -71,7 +71,7 @@ class FakeMarket:
 
 
 def _make_market() -> FakeMarket:
-    dates = pd.bdate_range("2024-01-01", periods=60)
+    dates = pd.bdate_range("2024-01-01", periods=60, tz="UTC")
     prices = [100.0 + i * 0.5 for i in range(60)]
     df = pd.DataFrame({
         "open": prices,

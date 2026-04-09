@@ -112,8 +112,8 @@ def ensure_data(tickers: list[str]) -> Path:
                     ticker_df = ticker_df[cols]
                     ticker_df["volume"] = ticker_df["volume"].astype("int64")
                     ticker_df = ticker_df.rename_axis("date")
-                    if hasattr(ticker_df.index, "tz") and ticker_df.index.tz is not None:
-                        ticker_df = ticker_df.tz_localize(None)
+                    if not hasattr(ticker_df.index, "tz") or ticker_df.index.tz is None:
+                        ticker_df.index = ticker_df.index.tz_localize("UTC")
                     ticker_df.to_parquet(data_dir / f"{ticker}.parquet")
                     done += 1
                 except Exception:

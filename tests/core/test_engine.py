@@ -22,7 +22,7 @@ class FakeMarketDataProvider:
 
     def get_bars(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         df = self._data[symbol]
-        return df[(df.index >= start) & (df.index <= end)]
+        return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
 
     def get_latest(self, symbol: str) -> pd.Series:
         return self._data[symbol].iloc[-1]
@@ -37,7 +37,7 @@ def _make_trending_data() -> dict[str, pd.DataFrame]:
     - Bars 90-119: downtrend 182 -> 122 (SMA10 crosses below SMA50 -> death cross)
     """
     n = 120
-    dates = pd.bdate_range("2024-01-01", periods=n)
+    dates = pd.bdate_range("2024-01-01", periods=n, tz="UTC")
     closes: list[float] = []
     for i in range(50):
         closes.append(200 - i * 2)       # 200 -> 102
@@ -238,7 +238,7 @@ def test_engine_sets_dataframe_attrs() -> None:
 
     df = result.mktdata["AAPL"]
     assert "timezone" in df.attrs
-    assert df.attrs["timezone"] == "Asia/Shanghai"
+    assert df.attrs["timezone"] == "UTC"
     assert "currency" in df.attrs
     assert df.attrs["currency"] == "CNY"
 
@@ -293,7 +293,7 @@ def test_engine_collects_indicators_from_all_modules() -> None:
 
 def test_engine_benchmarks() -> None:
     """Verify benchmark prices recorded."""
-    dates = pd.bdate_range("2024-01-01", periods=5)
+    dates = pd.bdate_range("2024-01-01", periods=5, tz="UTC")
     bench_closes = [100.0, 102.0, 104.0, 106.0, 108.0]
     aapl_closes = [50.0, 51.0, 52.0, 53.0, 54.0]
 
@@ -366,7 +366,7 @@ class NeverBuyOptimizer:
 
 def test_engine_lot_size() -> None:
     """lot_size=100 rounds trade shares to multiples of 100."""
-    dates = pd.bdate_range("2024-01-01", periods=3)
+    dates = pd.bdate_range("2024-01-01", periods=3, tz="UTC")
     closes = [1.0, 1.0, 1.0]
 
     data = {
@@ -411,7 +411,7 @@ def test_engine_lot_size() -> None:
 
 def test_engine_cash_annual_return() -> None:
     """cash_annual_return accrues interest on idle cash."""
-    dates = pd.bdate_range("2024-01-01", periods=5)
+    dates = pd.bdate_range("2024-01-01", periods=5, tz="UTC")
     closes = [100.0] * 5
 
     data = {

@@ -15,14 +15,14 @@ class FakeMarketDataProvider:
 
     def get_bars(self, symbol: str, start: str, end: str) -> pd.DataFrame:
         df = self._data[symbol]
-        return df[(df.index >= start) & (df.index <= end)]
+        return df[(df.index >= pd.Timestamp(start, tz="UTC")) & (df.index <= pd.Timestamp(end, tz="UTC"))]
 
     def get_latest(self, symbol: str) -> pd.Series:
         return self._data[symbol].iloc[-1]
 
 
 def _make_simple_data(n: int = 5) -> dict[str, pd.DataFrame]:
-    dates = pd.bdate_range("2024-01-01", periods=n)
+    dates = pd.bdate_range("2024-01-01", periods=n, tz="UTC")
     closes = [100.0 + i for i in range(n)]
     return {
         "AAA": pd.DataFrame(

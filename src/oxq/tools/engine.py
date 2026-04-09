@@ -123,6 +123,7 @@ def engine_run(
         "run_id": run_id,
         "portfolio": {
             "cash": float(result.portfolio.cash),
+            "currency": result.portfolio.currency,
             "positions": positions,
             "total_value": total_value,
         },
@@ -203,6 +204,7 @@ def engine_results(run_id: str) -> dict[str, Any]:
 
     return {
         "run_id": run_id,
+        "currency": result.portfolio.currency,
         "metrics": metrics,
         "objectives_check": objectives_check,
     }
@@ -227,6 +229,7 @@ def engine_trade_list(run_id: str) -> dict[str, Any]:
             "price": float(fill.filled_price),
             "fee": float(fill.fee),
             "date": fill.filled_at,
+            "currency": fill.order.currency,
         }
         for fill in result.trades
     ]

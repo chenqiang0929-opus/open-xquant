@@ -42,6 +42,7 @@ def generate_orders(
     prices: dict[str, Decimal],
     total_capital: Decimal,
     lot_size: int = 1,
+    currency: str = "CNY",
 ) -> list[PlannedOrder]:
     """Generate a trade plan from target weights.
 
@@ -95,7 +96,7 @@ def generate_orders(
 
         planned.append(
             PlannedOrder(
-                order=Order(symbol=symbol, side=side, shares=shares),
+                order=Order(symbol=symbol, side=side, shares=shares, currency=currency),
                 current_shares=current_shares,
                 target_shares=target_shares,
                 current_weight=current_weight,
