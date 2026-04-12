@@ -124,3 +124,59 @@ class TestVerifyManifest:
         result = verify_manifest(sample_parquet)
         assert result.status == "corrupted"
         assert result.provider == "yfinance"
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — manifest written as side effect of downloaders / mock
+# ---------------------------------------------------------------------------
+
+
+class TestMockGeneratorManifest:
+    """data_generate_mock must produce a .manifest.json per symbol."""
+
+    def test_mock_manifest_written(self, tmp_path: Path) -> None:
+        from oxq.tools.data import data_generate_mock
+
+        data_generate_mock(
+            symbols=["A", "B"],
+            start="2024-01-01",
+            end="2024-03-31",
+            seed=42,
+            data_dir=str(tmp_path),
+        )
+        for sym in ["A", "B"]:
+            manifest_path = tmp_path / f"{sym}.manifest.json"
+            assert manifest_path.exists(), f"{sym}.manifest.json missing"
+            data = read_manifest(manifest_path)
+            assert data["provider"] == "mock"
+            assert data["symbol"] == sym
+            assert data["extra"]["seed"] == 42
+
+    def test_mock_manifest_verifies_as_mock(self, tmp_path: Path) -> None:
+        from oxq.tools.data import data_generate_mock
+
+        data_generate_mock(
+            symbols=["X"],
+            start="2024-01-01",
+            end="2024-03-31",
+            data_dir=str(tmp_path),
+        )
+        result = verify_manifest(tmp_path / "X.parquet")
+        assert result.status == "mock"
+        assert result.provider == "mock"
+
+    def test_mock_manifest_sha256_matches_parquet(self, tmp_path: Path) -> None:
+        import hashlib
+
+        from oxq.tools.data import data_generate_mock
+
+        data_generate_mock(
+            symbols=["Z"],
+            start="2024-01-01",
+            end="2024-03-31",
+            data_dir=str(tmp_path),
+        )
+        parquet_path = tmp_path / "Z.parquet"
+        data = read_manifest(tmp_path / "Z.manifest.json")
+        expected = hashlib.sha256(parquet_path.read_bytes()).hexdigest()
+        assert data["sha256"] == expected
