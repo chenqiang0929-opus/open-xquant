@@ -7,7 +7,12 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from oxq.data.manifest import ManifestVerification, read_manifest, write_manifest
+from oxq.data.manifest import (
+    ManifestVerification,
+    read_manifest,
+    verify_manifest,
+    write_manifest,
+)
 
 
 @pytest.fixture()
@@ -77,3 +82,51 @@ class TestWriteAndReadManifest:
         bad = tmp_path / "bad.manifest.json"
         bad.write_text("not json{{{")
         assert read_manifest(bad) is None
+
+
+class TestVerifyManifest:
+    def test_real(self, sample_parquet: Path) -> None:
+        write_manifest(
+            parquet_path=sample_parquet,
+            symbol="TEST",
+            provider="yfinance",
+            start="2024-01-01",
+            end="2024-12-31",
+            rows=1,
+        )
+        result = verify_manifest(sample_parquet)
+        assert result.status == "real"
+        assert result.provider == "yfinance"
+
+    def test_mock(self, sample_parquet: Path) -> None:
+        write_manifest(
+            parquet_path=sample_parquet,
+            symbol="TEST",
+            provider="mock",
+            start="2024-01-01",
+            end="2024-12-31",
+            rows=1,
+        )
+        result = verify_manifest(sample_parquet)
+        assert result.status == "mock"
+        assert result.provider == "mock"
+
+    def test_missing(self, sample_parquet: Path) -> None:
+        result = verify_manifest(sample_parquet)
+        assert result.status == "missing"
+        assert result.provider is None
+
+    def test_corrupted(self, sample_parquet: Path) -> None:
+        write_manifest(
+            parquet_path=sample_parquet,
+            symbol="TEST",
+            provider="yfinance",
+            start="2024-01-01",
+            end="2024-12-31",
+            rows=1,
+        )
+        # Tamper with parquet after manifest was written
+        sample_parquet.write_bytes(b"tampered data")
+        result = verify_manifest(sample_parquet)
+        assert result.status == "corrupted"
+        assert result.provider == "yfinance"
