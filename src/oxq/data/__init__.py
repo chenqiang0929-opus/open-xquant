@@ -14,6 +14,12 @@ from oxq.data.loaders import (
     YFinanceDownloader,
     resolve_data_dir,
 )
+from oxq.data.manifest import (
+    ManifestVerification,
+    read_manifest,
+    verify_manifest,
+    write_manifest,
+)
 from oxq.data.market import LocalMarketDataProvider
 from oxq.data.providers import FactorFetcher, MarketDataProvider
 
@@ -24,6 +30,7 @@ __all__ = [
     "FactorDownloader",
     "FactorFetcher",
     "LocalMarketDataProvider",
+    "ManifestVerification",
     "MarketDataAdapter",
     "MarketDataProvider",
     "WorldBankDownloader",
@@ -31,6 +38,9 @@ __all__ = [
     "YFinanceDownloader",
     "YFinanceFinancialFetcher",
     "read_factor",
+    "read_manifest",
     "resolve_data_dir",
     "resolve_factor_dir",
+    "verify_manifest",
+    "write_manifest",
 ]
