@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from oxq.core.errors import DownloadError
+from oxq.data.manifest import write_manifest
 from oxq.data.providers import Downloader
 
 __all__ = ["AkShareDownloader", "Downloader", "YFinanceDownloader", "resolve_data_dir"]
@@ -63,6 +64,15 @@ class YFinanceDownloader:
         df = _normalize_df(df)
         path = data_dir / f"{symbol}.parquet"
         df.to_parquet(path)
+        write_manifest(
+            parquet_path=path,
+            symbol=symbol,
+            provider="yfinance",
+            start=start,
+            end=end,
+            rows=len(df),
+            extra={"auto_adjust": self.auto_adjust},
+        )
         return path
 
     def download_many(
@@ -116,6 +126,15 @@ class AkShareDownloader:
 
         path = data_dir / f"{symbol}.parquet"
         df.to_parquet(path)
+        write_manifest(
+            parquet_path=path,
+            symbol=symbol,
+            provider="akshare",
+            start=start,
+            end=end,
+            rows=len(df),
+            extra={"adjust": "qfq"},
+        )
         return path
 
     def download_many(
