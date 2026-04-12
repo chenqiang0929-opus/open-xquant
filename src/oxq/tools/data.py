@@ -12,6 +12,7 @@ import pandas as pd
 from oxq.data.factors import MACRO_INDICATOR_MAP as INDICATOR_MAP
 from oxq.data.factors import resolve_factor_dir
 from oxq.data.loaders import Downloader, resolve_data_dir
+from oxq.data.manifest import write_manifest
 from oxq.tools.registry import registry
 
 
@@ -173,6 +174,21 @@ def data_generate_mock(
             df["market"] = market_series
             path = out_dir / f"{sym}.parquet"
             df.to_parquet(path)
+            write_manifest(
+                parquet_path=path,
+                symbol=sym,
+                provider="mock",
+                start=start,
+                end=end,
+                rows=len(df),
+                extra={
+                    "seed": seed,
+                    "num_bars": n,
+                    "annualized_drift": annualized_drift,
+                    "annualized_vol": annualized_vol,
+                    "initial_price": initial_price,
+                },
+            )
             rows[sym] = len(df)
         except Exception as exc:  # noqa: BLE001
             errors[sym] = str(exc)
