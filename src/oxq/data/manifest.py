@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -44,7 +44,7 @@ def write_manifest(
         "end": end,
         "rows": rows,
         "sha256": _sha256(parquet_path),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "extra": extra,
     }
     manifest_path = parquet_path.parent / f"{symbol}.manifest.json"

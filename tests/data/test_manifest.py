@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from oxq.data.manifest import (
-    ManifestVerification,
-    read_manifest,
-    verify_manifest,
-    write_manifest,
-)
+from oxq.data.manifest import read_manifest, verify_manifest, write_manifest
 
 
 @pytest.fixture()
