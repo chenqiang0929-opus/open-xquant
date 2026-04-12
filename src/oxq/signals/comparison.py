@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import operator
-
 import pandas as pd
+
+from oxq.signals._ops import resolve_op
 
 
 class Comparison:
@@ -19,13 +19,5 @@ class Comparison:
         right: str = "",
         relationship: str = "gt",
     ) -> pd.Series:
-        ops = {
-            "gt": operator.gt,
-            "lt": operator.lt,
-            "gte": operator.ge,
-            "lte": operator.le,
-            "eq": operator.eq,
-            "ne": operator.ne,
-        }
-        op = ops[relationship]
+        op = resolve_op(relationship)
         return op(mktdata[left], mktdata[right])
