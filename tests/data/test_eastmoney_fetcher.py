@@ -39,7 +39,7 @@ class TestEastMoneyFetcher:
     def test_list_indicators(self) -> None:
         fetcher = EastMoneyFetcher()
         indicators = fetcher.list_indicators()
-        assert len(indicators) == 8
+        assert len(indicators) == 12
         assert indicators == sorted(indicators)
         assert set(indicators) == set(EASTMONEY_FIELD_MAP)
 

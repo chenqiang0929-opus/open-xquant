@@ -33,6 +33,10 @@ FINANCIAL_INDICATORS: list[str] = [
     "total_assets",
     "revenue",
     "roe",
+    "pe_ttm",
+    "pb",
+    "roa",
+    "peg",
 ]
 
 
@@ -192,12 +196,17 @@ EASTMONEY_FIELD_MAP: dict[str, str | None] = {
     "operating_cash_flow": "经营现金流量净额",
     "total_assets": None,  # computed: equity * equity_multiplier
     "total_shares": None,  # computed: equity / bvps
+    "pe_ttm": "市盈率(TTM)",
+    "pb": "市净率(PB)",
+    "roa": "总资产收益率(ROA)",
+    "peg": None,  # computed: pe_ttm / (net_income_growth * 100)
 }
 
 # Extra metrics needed for computed indicators
 _EASTMONEY_EXTRA_METRICS: list[str] = [
     "股东权益合计(净资产)",
     "权益乘数",
+    "净利润同比增长率",
 ]
 
 
@@ -250,7 +259,7 @@ class EastMoneyFetcher:
             label = EASTMONEY_FIELD_MAP[ind]
             if label is not None:
                 all_labels.add(label)
-        need_computed = bool(wanted & {"total_assets", "total_shares"})
+        need_computed = bool(wanted & {"total_assets", "total_shares", "peg"})
         if need_computed:
             all_labels.update(_EASTMONEY_EXTRA_METRICS)
             all_labels.add("每股净资产")  # needed for total_shares
@@ -311,6 +320,19 @@ class EastMoneyFetcher:
                         row["total_shares"] = None
                 else:
                     row["total_shares"] = None
+
+            # Computed: peg = pe_ttm / net_income_growth_rate
+            if "peg" in wanted:
+                pe_val = row.get("pe_ttm")
+                growth_s = label_data.get("净利润同比增长率")
+                if pe_val is not None and growth_s is not None:
+                    g = growth_s.get(date_str)
+                    if pd.notna(pe_val) and pd.notna(g) and float(g) != 0:
+                        row["peg"] = float(pe_val) / float(g)
+                    else:
+                        row["peg"] = None
+                else:
+                    row["peg"] = None
 
             result_rows[dt] = row
 
