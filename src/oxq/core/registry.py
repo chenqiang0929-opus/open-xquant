@@ -26,6 +26,9 @@ _SIGNAL_REGISTRY: dict[str, type] = {}
 _PORTFOLIO_OPTIMIZER_REGISTRY: dict[str, type] = {}
 _RULE_REGISTRY: dict[str, type] = {}
 
+# Indicator metadata: name -> {description, category, source_type, ...}
+_INDICATOR_METADATA: dict[str, dict[str, str]] = {}
+
 
 # ---------------------------------------------------------------------------
 # Private helper
@@ -136,6 +139,36 @@ def list_portfolio_optimizers() -> dict[str, type]:
 def list_rules() -> dict[str, type]:
     """Return a copy of the rule registry."""
     return dict(_RULE_REGISTRY)
+
+
+def register_indicator_metadata(
+    name: str,
+    description: str,
+    category: str,
+    source_type: str,
+    display_name: str = "",
+    value_range: str = "",
+    typical_usage: str = "",
+) -> None:
+    """Register metadata for an indicator (for Agent understanding)."""
+    _INDICATOR_METADATA[name] = {
+        "description": description,
+        "category": category,
+        "source_type": source_type,
+        "display_name": display_name or name,
+        "value_range": value_range,
+        "typical_usage": typical_usage,
+    }
+
+
+def get_indicator_metadata(name: str) -> dict[str, str] | None:
+    """Return metadata for a single indicator, or None."""
+    return _INDICATOR_METADATA.get(name)
+
+
+def list_indicator_metadata() -> dict[str, dict[str, str]]:
+    """Return a copy of all indicator metadata."""
+    return dict(_INDICATOR_METADATA)
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +298,69 @@ def _load_builtins() -> None:
         TrailingStopRule,
     ):
         _register(cls, Rule, _RULE_REGISTRY)
+
+    # -- Indicator Metadata ---------------------------------------------------
+    _metadata = [
+        # Trend
+        ("SMA", "Simple Moving Average of closing prices.", "trend", "compute"),
+        ("EMA", "Exponential Moving Average, weights recent prices more.", "trend", "compute"),
+        ("WMA", "Weighted Moving Average.", "trend", "compute"),
+        ("DEMA", "Double Exponential Moving Average.", "trend", "compute"),
+        ("TEMA", "Triple Exponential Moving Average.", "trend", "compute"),
+        ("IchimokuTenkan", "Ichimoku Tenkan-sen (conversion line).", "trend", "compute"),
+        ("IchimokuKijun", "Ichimoku Kijun-sen (base line).", "trend", "compute"),
+        ("IchimokuSenkouA", "Ichimoku Senkou Span A (leading span A).", "trend", "compute"),
+        ("IchimokuSenkouB", "Ichimoku Senkou Span B (leading span B).", "trend", "compute"),
+        ("IchimokuChikou", "Ichimoku Chikou Span (lagging span).", "trend", "compute"),
+        # Momentum
+        ("RSI", "Relative Strength Index, 0-100 oscillator.", "momentum", "compute"),
+        ("ROC", "Rate of Change, percentage price change.", "momentum", "compute"),
+        ("PPO", "Percentage Price Oscillator.", "momentum", "compute"),
+        ("Momentum", "Absolute price change over N periods.", "momentum", "compute"),
+        ("NdayReturn", "N-day percentage return.", "momentum", "compute"),
+        ("LogReturn", "Logarithmic return.", "momentum", "compute"),
+        ("SimpleMomentum", "Simple momentum factor.", "momentum", "compute"),
+        ("StochK", "Stochastic %K oscillator.", "momentum", "compute"),
+        # MACD
+        ("MACDLine", "MACD line (fast EMA - slow EMA).", "macd", "compute"),
+        ("MACDSignal", "MACD signal line.", "macd", "compute"),
+        ("MACDHistogram", "MACD histogram (MACD - signal).", "macd", "compute"),
+        # Volatility
+        ("BollingerUpper", "Upper Bollinger Band.", "volatility", "compute"),
+        ("BollingerLower", "Lower Bollinger Band.", "volatility", "compute"),
+        ("ATR", "Average True Range.", "volatility", "compute"),
+        ("RollingVolatility", "Rolling standard deviation of returns.", "volatility", "compute"),
+        ("RollingMDD", "Rolling Maximum Drawdown.", "volatility", "compute"),
+        ("AnnualizedVolatility", "Annualized rolling volatility.", "volatility", "compute"),
+        ("GarchVolatility", "GARCH(1,1) conditional volatility.", "volatility", "compute"),
+        ("HurstExponent", "Hurst exponent for trend persistence.", "volatility", "compute"),
+        # Volume
+        ("OBV", "On-Balance Volume.", "volume", "compute"),
+        ("VWAP", "Volume Weighted Average Price.", "volume", "compute"),
+        ("MFI", "Money Flow Index.", "volume", "compute"),
+        ("TurnoverRate", "Turnover rate.", "volume", "compute"),
+        # Direction
+        ("ADX", "Average Directional Index, trend strength 0-100.", "direction", "compute"),
+        ("AROON", "Aroon indicator.", "direction", "compute"),
+        ("CCI", "Commodity Channel Index.", "direction", "compute"),
+        # Valuation
+        ("PE", "Price-to-Earnings ratio (price / EPS).", "valuation", "compute"),
+        ("PB", "Price-to-Book ratio (price / book value per share).", "valuation", "compute"),
+        ("EP", "Earnings-to-Price ratio (EPS / price).", "valuation", "compute"),
+        ("BP", "Book-to-Price ratio (book value / price).", "valuation", "compute"),
+        ("MarketCap", "Market capitalization.", "valuation", "compute"),
+        # Quality
+        ("AccrualRatio", "Accrual ratio.", "quality", "compute"),
+        ("CashFlowRatio", "Cash flow ratio.", "quality", "compute"),
+        ("NetProfitMargin", "Net profit margin.", "quality", "compute"),
+        ("ROEChange", "Change in ROE.", "quality", "compute"),
+        # Factor
+        ("Ratio", "Generic ratio between two columns.", "factor", "compute"),
+        ("PowerRatio", "Power ratio indicator.", "factor", "compute"),
+    ]
+
+    for name, desc, cat, src in _metadata:
+        register_indicator_metadata(name, desc, cat, src)
 
 
 # ---------------------------------------------------------------------------
