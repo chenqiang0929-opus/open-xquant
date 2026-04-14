@@ -69,10 +69,9 @@ def test_universe_set_filter_requires_filters() -> None:
     assert "error" in result
 
 
-def test_universe_set_index_phase2() -> None:
+def test_universe_set_index_unknown_code() -> None:
     result = universe_set(type="index", code="SP500")
     assert "error" in result
-    assert "Phase 2" in result["error"]
 
 
 def test_universe_set_unknown_type() -> None:
@@ -82,8 +81,9 @@ def test_universe_set_unknown_type() -> None:
 
 def test_universe_list_indexes() -> None:
     result = universe_list_indexes()
-    assert result["indexes"] == []
-    assert "Phase 2" in result["note"]
+    assert len(result["indexes"]) >= 4
+    keys = [idx["key"] for idx in result["indexes"]]
+    assert "csi300" in keys
 
 
 def test_universe_inspect(sample_data_dir: Path) -> None:

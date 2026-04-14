@@ -77,7 +77,21 @@ def universe_set(
         return result
 
     if type == "index":
-        return {"error": "type='index' is planned for Phase 2. Use universe_list_indexes for available indexes."}
+        if not code:
+            return {"error": "type='index' requires 'code' (e.g. 'csi300')."}
+        from oxq.universe.index import IndexUniverse
+        try:
+            universe = IndexUniverse(key=code)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        date = as_of_date or _today()
+        snapshot = universe.get_universe(date)
+        return {
+            "symbols": list(snapshot.symbols),
+            "count": len(snapshot.symbols),
+            "source": snapshot.source,
+            "as_of_date": snapshot.as_of_date,
+        }
 
     return {"error": f"Unknown type '{type}'. Use 'static', 'filter', or 'index'."}
 
@@ -88,10 +102,8 @@ def universe_set(
 )
 def universe_list_indexes() -> dict[str, Any]:
     """List available index universes."""
-    return {
-        "indexes": [],
-        "note": "Index-based universes are planned for Phase 2.",
-    }
+    from oxq.universe.index import list_indexes
+    return {"indexes": list_indexes()}
 
 
 @registry.tool(
@@ -163,6 +175,11 @@ def universe_history(
             for snap in history
         ],
     }
+
+
+def _today() -> str:
+    from datetime import date
+    return date.today().isoformat()
 
 
 def _latest_date(symbols: list[str], data_dir: str | None) -> str:
