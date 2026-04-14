@@ -64,6 +64,27 @@ def universe_set(
         )
         date = as_of_date or _latest_date(symbols, data_dir)
         snapshot = filter_universe.get_universe(date)
+
+        # Build audit details
+        as_of = pd.Timestamp(date)
+        filter_cols = [f["column"] for f in filters]
+        details: list[dict[str, Any]] = []
+        for sym in symbols:
+            if sym not in mktdata:
+                details.append({"symbol": sym, "pass": False, "missing_data": True})
+                continue
+            df = mktdata[sym]
+            valid = df[df.index <= as_of]
+            if valid.empty:
+                details.append({"symbol": sym, "pass": False, "no_data_at_date": True})
+                continue
+            row = valid.iloc[-1]
+            entry: dict[str, Any] = {"symbol": sym}
+            for col in filter_cols:
+                entry[col] = float(row[col]) if col in row.index and pd.notna(row[col]) else None
+            entry["pass"] = sym in snapshot.symbols
+            details.append(entry)
+
         result: dict[str, Any] = {
             "symbols": list(snapshot.symbols),
             "count": len(snapshot.symbols),
@@ -71,6 +92,7 @@ def universe_set(
             "as_of_date": snapshot.as_of_date,
             "base_count": snapshot.metadata.get("base_count", len(symbols)),
             "filtered_count": snapshot.metadata.get("filtered_count", len(snapshot.symbols)),
+            "details": details,
         }
         if missing:
             result["missing_data"] = missing
