@@ -9,8 +9,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from oxq.data.factors import FINANCIAL_INDICATORS, MACRO_INDICATOR_MAP, resolve_factor_dir
 from oxq.data.factors import MACRO_INDICATOR_MAP as INDICATOR_MAP
-from oxq.data.factors import resolve_factor_dir
 from oxq.data.loaders import Downloader, resolve_data_dir
 from oxq.data.manifest import write_manifest
 from oxq.tools.registry import registry
@@ -50,6 +50,243 @@ def inspect_symbol(symbol: str, data_dir: str | None = None) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Mock data helpers (financial & macro)
+# ---------------------------------------------------------------------------
+
+# Country GDP baselines and population estimates for macro mock generation.
+_COUNTRY_GDP_BASE: dict[str, float] = {
+    "CHN": 1.4e13, "USA": 2.1e13, "JPN": 5.0e12,
+    "DEU": 4.0e12, "GBR": 3.0e12,
+}
+_COUNTRY_POPULATION: dict[str, float] = {
+    "CHN": 1.4e9, "USA": 3.3e8, "JPN": 1.25e8,
+    "DEU": 8.3e7, "GBR": 6.7e7,
+}
+
+
+def _generate_financial_mock(
+    symbols: list[str],
+    start: str,
+    end: str,
+    seed: int,
+    roe_mean: float = 0.12,
+    pb_mean: float = 3.0,
+    data_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Generate synthetic financial parquet files per symbol.
+
+    Output path: ``resolve_factor_dir(data_dir, sub="financial") / {symbol}.parquet``
+    Schema matches ``EastMoneyFetcher.fetch()`` output.
+    """
+    out_dir = resolve_factor_dir(data_dir, sub="financial")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build quarterly report_date index within [start, end]
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    all_quarters: list[pd.Timestamp] = []
+    for year in range(start_ts.year, end_ts.year + 1):
+        for month, day in [(3, 31), (6, 30), (9, 30), (12, 31)]:
+            dt = pd.Timestamp(year=year, month=month, day=day)
+            if start_ts <= dt <= end_ts:
+                all_quarters.append(dt)
+
+    if not all_quarters:
+        return {"symbols": [], "rows": {}, "indicators": [], "data_dir": str(out_dir)}
+
+    n_q = len(all_quarters)
+    rows: dict[str, int] = {}
+
+    for sym in symbols:
+        sym_seed = (seed + (hash(sym) & 0xFFFF)) & 0xFFFFFFFF
+        rng = np.random.default_rng(sym_seed)
+
+        # 1. total_shares — fixed
+        total_shares = np.full(n_q, 1e9)
+
+        # 2. revenue — random initial + quarterly compounding ~2%
+        rev_initial = rng.uniform(1e8, 1e11)
+        quarterly_growth = 0.02
+        revenue = np.empty(n_q)
+        revenue[0] = rev_initial
+        for i in range(1, n_q):
+            revenue[i] = revenue[i - 1] * (1 + quarterly_growth + rng.normal(0, 0.01))
+        revenue = np.maximum(revenue, 1e6)  # floor
+
+        # 3. net_income — revenue * fluctuating net margin ~10%
+        net_margin = rng.normal(0.10, 0.02, size=n_q)
+        net_margin = np.clip(net_margin, 0.02, 0.25)
+        net_income = revenue * net_margin
+
+        # 4. eps — derived
+        eps = net_income / total_shares
+
+        # 5. total_assets — revenue * asset turnover inverse ~2.0
+        asset_ratio = rng.normal(2.0, 0.2, size=n_q)
+        asset_ratio = np.clip(asset_ratio, 1.0, 4.0)
+        total_assets = revenue * asset_ratio
+
+        # 6. roe — random walk around roe_mean
+        roe = np.empty(n_q)
+        roe[0] = roe_mean + rng.normal(0, 0.02)
+        for i in range(1, n_q):
+            roe[i] = roe[i - 1] + rng.normal(0, 0.01)
+        roe = np.clip(roe, 0.02, 0.30)
+
+        # 7. book_value_per_share — (total_assets * equity_ratio) / total_shares
+        equity_ratio = rng.normal(0.4, 0.05, size=n_q)
+        equity_ratio = np.clip(equity_ratio, 0.2, 0.7)
+        book_value_per_share = (total_assets * equity_ratio) / total_shares
+
+        # 8. operating_cash_flow — net_income * ~1.1
+        ocf_ratio = rng.normal(1.1, 0.1, size=n_q)
+        ocf_ratio = np.clip(ocf_ratio, 0.7, 1.5)
+        operating_cash_flow = net_income * ocf_ratio
+
+        # 9. pb — noise around pb_mean
+        pb = rng.normal(pb_mean, 0.5, size=n_q)
+        pb = np.clip(pb, 0.5, 15.0)
+
+        # 10. pe_ttm — derived from pb / roe (with safety)
+        pe_ttm = np.where(roe > 0.001, pb / roe, 15.0)
+        pe_ttm = np.clip(pe_ttm, 5.0, 50.0)
+
+        # 11. roa — derived
+        roa = net_income / total_assets
+
+        # 12. peg — pe_ttm / earnings_growth_pct
+        earnings_growth = np.empty(n_q)
+        earnings_growth[0] = rng.normal(10, 5)  # percent
+        for i in range(1, n_q):
+            if net_income[i - 1] > 0:
+                earnings_growth[i] = ((net_income[i] / net_income[i - 1]) - 1) * 100
+            else:
+                earnings_growth[i] = rng.normal(10, 5)
+        # Avoid division by zero
+        eg_safe = np.where(np.abs(earnings_growth) > 0.1, earnings_growth, 0.1)
+        peg = pe_ttm / eg_safe
+        peg = np.clip(peg, -10.0, 30.0)
+
+        # 13. publish_date — report_date + 30~60 days
+        publish_offsets = rng.integers(30, 61, size=n_q)
+        publish_dates = [
+            all_quarters[i] + pd.Timedelta(days=int(publish_offsets[i]))
+            for i in range(n_q)
+        ]
+
+        df = pd.DataFrame(
+            {
+                "total_shares": total_shares,
+                "eps": eps,
+                "book_value_per_share": book_value_per_share,
+                "net_income": net_income,
+                "operating_cash_flow": operating_cash_flow,
+                "total_assets": total_assets,
+                "revenue": revenue,
+                "roe": roe,
+                "pe_ttm": pe_ttm,
+                "pb": pb,
+                "roa": roa,
+                "peg": peg,
+                "publish_date": publish_dates,
+                "period": "quarterly",
+            },
+            index=pd.DatetimeIndex(all_quarters, name="report_date"),
+        )
+        df.to_parquet(out_dir / f"{sym}.parquet")
+        rows[sym] = len(df)
+
+    return {
+        "symbols": list(rows.keys()),
+        "rows": rows,
+        "indicators": list(FINANCIAL_INDICATORS),
+        "data_dir": str(out_dir),
+    }
+
+
+def _generate_macro_mock(
+    start: str,
+    end: str,
+    seed: int,
+    indicators: list[str] | None = None,
+    countries: list[str] | None = None,
+    data_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Generate synthetic macro parquet files per indicator.
+
+    Output path: ``resolve_factor_dir(data_dir, sub="macro") / {indicator}.parquet``
+    Schema matches ``WorldBankFetcher`` / ``_records_to_dataframe`` output.
+    """
+    out_dir = resolve_factor_dir(data_dir, sub="macro")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if indicators is None:
+        indicators = sorted(MACRO_INDICATOR_MAP)
+    if countries is None:
+        countries = ["CHN", "USA"]
+    countries = sorted(countries)
+
+    start_year = pd.Timestamp(start).year
+    end_year = pd.Timestamp(end).year
+    years = list(range(start_year, end_year + 1))
+    n_y = len(years)
+
+    if n_y == 0:
+        return {"indicators": [], "countries": countries, "data_dir": str(out_dir)}
+
+    generated_indicators: list[str] = []
+
+    for indicator in indicators:
+        ind_seed = (seed + (hash(indicator) & 0xFFFF)) & 0xFFFFFFFF
+        rng = np.random.default_rng(ind_seed)
+
+        data: dict[str, np.ndarray] = {}
+        for country in countries:
+            if indicator == "gdp":
+                base = _COUNTRY_GDP_BASE.get(country, 1e12)
+                vals = np.empty(n_y)
+                vals[0] = base * (1 + rng.normal(0, 0.02))
+                for i in range(1, n_y):
+                    vals[i] = vals[i - 1] * (1 + 0.05 + rng.normal(0, 0.02))
+                data[country] = vals
+
+            elif indicator == "gdp_per_capita":
+                # Generate GDP first, then divide by population
+                base = _COUNTRY_GDP_BASE.get(country, 1e12)
+                pop = _COUNTRY_POPULATION.get(country, 5e7)
+                vals = np.empty(n_y)
+                vals[0] = base * (1 + rng.normal(0, 0.02))
+                for i in range(1, n_y):
+                    vals[i] = vals[i - 1] * (1 + 0.05 + rng.normal(0, 0.02))
+                data[country] = vals / pop
+
+            elif indicator == "gdp_growth":
+                vals = rng.normal(3.0, 2.0, size=n_y)
+                vals = np.clip(vals, -5.0, 15.0)
+                data[country] = vals
+
+            elif indicator == "cpi":
+                vals = rng.normal(2.0, 1.5, size=n_y)
+                vals = np.clip(vals, -2.0, 15.0)
+                data[country] = vals
+
+            else:
+                # Unknown indicator — generic positive series
+                vals = rng.normal(100, 20, size=n_y)
+                data[country] = vals
+
+        df = pd.DataFrame(data, index=pd.Index(years, name="year", dtype="int64"))
+        df.to_parquet(out_dir / f"{indicator}.parquet")
+        generated_indicators.append(indicator)
+
+    return {
+        "indicators": generated_indicators,
+        "countries": countries,
+        "data_dir": str(out_dir),
+    }
+
+
 @registry.tool(
     name="data_generate_mock",
     description=(
@@ -58,7 +295,10 @@ def inspect_symbol(symbol: str, data_dir: str | None = None) -> dict[str, Any]:
         "dir, exactly where data_load_symbols would put real downloads. Use "
         "when real market data is unavailable (e.g. yfinance not installed, "
         "geo-blocked, or rate-limited) and the goal is to verify a strategy "
-        "pipeline rather than its actual returns. Deterministic given the seed."
+        "pipeline rather than its actual returns. Deterministic given the seed. "
+        "Set financial=True to also generate financial statement data "
+        "(ROE, PB, EPS, etc.) per symbol. Set macro=True to also generate "
+        "macro indicator data (GDP, CPI, etc.)."
     ),
 )
 def data_generate_mock(
@@ -69,6 +309,12 @@ def data_generate_mock(
     annualized_drift: float = 0.05,
     annualized_vol: float = 0.20,
     initial_price: float = 100.0,
+    financial: bool = False,
+    financial_roe_mean: float = 0.12,
+    financial_pb_mean: float = 3.0,
+    macro: bool = False,
+    macro_indicators: list[str] | None = None,
+    macro_countries: list[str] | None = None,
     data_dir: str | None = None,
 ) -> dict[str, Any]:
     """Generate synthetic OHLCV parquet files for *symbols* via GBM.
@@ -200,6 +446,22 @@ def data_generate_mock(
     }
     if errors:
         result["errors"] = errors
+
+    if financial:
+        result["financial"] = _generate_financial_mock(
+            symbols, start, end, seed,
+            roe_mean=financial_roe_mean,
+            pb_mean=financial_pb_mean,
+            data_dir=dest,
+        )
+    if macro:
+        result["macro"] = _generate_macro_mock(
+            start, end, seed,
+            indicators=macro_indicators,
+            countries=macro_countries,
+            data_dir=dest,
+        )
+
     return result
 
 
