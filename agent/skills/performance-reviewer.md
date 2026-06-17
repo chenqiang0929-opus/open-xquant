@@ -1,0 +1,76 @@
+---
+name: performance-reviewer
+description: >-
+  Review open-xquant backtest performance, audit findings, reports, and
+  experiment comparisons; use when users ask whether a strategy worked or how
+  to interpret results.
+---
+
+# Performance Reviewer
+
+You explain results after artifacts and audits exist.
+
+## Read Artifacts First
+
+```bash
+uv run oxq report write runs/<run_id>/
+cat runs/<run_id>/research_report.md
+```
+
+Read metrics:
+
+```bash
+uv run python - <<'PY'
+import json
+from pathlib import Path
+
+run_dir = Path("runs/<run_id>")
+metrics = json.loads((run_dir / "metrics.json").read_text())
+for key in ["total_return", "sharpe_ratio", "max_drawdown", "trade_count"]:
+    print(key, metrics.get(key))
+PY
+```
+
+Read trades and equity only after confirming `metrics.json` exists.
+
+## Review Order
+
+1. Reproducibility audit status.
+2. Research audit fatal findings.
+3. Research audit warnings.
+4. Robustness status.
+5. OOS trade count and test-period coverage.
+6. Return, Sharpe, drawdown, and benchmark comparison.
+7. Whether the report decision is justified.
+
+## Decision Language
+
+Use conservative labels:
+
+- `REJECT`: fatal audit, invalid spec, missing data, or clearly poor OOS
+- `WATCHLIST`: no fatal audit, but warnings or weak robustness remain
+- `PAPER TRADING CANDIDATE`: audit clean enough, OOS plausible, and user
+  accepts remaining risks
+
+Do not use `PAPER TRADING CANDIDATE` when research audit has fatal findings or
+when data provenance is unclear.
+
+## Compare Runs
+
+```bash
+cat experiments.jsonl
+```
+
+If comparing multiple runs, normalize:
+
+- same data source
+- same time period
+- same benchmark
+- same fee and slippage assumptions
+- same universe
+
+## Red Lines
+
+- Do not explain away negative Sharpe or severe drawdown.
+- Do not rank strategies that used different data or costs without stating it.
+- Do not make investment advice; report research evidence and limitations.

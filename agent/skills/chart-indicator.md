@@ -1,77 +1,60 @@
 ---
 name: chart-indicator
-description: When a user wants to visually verify an indicator, use the chart_indicator tool to render a candlestick chart with indicator overlays
-tools_required: [engine_run, chart_indicator]
+description: >-
+  Render open-xquant run charts and indicator overlays; use when users ask to
+  visualize price, indicators, signals, or chart artifacts.
 ---
 
-## When to Use
+# Chart Indicator
 
-After creating or debugging an Indicator, the user wants to **see** the output on a real price chart to verify correctness. This skill guides you through the visualization workflow.
+You create visual checks. Charts do not replace validation or audit.
 
-## Workflow
+## Current Tool Signature
 
-### Step 1: Ensure Data Exists
+`oxq.tools.chart.chart_indicator` plots indicator columns from a stored
+`RunResult` in the tool session:
 
-The symbol's market data must be downloaded locally. Use `data_download` if needed:
+```python
+from oxq.tools.chart import chart_indicator
 
-```
-data_download(symbols=["AAPL"], start="2024-01-01", end="2024-12-31")
-```
-
-### Step 2: Build a Minimal Strategy
-
-Create a throwaway strategy with the indicator(s) to visualize:
-
-```
-strategy_create(name="viz", hypothesis="indicator visualization", objectives={"total_return": {"min": -1.0}})
-strategy_add_signal(
-    strategy="viz",
-    name="dummy",
-    type="Threshold",
-    params={"column": "my_indicator", "threshold": 0, "direction": "above"},
-    indicators={
-        "my_indicator": {"type": "IchimokuTenkan", "params": {"period": 9}},
-    },
+result = chart_indicator(
+    run_id="run_1",
+    symbol="SPY",
+    columns=["sma_fast", "sma_slow"],
+    overlay=True,
 )
+print(result)
 ```
 
-**Tip:** Use a `Threshold` signal as a dummy — the signal itself doesn't matter, we just need the Engine to compute the indicator columns.
+It does not accept raw `data=...`, `indicators=...`, or `output=...`
+arguments. If you need a chart from raw bars, either run the strategy through
+the tool/session flow first or write a one-off exploratory script and label it
+as non-standard.
 
-### Step 3: Run Through Indicator Phase
+## Dependency
 
-```
-engine_run(strategy="viz", start="2024-01-01", end="2024-12-31", symbols=["AAPL"], run_through="indicator")
-```
+Install chart dependencies before rendering:
 
-This populates `mktdata` with OHLCV + indicator columns without running the full backtest.
-
-### Step 4: Chart
-
-```
-chart_indicator(run_id="viz_...", symbol="AAPL", columns=["my_indicator"], overlay=true)
+```bash
+uv sync --extra chart
 ```
 
-- **overlay=true** — for price-scale indicators (SMA, Ichimoku, Bollinger)
-- **overlay=false** — for oscillators or different-scale indicators (RSI, RollingVolatility, HurstExponent)
+If using pip:
 
-### Step 5: Read the Chart
-
-Use the `Read` tool on the returned PNG path to visually inspect the chart.
-
-## Multiple Indicators
-
-You can plot multiple indicators at once:
-
-```
-chart_indicator(run_id="...", symbol="AAPL", columns=["IchimokuTenkan", "IchimokuKijun"], overlay=true)
+```bash
+python -m pip install -e ".[chart]"
 ```
 
-## What to Look For
+## What To Check
 
-When verifying a new indicator:
+- requested columns exist in the run's symbol data
+- NaN warmup regions are expected
+- indicator scale matches overlay choice
+- signal events line up with intended dates
+- chart output path exists
 
-1. **NaN region** — first N values should be NaN for period-based indicators
-2. **Scale** — does the indicator range make sense relative to price?
-3. **Shape** — does the curve behave as expected? (e.g., SMA should be smoother than price)
-4. **Constant input** — try constant prices, the indicator should produce a flat or zero line
-5. **Known patterns** — verify against known market patterns if possible
+## Red Lines
+
+- Do not use charts as proof of profitability.
+- Do not hide missing indicator columns by plotting a different column.
+- Do not infer causality from visual overlap alone.

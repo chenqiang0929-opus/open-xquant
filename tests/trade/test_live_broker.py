@@ -81,6 +81,20 @@ class TestSubmitOrder:
         assert len(open_orders) == 1
         assert open_orders[0].id == oid
 
+    def test_market_orders_are_not_locally_replaced_without_remote_cancel(self, mock_client):
+        broker, client = mock_client
+        client.submit_order.side_effect = [
+            {"id": "alpaca-001", "status": "accepted"},
+            {"id": "alpaca-002", "status": "accepted"},
+        ]
+
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=100))
+        broker.submit_order(Order(symbol="AAPL", side="BUY", shares=200))
+
+        client.cancel_order.assert_not_called()
+        open_orders = broker.get_open_orders("AAPL")
+        assert [order.id for order in open_orders] == ["alpaca-001", "alpaca-002"]
+
 
 class TestGetFills:
     def test_empty_fills(self, mock_client):
@@ -232,6 +246,28 @@ class TestCancelOrders:
         canceled = broker.cancel_orders("AAPL", side="SELL")
         assert len(canceled) == 1
         assert canceled[0].order.side == "SELL"
+
+    def test_cancel_market_orders_preserves_protective_sells(self, mock_client):
+        broker, client = mock_client
+        client.submit_order.side_effect = [
+            {"id": "market-sell", "status": "accepted"},
+            {"id": "stop-sell", "status": "accepted"},
+        ]
+        broker.submit_order(Order(symbol="AAPL", side="SELL", shares=50))
+        broker.submit_order(Order(
+            symbol="AAPL", side="SELL", shares=50, order_type="stop", stop_price=Decimal("130.00"),
+        ))
+
+        canceled = broker.cancel_market_orders("AAPL", side="SELL", reason="exit_sell_submitted")
+
+        open_orders = broker.get_open_orders("AAPL")
+        assert len(canceled) == 1
+        assert canceled[0].id == "market-sell"
+        assert canceled[0].status_reason == "exit_sell_submitted"
+        assert len(open_orders) == 1
+        assert open_orders[0].id == "stop-sell"
+        assert open_orders[0].order.order_type == "stop"
+        client.cancel_order.assert_called_once_with("market-sell")
 
 
 class TestCapPendingSells:

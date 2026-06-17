@@ -1,0 +1,901 @@
+"""Spec Compiler — compiles StrategySpec to executable Strategy + Engine.
+
+Two modes:
+  1. Direct Runtime Mode (MVP): construct Strategy object from spec and run.
+  2. Generated Code Mode (future): generate strategy.py file.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import platform
+import sys
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import yaml
+
+from oxq.core.engine import Engine
+from oxq.core.registry import _INDICATOR_REGISTRY, _PORTFOLIO_OPTIMIZER_REGISTRY, _SIGNAL_REGISTRY
+from oxq.core.strategy import Strategy
+from oxq.core.types import PortfolioOptimizer, Signal
+from oxq.data.loaders import resolve_data_dir
+from oxq.data.market import LocalMarketDataProvider
+from oxq.portfolio.analytics import RunResult
+from oxq.rules.constraint import RebalanceFrequencyRule
+from oxq.spec.schema import StrategySpec
+from oxq.trade.fees import PercentageFee
+from oxq.trade.sim_broker import FillPriceMode, SimBroker
+from oxq.trade.slippage import PercentageSlippage
+from oxq.universe.static import StaticUniverse
+
+FILL_PRICE_MODE_MAP: dict[str, FillPriceMode] = {
+    "close": FillPriceMode.CLOSE,
+    "next_open": FillPriceMode.NEXT_OPEN,
+    "mid": FillPriceMode.MID,
+}
+
+# Signals that fire on a single bar and should latch once triggered.
+# NOTE: Peak is excluded because its implementation uses shift(-i)
+# which introduces future-data bias. Timestamp is excluded because
+# it is time-based and should re-evaluate every bar.
+_EVENT_SIGNAL_TYPES = frozenset({"Crossover"})
+
+
+def _resolve_indicator(name: str) -> type:
+    """Look up an indicator class by name from the registry."""
+    cls = _INDICATOR_REGISTRY.get(name)
+    if cls is None:
+        raise ValueError(f"Unknown indicator: '{name}'. Available: {sorted(_INDICATOR_REGISTRY.keys())}")
+    return cls
+
+
+def _resolve_signal(name: str) -> type:
+    """Look up a signal class by name from the registry."""
+    cls = _SIGNAL_REGISTRY.get(name)
+    if cls is None:
+        raise ValueError(f"Unknown signal: '{name}'. Available: {sorted(_SIGNAL_REGISTRY.keys())}")
+    return cls
+
+
+def _resolve_portfolio_optimizer(name: str) -> type:
+    """Look up a portfolio optimizer class by name from the registry."""
+    cls = _PORTFOLIO_OPTIMIZER_REGISTRY.get(name)
+    if cls is None:
+        raise ValueError(
+            f"Unknown portfolio optimizer: '{name}'. Available: {sorted(_PORTFOLIO_OPTIMIZER_REGISTRY.keys())}"
+        )
+    return cls
+
+
+def _build_optimizer(spec: StrategySpec) -> PortfolioOptimizer:
+    """Build a portfolio optimizer from spec, using signal-filtered equal weight when appropriate."""
+    opt_cls = _resolve_portfolio_optimizer(spec.portfolio.type)
+
+    # When EqualWeight is used with signal rules, wrap it in a signal-filtered variant
+    # so that only symbols with active signal (True/positive) get weight.
+    if spec.portfolio.type == "EqualWeight" and spec.signal.rules:
+        signal_names = _terminal_signal_names(spec)
+        signal_types = {name: _effective_signal_type(spec, name) for name in spec.signal.rules}
+        return _SignalFilteredEqualWeightOptimizer(signal_names=signal_names, signal_types=signal_types)
+
+    return opt_cls(**spec.portfolio.params)
+
+
+class _SignalFilteredEqualWeightOptimizer:
+    """Equal weight among symbols with active signals.
+
+    Event-style signals (Crossover, Peak, Timestamp) latch once triggered —
+    the position is held until an exit rule closes it.  Level-style signals
+    (Threshold, Comparison, Formula, Composite) are re-evaluated every bar.
+    """
+
+    name = "SignalFilteredEqualWeight"
+
+    def __init__(self, signal_names: list[str], signal_types: dict[str, str]) -> None:
+        self._signal_names = signal_names
+        self._signal_types = signal_types
+        self._latched: dict[str, bool] = {}
+        self._held_symbols: set[str] = set()
+
+    def reset_symbols(self, symbols: list[str]) -> None:
+        """Clear event-signal latch state for symbols that fully exited."""
+        for symbol in symbols:
+            self._latched.pop(symbol, None)
+
+    def set_held_symbols(self, symbols: list[str]) -> None:
+        """Tell the optimizer which latched symbols already have positions."""
+        self._held_symbols = set(symbols)
+
+    def optimize(
+        self,
+        signals: dict[str, pd.DataFrame],
+        indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]:
+        active: list[str] = []
+        for symbol, df in signals.items():
+            for sig_name in self._signal_names:
+                if sig_name not in df.columns:
+                    continue
+
+                val = df[sig_name].iloc[-1]
+                sig_type = self._signal_types.get(sig_name, "")
+                # NaN values are not a signal
+                if isinstance(val, (bool, np.bool_)):
+                    is_true = bool(val)
+                else:
+                    try:
+                        is_true = not pd.isna(val) and float(val) > 0
+                    except (TypeError, ValueError):
+                        is_true = not pd.isna(val) and bool(val)
+
+                if sig_type in _EVENT_SIGNAL_TYPES:
+                    # Event signals enter only on the trigger bar. After that,
+                    # keep them active only while the position is actually held.
+                    if is_true:
+                        self._latched[symbol] = True
+                    if is_true or (self._latched.get(symbol) and symbol in self._held_symbols):
+                        active.append(symbol)
+                        break
+                else:
+                    # Level signal — re-evaluate every bar
+                    if is_true:
+                        active.append(symbol)
+                        break
+
+        for symbol, latched in self._latched.items():
+            if latched and symbol in self._held_symbols and symbol not in active:
+                active.append(symbol)
+
+        if not active:
+            return {"CASH": 1.0}
+
+        weight = 1.0 / len(active)
+        return {s: weight for s in active}
+
+
+def compile_strategy(spec: StrategySpec) -> Strategy:
+    """Compile a StrategySpec into an executable Strategy object.
+
+    This is the Direct Runtime Mode — constructs Strategy, indicator instances,
+    and signal instances with required_indicators wired up.
+    """
+    _validate_crossover_rule_count(spec)
+    # Build signal instances with required_indicators.
+    # When there are no signal rules, attach indicators to the portfolio optimizer instead.
+    signals: dict[str, tuple[Signal, dict[str, Any]]] = {}
+    required: dict[str, tuple[Any, dict[str, Any]]] = {}
+    for ind_name, ind_def in spec.signal.indicators.items():
+        ind_cls = _resolve_indicator(ind_def.type)
+        ind_instance = ind_cls()
+        required[ind_name] = (ind_instance, ind_def.params)
+
+    for signal_name, signal_def in spec.signal.rules.items():
+        signal_cls = _resolve_signal(signal_def.type)
+        signal_instance = signal_cls() if hasattr(signal_cls, "__init__") else signal_cls()
+        signal_instance.required_indicators = required
+        signals[signal_name] = (signal_instance, signal_def.params)
+
+    # Build portfolio optimizer — use signal-filtered variant when EqualWeight
+    # is paired with boolean signal rules (e.g. Crossover/Threshold).
+    optimizer = _build_optimizer(spec)
+
+    # When there are no signal rules, attach indicators to the portfolio optimizer
+    # so the engine still computes them (e.g. for ranking strategies like TopNRanking).
+    if not spec.signal.rules and required:
+        if hasattr(optimizer, "required_indicators"):
+            optimizer.required_indicators = required
+        else:
+            optimizer.required_indicators = required
+
+    # Build universe
+    if spec.universe.type != "static":
+        raise ValueError(f"Unsupported universe.type '{spec.universe.type}'. Only 'static' is available.")
+    universe = StaticUniverse(tuple(spec.universe.symbols))
+
+    return Strategy(
+        name=spec.strategy_id,
+        hypothesis=spec.research.hypothesis,
+        benchmarks=spec.benchmark.symbols,
+        universe=universe,
+        signals=signals,
+        portfolio=optimizer,
+    )
+
+
+def compile_run(
+    spec: StrategySpec,
+    data_dir: str | None = None,
+    out_dir: str | Path = "runs/auto",
+) -> tuple[RunResult, Path]:
+    """Compile and run a StrategySpec, writing standardized artifacts to out_dir.
+
+    Returns (RunResult, run_dir).
+    """
+    _validate_strategy_id_for_path(spec.strategy_id)
+    _validate_crossover_rule_count(spec)
+    from oxq.spec.validator import validate
+
+    validation = validate(spec)
+    if validation.status == "fail":
+        messages = "; ".join(error["message"] for error in validation.errors)
+        raise ValueError(f"Spec validation failed: {messages}")
+    strategy = compile_strategy(spec)
+
+    # Data provider — use spec.data.data_dir as fallback
+    _data_dir = data_dir or (spec.data.data_dir or None)
+    data_path = resolve_data_dir(Path(_data_dir) if _data_dir else None).resolve()
+    market = LocalMarketDataProvider(data_dir=data_path, currency=spec.market.currency, calendar=spec.market.calendar)
+
+    # Broker with fee/slippage from spec
+    fee_model = PercentageFee(rate=Decimal(str(spec.cost.fee_rate)), min_fee=Decimal(str(spec.cost.fee_min)))
+    slippage_model = PercentageSlippage(rate=Decimal(str(spec.cost.slippage_rate)))
+    fill_mode_str = spec.execution.fill_price_mode
+    fill_mode = FILL_PRICE_MODE_MAP.get(fill_mode_str)
+    if fill_mode is None:
+        valid = ", ".join(sorted(FILL_PRICE_MODE_MAP.keys()))
+        raise ValueError(f"Unknown fill_price_mode '{fill_mode_str}'. Valid: {valid}")
+    broker = SimBroker(
+        fee_model=fee_model,
+        slippage_model=slippage_model,
+        fill_price_mode=fill_mode,
+        market_calendar=spec.market.calendar,
+    )
+
+    # Determine date range
+    train = spec.validation.train_period
+    test = spec.validation.test_period
+    start = train[0] if train else (test[0] if test else "2018-01-01")
+    end = test[1] if test else (train[1] if train else "2025-12-31")
+
+    # Build rules from spec
+    rules: list = []
+    interval_days = spec.execution.rebalance.interval_days
+    if interval_days > 1:
+        rules.append(RebalanceFrequencyRule(interval_days=interval_days))
+
+    # Auto-add ExitRule for Crossover signals so positions close on reverse cross.
+    for _sig_name, sig_def in spec.signal.rules.items():
+        if sig_def.type == "Crossover":
+            fast = sig_def.params.get("fast", "")
+            slow = sig_def.params.get("slow", "")
+            if fast and slow:
+                from oxq.rules.exit import ExitRule
+
+                rules.append(ExitRule(fast=fast, slow=slow))
+
+    # Run engine
+    engine = Engine()
+    result = engine.run(
+        strategy=strategy,
+        market=market,
+        broker=broker,
+        start=start,
+        end=end,
+        initial_cash=spec.execution.initial_cash,
+        lot_size=spec.execution.lot_size,
+        rules=rules,
+        data_start=spec.data.min_start_date or None,
+    )
+
+    # Write artifacts — include microseconds to avoid collisions on same-second runs
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+    out_path = Path(out_dir)
+    if out_path.name == "auto":
+        run_dir = out_path.parent / f"{timestamp}_{spec.strategy_id}"
+    else:
+        run_dir = out_path / f"{timestamp}_{spec.strategy_id}"
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write_artifacts(spec, result, run_dir, engine, effective_data_dir=str(data_path))
+
+    return result, run_dir
+
+
+def _write_artifacts(spec: StrategySpec, result: RunResult, run_dir: Path, engine: Engine, effective_data_dir: str | None = None) -> None:
+    """Write all standardized backtest artifacts to run_dir."""
+    run_id = run_dir.name
+
+    # strategy_spec.yaml
+    spec_path = run_dir / "strategy_spec.yaml"
+    spec_path.write_text(
+        yaml.dump(spec.to_dict(), sort_keys=False, allow_unicode=True, default_flow_style=False), encoding="utf-8"
+    )
+    serialized_spec = StrategySpec.from_yaml(spec_path)
+    serialized_spec_hash = serialized_spec.compute_hash()
+
+    # spec_hash.txt
+    (run_dir / "spec_hash.txt").write_text(serialized_spec_hash + "\n")
+
+    # environment.json
+    env = {
+        "open_xquant_version": _get_version(),
+        "python_version": sys.version,
+        "platform": platform.platform(),
+        "run_timestamp": datetime.now(UTC).isoformat(),
+        "spec_hash": serialized_spec_hash,
+    }
+    if effective_data_dir:
+        env["data_dir"] = effective_data_dir
+    (run_dir / "environment.json").write_text(json.dumps(env, indent=2) + "\n")
+
+    # data_manifest.json
+    symbols = spec.universe.symbols
+    manifest_start = spec.data.min_start_date or ""
+    if not manifest_start and spec.validation.train_period:
+        manifest_start = str(spec.validation.train_period[0])
+    if not manifest_start and spec.validation.test_period:
+        manifest_start = str(spec.validation.test_period[0])
+    manifest_end = str(spec.validation.test_period[1]) if spec.validation.test_period else ""
+    if not manifest_end and spec.validation.train_period:
+        manifest_end = str(spec.validation.train_period[1])
+    missing_ratio = _compute_missing_ratio(
+        result.mktdata,
+        spec.data.required_columns,
+        spec.market.calendar,
+        start=manifest_start,
+        end=manifest_end,
+        symbols=symbols,
+    )
+    symbol_ranges = _compute_symbol_ranges(result.mktdata) if result.mktdata else {}
+    data_fingerprints = _compute_data_fingerprints(
+        result.mktdata,
+        spec.data.required_columns,
+        calendar=spec.market.calendar,
+        start=manifest_start,
+        end=manifest_end,
+        symbols=symbols,
+    ) if result.mktdata else {}
+    manifest = {
+        "schema_version": 1,
+        "provider": spec.data.provider,
+        "symbols": symbols,
+        "columns": spec.data.required_columns,
+        "calendar": spec.market.calendar,
+        "price_adjustment": spec.data.price_adjustment,
+        "start": manifest_start,
+        "end": manifest_end,
+        "missing_ratio": missing_ratio,
+        "symbol_ranges": symbol_ranges,
+        "data_fingerprints": data_fingerprints,
+    }
+    (run_dir / "data_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+    # metrics.json
+    metrics = _sanitize_json(_build_metrics(spec, result, run_id))
+    (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, allow_nan=False) + "\n")
+
+    # equity_curve.csv
+    equity_rows = [{"date": str(d), "value": v} for d, v in result.equity_curve]
+    pd.DataFrame(equity_rows).to_csv(run_dir / "equity_curve.csv", index=False)
+
+    # trades.csv
+    trade_rows = [
+        {
+            "symbol": f.order.symbol,
+            "side": f.order.side,
+            "shares": f.order.shares,
+            "filled_price": float(f.filled_price),
+            "filled_at": f.filled_at,
+            "fee": float(f.fee),
+        }
+        for f in result.trades
+    ]
+    pd.DataFrame(trade_rows).to_csv(run_dir / "trades.csv", index=False)
+
+    # positions.csv — last snapshot
+    pos_rows = [
+        {"symbol": sym, "shares": pos.shares, "avg_cost": float(pos.avg_cost)}
+        for sym, pos in result.portfolio.positions.items()
+    ]
+    pd.DataFrame(pos_rows).to_csv(run_dir / "positions.csv", index=False)
+
+    # orders.csv
+    order_rows = _build_order_rows(result)
+    order_columns = [
+        "id",
+        "status",
+        "status_reason",
+        "symbol",
+        "side",
+        "shares",
+        "order_type",
+        "limit_price",
+        "stop_price",
+        "trail_pct",
+        "created_at",
+        "due_at",
+        "filled_at",
+        "filled_price",
+        "filled_shares",
+    ]
+    pd.DataFrame(order_rows, columns=order_columns).to_csv(run_dir / "orders.csv", index=False)
+
+    artifact_hashes = {
+        "schema_version": 1,
+        "strategy_spec.yaml": _hash_file(run_dir / "strategy_spec.yaml"),
+        "environment.json": _hash_json_file(run_dir / "environment.json", exclude_keys={"run_timestamp"}),
+        "data_manifest.json": _hash_json_file(run_dir / "data_manifest.json"),
+        "equity_curve.csv": _hash_file(run_dir / "equity_curve.csv"),
+        "trades.csv": _hash_file(run_dir / "trades.csv"),
+        "positions.csv": _hash_file(run_dir / "positions.csv"),
+        "orders.csv": _hash_file(run_dir / "orders.csv"),
+        "metrics.json": _hash_json_file(run_dir / "metrics.json", exclude_keys={"run_id"}),
+    }
+    (run_dir / "artifact_hashes.json").write_text(json.dumps(artifact_hashes, indent=2) + "\n", encoding="utf-8")
+    _append_run_digest(run_dir, _hash_json_file(run_dir / "artifact_hashes.json"))
+
+    # run_log.jsonl
+    with open(run_dir / "run_log.jsonl", "w") as lf:
+        lf.write(
+            json.dumps(
+                {
+                    "event": "run_complete",
+                    "run_id": run_id,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "trade_count": len(result.trades),
+                    "final_value": float(result.equity_curve[-1][1]) if result.equity_curve else 0.0,
+                }
+            )
+            + "\n"
+        )
+
+
+def _to_timestamp(ts_val: str | object, tz: object | None = None) -> pd.Timestamp:
+    """Convert a fill timestamp to pd.Timestamp, handling existing timezone."""
+    ts = pd.Timestamp(ts_val)
+    if ts.tz is None and tz is not None:
+        ts = ts.tz_localize(tz)
+    return ts
+
+
+def _compute_missing_ratio(
+    mktdata: dict[str, pd.DataFrame],
+    columns: list[str] | None = None,
+    calendar: str = "XNYS",
+    start: str = "",
+    end: str = "",
+    symbols: list[str] | None = None,
+) -> float:
+    """Compute missing data after aligning symbols to an expected business calendar."""
+    symbols_to_check = sorted(set(symbols or []) | set(mktdata.keys()))
+    indexes = [pd.DatetimeIndex(df.index) for df in mktdata.values() if not df.empty]
+    if not indexes:
+        expected_index = _expected_market_index_from_range(calendar, start, end)
+        if expected_index.empty:
+            return 1.0 if symbols_to_check else 0.0
+    else:
+        expected_index = _expected_market_index(indexes, calendar, start=start, end=end)
+
+    total = 0
+    missing = 0
+    for symbol in symbols_to_check:
+        df = mktdata.get(symbol, pd.DataFrame())
+        aligned = _align_frame_to_session_dates(df, expected_index)
+        check_columns = columns or list(df.columns) or ["__rows__"]
+        for col in check_columns:
+            total += len(expected_index)
+            if col in aligned.columns:
+                missing += int(aligned[col].isna().sum())
+            else:
+                missing += len(expected_index)
+    return missing / total if total > 0 else 0.0
+
+
+def _expected_market_index_from_range(calendar: str, start: str = "", end: str = "") -> pd.DatetimeIndex:
+    if not start or not end:
+        return pd.DatetimeIndex([])
+    start_ts = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    tz = start_ts.tz
+    if tz is None and end_ts.tz is not None:
+        end_ts = end_ts.tz_localize(None)
+    elif tz is not None:
+        end_ts = end_ts.tz_localize(tz) if end_ts.tz is None else end_ts.tz_convert(tz)
+    sessions = _exchange_calendar_sessions(start_ts, end_ts, calendar)
+    if sessions is not None:
+        if tz is not None:
+            return sessions.tz_localize(tz) if sessions.tz is None else sessions.tz_convert(tz)
+        return sessions.tz_localize(None) if sessions.tz is not None else sessions
+    raise ValueError(f"exchange_calendars is required for market calendar '{calendar}'")
+
+
+def _expected_market_index(
+    indexes: list[pd.DatetimeIndex],
+    calendar: str,
+    start: str = "",
+    end: str = "",
+) -> pd.DatetimeIndex:
+    observed_start = min(index.min() for index in indexes)
+    observed_end = max(index.max() for index in indexes)
+    tz = observed_start.tz
+    start_ts = _requested_timestamp(start, observed_start, tz)
+    end_ts = _requested_timestamp(end, observed_end, tz)
+    sessions = _exchange_calendar_sessions(start_ts, end_ts, calendar)
+    if sessions is not None:
+        if tz is not None:
+            return sessions.tz_localize(tz) if sessions.tz is None else sessions.tz_convert(tz)
+        return sessions.tz_localize(None) if sessions.tz is not None else sessions
+    raise ValueError(f"exchange_calendars is required for market calendar '{calendar}'")
+
+
+def _requested_timestamp(value: str, fallback: pd.Timestamp, tz: object | None) -> pd.Timestamp:
+    if not value:
+        return fallback
+    ts = pd.Timestamp(value)
+    if tz is None:
+        return ts.tz_localize(None) if ts.tz is not None else ts
+    return ts.tz_localize(tz) if ts.tz is None else ts.tz_convert(tz)
+
+
+def _exchange_calendar_sessions(start: pd.Timestamp, end: pd.Timestamp, calendar: str) -> pd.DatetimeIndex | None:
+    try:
+        import exchange_calendars as xcals
+    except ImportError:
+        return None
+    try:
+        cal = xcals.get_calendar(calendar)
+        sessions = cal.sessions_in_range(start.date(), end.date())
+    except Exception:
+        return None
+    return pd.DatetimeIndex(sessions)
+
+
+def _compute_symbol_ranges(mktdata: dict[str, pd.DataFrame]) -> dict[str, dict[str, str]]:
+    """Return actual per-symbol date ranges present in loaded market data."""
+    ranges: dict[str, dict[str, str]] = {}
+    for symbol, df in mktdata.items():
+        if df.empty:
+            ranges[symbol] = {"start": "", "end": ""}
+            continue
+        index = pd.DatetimeIndex(df.index)
+        ranges[symbol] = {
+            "start": str(index.min().date()),
+            "end": str(index.max().date()),
+        }
+    return ranges
+
+
+def _compute_data_fingerprints(
+    mktdata: dict[str, pd.DataFrame],
+    columns: list[str] | None = None,
+    calendar: str = "XNYS",
+    start: str = "",
+    end: str = "",
+    symbols: list[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Return deterministic per-symbol fingerprints of loaded market data."""
+    symbols_to_check = sorted(set(symbols or []) | set(mktdata.keys()))
+    expected_index = _expected_market_index_from_range(calendar, start, end)
+    return {
+        symbol: _fingerprint_dataframe(_reindex_for_fingerprint(mktdata.get(symbol, pd.DataFrame()), expected_index), columns)
+        for symbol in symbols_to_check
+    }
+
+
+def _reindex_for_fingerprint(df: pd.DataFrame, expected_index: pd.DatetimeIndex) -> pd.DataFrame:
+    return _select_frame_for_session_fingerprint(df, expected_index)
+
+
+def _align_frame_to_session_dates(df: pd.DataFrame, expected_index: pd.DatetimeIndex) -> pd.DataFrame:
+    if df.empty:
+        return df.reindex(expected_index)
+    source = df.copy()
+    session_dates = pd.Index([pd.Timestamp(idx).date() for idx in source.index])
+    if session_dates.has_duplicates:
+        raise ValueError("market data has multiple rows for the same market session")
+    expected_dates = pd.Index([pd.Timestamp(idx).date() for idx in expected_index])
+    source.index = session_dates
+    aligned = source.reindex(expected_dates)
+    aligned.index = expected_index
+    return aligned
+
+
+def _select_frame_for_session_fingerprint(df: pd.DataFrame, expected_index: pd.DatetimeIndex) -> pd.DataFrame:
+    if df.empty:
+        return df.reindex(expected_index)
+    source = df.copy()
+    source_index = pd.DatetimeIndex(source.index)
+    missing_index = _expected_index_with_source_tz(expected_index, source_index)
+    session_dates = pd.Index([pd.Timestamp(idx).date() for idx in source.index])
+    if session_dates.has_duplicates:
+        raise ValueError("market data has multiple rows for the same market session")
+    source_by_date = dict(zip(session_dates, range(len(source)), strict=True))
+    rows: list[pd.Series] = []
+    index_values: list[Any] = []
+    for expected_ts, missing_ts in zip(expected_index, missing_index, strict=True):
+        expected_date = pd.Timestamp(expected_ts).date()
+        source_pos = source_by_date.get(expected_date)
+        if source_pos is None:
+            rows.append(pd.Series(index=source.columns, dtype="object"))
+            index_values.append(missing_ts)
+            continue
+        rows.append(source.iloc[source_pos])
+        index_values.append(source.index[source_pos])
+    aligned = pd.DataFrame(rows)
+    aligned.index = pd.Index(index_values)
+    return aligned
+
+
+def _expected_index_with_source_tz(
+    expected_index: pd.DatetimeIndex,
+    source_index: pd.DatetimeIndex,
+) -> pd.DatetimeIndex:
+    if source_index.tz is not None and expected_index.tz is None:
+        return expected_index.tz_localize(source_index.tz)
+    if source_index.tz is None and expected_index.tz is not None:
+        return expected_index.tz_localize(None)
+    if source_index.tz is not None and expected_index.tz is not None:
+        return expected_index.tz_convert(source_index.tz)
+    return expected_index
+
+
+def _fingerprint_dataframe(df: pd.DataFrame, columns: list[str] | None = None) -> dict[str, Any]:
+    if df.empty:
+        return {
+            "row_count": 0,
+            "start": "",
+            "end": "",
+            "columns": columns or [],
+            "content_hash": "sha256:e3b0c44298fc1c14",
+        }
+    frame = df.sort_index()
+    check_columns = columns or list(frame.columns)
+    frame = frame.reindex(columns=check_columns)
+    records = []
+    for idx, row in frame.iterrows():
+        record = {"__index__": pd.Timestamp(idx).isoformat()}
+        for col in check_columns:
+            value = row[col]
+            record[col] = None if pd.isna(value) else value
+        records.append(record)
+    payload = json.dumps({"columns": check_columns, "records": records}, sort_keys=True, default=str)
+    index = pd.DatetimeIndex(frame.index)
+    return {
+        "row_count": int(len(frame)),
+        "start": pd.Timestamp(index.min()).isoformat(),
+        "end": pd.Timestamp(index.max()).isoformat(),
+        "columns": check_columns,
+        "content_hash": f"sha256:{hashlib.sha256(payload.encode()).hexdigest()[:16]}",
+    }
+
+
+def _hash_file(path: Path) -> str:
+    """Compute a short content hash for an artifact file."""
+    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()[:16]}"
+
+
+def _build_order_rows(result: RunResult) -> list[dict[str, Any]]:
+    orders = getattr(result, "orders", [])
+    if orders:
+        return [_serialize_managed_order(managed) for managed in orders]
+    return [
+        {
+            "id": "",
+            "status": "filled",
+            "status_reason": "",
+            "symbol": fill.order.symbol,
+            "side": fill.order.side,
+            "shares": fill.order.shares,
+            "order_type": fill.order.order_type,
+            "limit_price": _optional_decimal(fill.order.limit_price),
+            "stop_price": _optional_decimal(fill.order.stop_price),
+            "trail_pct": fill.order.trail_pct if fill.order.trail_pct is not None else "",
+            "created_at": "",
+            "due_at": "",
+            "filled_at": fill.filled_at,
+            "filled_price": float(fill.filled_price),
+            "filled_shares": fill.order.shares,
+        }
+        for fill in result.trades
+    ]
+
+
+def _serialize_managed_order(managed: Any) -> dict[str, Any]:
+    order = managed.order
+    return {
+        "id": managed.id,
+        "status": managed.status,
+        "status_reason": getattr(managed, "status_reason", ""),
+        "symbol": order.symbol,
+        "side": order.side,
+        "shares": order.shares,
+        "order_type": order.order_type,
+        "limit_price": _optional_decimal(order.limit_price),
+        "stop_price": _optional_decimal(order.stop_price),
+        "trail_pct": order.trail_pct if order.trail_pct is not None else "",
+        "created_at": managed.created_at,
+        "due_at": managed.due_at or "",
+        "filled_at": managed.filled_at or "",
+        "filled_price": _optional_decimal(managed.filled_price),
+        "filled_shares": managed.filled_shares if managed.filled_shares is not None else "",
+    }
+
+
+def _optional_decimal(value: Any) -> float | str:
+    return float(value) if value is not None else ""
+
+
+def _hash_json_file(path: Path, exclude_keys: set[str] | None = None) -> str:
+    """Compute a short canonical JSON hash, optionally excluding run metadata keys."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and exclude_keys:
+        data = {key: value for key, value in data.items() if key not in exclude_keys}
+    canonical = json.dumps(data, sort_keys=True, default=str)
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()[:16]}"
+
+
+def _append_run_digest(run_dir: Path, artifact_hashes_hash: str) -> None:
+    digest_path = run_dir.parent / "run_digests.jsonl"
+    lock_path = digest_path.with_suffix(digest_path.suffix + ".lock")
+    entry = {
+        "run_id": run_dir.name,
+        "artifact_hashes": artifact_hashes_hash,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    with _FileLock(lock_path):
+        with open(digest_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+
+
+class _FileLock:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._fh: Any = None
+
+    def __enter__(self) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "a+")
+        import fcntl
+
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self._fh is None:
+            return
+        import fcntl
+
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        self._fh.close()
+
+
+def _sanitize_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _sanitize_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json(item) for item in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
+def _validate_strategy_id_for_path(strategy_id: str) -> None:
+    """Reject strategy IDs that could escape the requested run directory."""
+    if "/" in strategy_id or "\\" in strategy_id or ".." in Path(strategy_id).parts:
+        raise ValueError("strategy_id must not contain path separators or '..'")
+
+
+def _validate_crossover_rule_count(spec: StrategySpec) -> None:
+    count = sum(1 for rule in spec.signal.rules.values() if rule.type == "Crossover")
+    if count > 1:
+        raise ValueError("Multiple Crossover rules are not supported by the spec compiler")
+
+
+def _terminal_signal_names(spec: StrategySpec) -> list[str]:
+    referenced: set[str] = set()
+    for rule_def in spec.signal.rules.values():
+        if rule_def.type != "Composite":
+            continue
+        signals = rule_def.params.get("signals", [])
+        if isinstance(signals, list):
+            referenced.update(signal_name for signal_name in signals if isinstance(signal_name, str))
+    terminal = [name for name in spec.signal.rules if name not in referenced]
+    if len(terminal) != 1:
+        raise ValueError(
+            "Exactly one terminal signal rule is required for EqualWeight specs with signal.rules; "
+            f"found {terminal or 'none'}"
+        )
+    return terminal
+
+
+def _effective_signal_type(spec: StrategySpec, signal_name: str, seen: set[str] | None = None) -> str:
+    rule_def = spec.signal.rules[signal_name]
+    if rule_def.type != "Composite":
+        return rule_def.type
+    seen = set(seen or ())
+    if signal_name in seen:
+        return rule_def.type
+    seen.add(signal_name)
+    signals = rule_def.params.get("signals", [])
+    if not isinstance(signals, list):
+        return rule_def.type
+    child_types: list[str] = []
+    for child_name in signals:
+        if not isinstance(child_name, str) or child_name not in spec.signal.rules:
+            continue
+        child_types.append(_effective_signal_type(spec, child_name, seen))
+    has_event = any(child_type in _EVENT_SIGNAL_TYPES for child_type in child_types)
+    has_level = any(child_type not in _EVENT_SIGNAL_TYPES for child_type in child_types)
+    if rule_def.params.get("logic", "and") == "or" and has_event and has_level:
+        raise ValueError(
+            f"Composite signal '{signal_name}' with logic='or' cannot mix event and level signals"
+        )
+    if has_event:
+        return "Crossover"
+    return rule_def.type
+
+
+def _get_version() -> str:
+    """Get open-xquant version from package metadata."""
+    try:
+        from importlib.metadata import version
+
+        return version("open-xquant")
+    except Exception:
+        return "0.1.0"
+
+
+def _build_metrics(spec: StrategySpec, result: RunResult, run_id: str) -> dict[str, Any]:
+    """Build metrics dict including OOS-only metrics when test_period is defined."""
+    base = {
+        "strategy_id": spec.strategy_id,
+        "run_id": run_id,
+        "total_return": result.total_return(),
+        "annualized_return": result.annualized_return(),
+        "annualized_volatility": result.annualized_volatility(),
+        "max_drawdown": result.max_drawdown(),
+        "sharpe_ratio": result.sharpe_ratio(),
+        "sortino_ratio": result.sortino_ratio(),
+        "calmar_ratio": result.calmar_ratio(),
+        "turnover": result.turnover() if hasattr(result, "turnover") else 0.0,
+        "trade_count": len(result.trades),
+        "cost_paid": float(sum(float(f.fee) for f in result.trades)),
+        "slippage_paid": None,  # Not measurable without raw-vs-slipped fill price tracking
+    }
+
+    # Compute OOS-only metrics when test_period is defined
+    test = spec.validation.test_period
+    if test and len(test) >= 2 and len(result.equity_curve) > 1:
+        # Use first equity curve date's tz to match timezone-aware timestamps
+        first_dt = result.equity_curve[0][0]
+        tz = getattr(pd.Timestamp(first_dt), "tz", None)
+        test_start = pd.Timestamp(test[0], tz=tz)
+        equity_points = [(pd.Timestamp(d), v) for d, v in result.equity_curve]
+        pre_test_values = [v for d, v in equity_points if d < test_start]
+        oos_values = [v for d, v in equity_points if d >= test_start]
+        if pre_test_values:
+            oos_values.insert(0, pre_test_values[-1])
+        if len(oos_values) >= 2:
+            oos_array = np.array(oos_values, dtype=float)
+            denominators = oos_array[:-1]
+            if oos_array[0] <= 0 or np.any(denominators <= 0):
+                base["oos_sharpe_ratio"] = None
+                base["oos_total_return"] = None
+                base["oos_max_drawdown"] = None
+            else:
+                oos_returns = np.diff(oos_array) / denominators
+                oos_sharpe = (
+                    float(np.mean(oos_returns) / np.std(oos_returns) * np.sqrt(252))
+                    if np.std(oos_returns) > 0
+                    else 0.0
+                )
+                oos_return = (oos_values[-1] - oos_values[0]) / oos_values[0]
+                peak = np.maximum.accumulate(oos_array)
+                oos_max_dd = float(np.min((oos_array - peak) / peak))
+                base["oos_sharpe_ratio"] = oos_sharpe
+                base["oos_total_return"] = oos_return
+                base["oos_max_drawdown"] = oos_max_dd
+            # Filter OOS trades
+            oos_trades = [f for f in result.trades if _to_timestamp(f.filled_at, tz=tz) >= test_start]
+            base["oos_trade_count"] = len(oos_trades)
+
+    return base

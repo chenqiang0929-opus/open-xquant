@@ -1,94 +1,97 @@
 ---
 name: data-explorer
-description: 指导 Agent 探索和准备市场数据与宏观因子数据
-tools_required: [data_load_symbols, data_list_symbols, data_inspect, factor_download, factor_list, factor_inspect]
+description: >-
+  Inspect, download, and validate open-xquant market, macro, and financial
+  data; use before backtests, factor studies, or any task that depends on local
+  parquet data.
 ---
 
-## 你的角色
+# Data Explorer
 
-你是一个数据助手，帮助用户获取和探索市场数据与宏观因子数据。你可以使用以下工具：
+You prepare data before research. Do not assume data exists or is complete.
 
-**市场数据工具：**
-- **data_list_symbols**: 查看本地已有哪些标的的数据
-- **data_load_symbols**: 从外部数据源下载市场数据
-- **data_inspect**: 查看标的数据的详细信息（行数、时间范围、缺失值等）
+## Market Data
 
-**宏观因子工具：**
-- **factor_list**: 查看本地已有哪些宏观因子数据
-- **factor_download**: 从 World Bank 下载宏观指标（GDP、CPI 等）
-- **factor_inspect**: 查看因子数据的详细信息（年份范围、国家列表、样本值）
+List local parquet files:
 
-## 工作流 A：市场数据
+```bash
+uv run python - <<'PY'
+from oxq.tools.data import list_symbols
+print(list_symbols(data_dir="/path/to/market"))
+PY
+```
 
-### 1. 了解用户需求
+Inspect one symbol:
 
-- 用户想看什么市场？（美股 / A股）
-- 关注哪些标的？
-- 什么时间范围？
+```bash
+uv run python - <<'PY'
+from oxq.tools.data import inspect_symbol
+print(inspect_symbol("SPY", data_dir="/path/to/market"))
+PY
+```
 
-### 2. 检查本地数据
+Download with `yfinance`:
 
-- 调用 data_list_symbols 查看已有数据
-- 如果目标标的已存在，告知用户并询问是否需要更新
+```bash
+uv run python - <<'PY'
+from pathlib import Path
+from oxq.data.loaders import YFinanceDownloader
 
-### 3. 下载数据
+data_dir = Path("/tmp/oxq_agent_data")
+YFinanceDownloader().download_many(
+    symbols=["SPY", "QQQ"],
+    start="2018-01-01",
+    end="2026-01-01",
+    dest_dir=data_dir,
+)
+print(data_dir)
+PY
+```
 
-- 优先使用 source "yfinance"（美股和 A 股均支持，A 股 symbol 带交易所后缀如 "600519.SS"）
-- 如果 yfinance 下载失败，再尝试 source "akshare"（仅 A 股，symbol 使用纯数字代码如 "600519"）
-- 调用 data_load_symbols 下载
-- 报告下载结果（条数、时间范围）
+For A-share market bars, use `AkShareDownloader` and install the `akshare`
+extra first.
 
-### 4. 数据质量检查
+## Required Data Shape
 
-- 调用 data_inspect 查看数据摘要
-- 检查时间范围是否完整
-- 检查是否有缺失值
-- 向用户报告数据状况
+Every market parquet must have:
 
-## 工作流 B：宏观因子数据
+- file name `<SYMBOL>.parquet`
+- tz-aware `DatetimeIndex`
+- columns `open`, `high`, `low`, `close`, `volume`
+- enough history for indicator warmup and train/test periods
 
-### 1. 了解用户需求
+If `LocalMarketDataProvider` says `No data for '<SYMBOL>'`, stop and fix data
+or ask the user for a valid `--data-dir`.
 
-- 用户需要哪些宏观指标？可用指标：
-  - `gdp` — GDP（current USD）
-  - `gdp_per_capita` — 人均 GDP（current USD）
-  - `gdp_growth` — GDP 增长率（annual %）
-  - `cpi` — CPI 通胀率（annual %）
-- 关注哪些国家？（使用 ISO 3166-1 alpha-3 代码，如 CHN、USA、JPN、DEU）
-- 什么年份范围？
+## Macro Data
 
-### 2. 检查本地数据
+Use `WorldBankFetcher` with indicator name, year range, and countries:
 
-- 调用 factor_list 查看已有因子
-- 如果目标指标已存在，调用 factor_inspect 查看覆盖的国家和年份
-- 告知用户现有数据是否满足需求
+```python
+from oxq.data.factors import WorldBankFetcher
 
-### 3. 下载数据
+fetcher = WorldBankFetcher()
+gdp = fetcher.fetch(
+    target="gdp",
+    start="2018",
+    end="2024",
+    countries=["USA", "CHN"],
+)
+```
 
-- 调用 factor_download，传入 indicator、countries、start_year、end_year
-- 数据来源为 World Bank Open Data API（免费、无需 API Key）
-- 报告下载结果（国家数、年份范围、行数）
+Available macro aliases include `gdp`, `gdp_per_capita`, `gdp_growth`, and
+`cpi`.
 
-### 4. 数据质量检查
+## Financial Data
 
-- 调用 factor_inspect 查看数据概览
-- 检查是否有 NaN（某些国家某些年份可能无数据，属正常现象）
-- 向用户报告数据状况
+For A-share fundamentals, use `EastMoneyFetcher` through the factor data layer
+and verify available fields before screening. Network and provider coverage can
+fail; report provider errors directly.
 
-## 决策指南
+## Red Lines
 
-| 用户意图 | 走哪个工作流 |
-|---------|------------|
-| "下载苹果股票数据" | 工作流 A |
-| "下载 A 股数据" | 工作流 A |
-| "下载 GDP 数据" | 工作流 B |
-| "下载中国和美国的 CPI" | 工作流 B |
-| "准备回测数据" | 先工作流 A（行情），按需追加工作流 B（宏观） |
-
-## 错误处理
-
-- **SymbolNotFoundError**: 本地无数据。引导用户先用 data_load_symbols 下载。
-- **DownloadError**: 下载失败。告知用户可能的原因（网络问题、标的代码错误、数据源不可用），建议检查标的代码或更换 source。
-- **ValueError**: 未知的因子名称。告知用户可用的 indicator 列表：gdp、gdp_per_capita、gdp_growth、cpi。
-- **FileNotFoundError**: 因子文件不存在。引导用户先用 factor_download 下载。
-- **不要重试超过 1 次**。如果同一操作连续失败，告知用户错误信息并停止。
+- Do not run a formal backtest on unknown or missing data.
+- Do not mix data providers inside one run unless the user approves and the
+  report states it.
+- Do not treat generated mock data or demo downloads as production research
+  evidence.

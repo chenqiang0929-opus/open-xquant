@@ -1,73 +1,70 @@
-# Factor Screening Skill
+---
+name: factor-screening
+description: >-
+  Screen symbols with open-xquant price, financial, and custom factors; use
+  when users ask for value, quality, momentum, or multi-factor candidate lists.
+---
 
-## Purpose
+# Factor Screening
 
-Screen stocks by indicator conditions from a specified index or custom universe.
+You build candidate lists from data. Screening is not a backtest.
 
-## When to Use
+## Confirm Inputs
 
-User wants to filter/screen stocks by financial or technical indicator conditions.
-Examples:
-- "从沪深300中选择ROE大于15的股票"
-- "Select CSI500 stocks with PB < 5 and momentum > 10"
-- "筛选上证50中市盈率低于20的股票"
+Ask for:
 
-## Workflow
+- market and symbols
+- factor definitions
+- rebalance date or date range
+- thresholds or ranking rules
+- required data provider
+- how to handle missing values
 
-### Step 1: Clarify Universe
+## Inspect Available Indicators
 
-If user specifies an index (沪深300, CSI300, etc.):
-```
-→ universe_set(type="index", code="csi300")
-```
-
-If user provides a symbol list:
-```
-→ universe_set(type="static", symbols=[...])
-```
-
-If neither specified, ask: "Which universe? (e.g., csi300, csi500, sse50, or a list of symbols)"
-
-### Step 2: Resolve Indicator Names
-
-Use `resolve_alias()` to map Chinese names to canonical English:
-- 市净率 → pb
-- 市盈率 → pe_ttm
-- 动量 → momentum
-- 净资产收益率 → roe
-
-### Step 3: Ensure Data Availability
-
-For each indicator needed:
-
-**Download-type indicators (roe, pe_ttm, pb, roa, peg):**
-```
-→ financial_download(symbol=sym, start=start, end=end, source="eastmoney",
-                     indicators=["roe", "pe_ttm", "pb"])
+```bash
+uv run python - <<'PY'
+import oxq
+print(sorted(oxq.list_indicators()))
+PY
 ```
 
-**Compute-type indicators (momentum, volatility):**
-1. Ensure OHLCV data is available: `data_load_symbols(symbols=..., source=...)`
-2. Indicators will be computed by Engine from OHLCV data.
+Financial indicator classes include names such as `PE`, `PB`, `BP`, `EP`,
+`ROEChange`, `NetProfitMargin`, `AccrualRatio`, `CashFlowRatio`, `MarketCap`,
+`TurnoverRate`, and `PowerRatio`. Verify required input columns before
+computing them.
 
-**Important:** Downloaded financial data needs to be merged into the mktdata wide table
-before screening. Use `read_factor()` to load financial data, then merge relevant
-columns into each symbol's OHLCV DataFrame.
+## Price-Based Screening Pattern
 
-### Step 4: Screen
+```python
+import pandas as pd
 
+from oxq.data.market import LocalMarketDataProvider
+from oxq.indicators import NdayReturn, RollingVolatility
+
+symbols = ["AAPL", "MSFT", "GOOGL"]
+market = LocalMarketDataProvider(data_dir="/path/to/parquet")
+
+rows = []
+for sym in symbols:
+    bars = market.get_bars(sym, "2020-01-01", "2024-12-31")
+    momentum = NdayReturn().compute(bars, column="close", period=60).iloc[-1]
+    volatility = RollingVolatility().compute(bars, column="close", period=20).iloc[-1]
+    rows.append({"symbol": sym, "momentum_60": momentum, "vol_20": volatility})
+
+screen = pd.DataFrame(rows).dropna()
+screen["score"] = screen["momentum_60"].rank(pct=True) - screen["vol_20"].rank(pct=True)
+candidates = screen.sort_values("score", ascending=False).head(10)
 ```
-→ universe_set(type="filter", symbols=symbols,
-    filters=[
-        {"column": "roe", "op": ">", "value": 15},
-        {"column": "pb", "op": "<", "value": 10},
-    ])
-```
 
-### Step 5: Present Results
+## Financial Screening
 
-Show the audit table (details) to the user for verification.
-Offer next steps:
-- "构建等权组合并回测？"
-- "调整筛选条件？"
-- "导出符合条件的股票列表？"
+For financial fields, use the factor data layer and inspect returned columns.
+Do not assume all financial indicators can compute from OHLCV bars alone.
+
+## Red Lines
+
+- Do not call a screened list a validated strategy.
+- Do not ignore missing factor values.
+- Do not mix A-share and US data providers in one score without explaining it.
+- Do not use future financial statement publication dates.

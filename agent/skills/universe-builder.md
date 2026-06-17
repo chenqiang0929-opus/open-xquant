@@ -1,56 +1,69 @@
 ---
 name: universe-builder
-description: 指导 Agent 构建投资标的池（Universe）
-tools_required: [universe_*, data_*]
+description: >-
+  Define open-xquant strategy universes and explain survivorship/PIT
+  constraints; use when users choose symbols, indexes, dynamic filters, or
+  tradable pools.
 ---
 
-## 工作流
+# Universe Builder
 
-1. 理解用户意图：什么市场？哪些标的？需要筛选条件吗？
-2. 检查本地数据：调用 data_list_symbols 查看已有数据
-3. 加载数据（如需要）：调用 data_load_symbols 下载行情
-4. 构建 Universe：
-   a. 手动指定标的 → universe_resolve_static
-   b. 基于量价条件筛选 → universe_resolve_filter
-5. 验证：调用 universe_inspect 检查数据可用性
-6. 迭代：根据结果调整标的或筛选条件
+You help the user define the tradable symbol pool.
 
-## 决策指南
+## Current Stable Spec Path
 
-- 已知确定的标的列表 → universe_resolve_static（如：["AAPL", "GOOGL", "MSFT"]）
-- 需要从一组标的中按条件筛选 → universe_resolve_filter
-  - 最低价格：close >= 10（排除低价股）
-  - 最小成交量：volume >= 1000000（流动性筛选）
-  - 可组合多个条件（AND 关系）
-- 构建 Universe 后，始终调用 universe_inspect 确认数据完整
+The audited CLI compiler currently supports:
 
-## 筛选条件格式
-
-每个 filter 包含三个字段：
-- column：数据列名（如 close, volume, open, high, low）
-- op：比较运算符（>=, <=, >, <, ==, !=）
-- value：数值阈值
-
-示例：筛选最新收盘价 >= 100 且成交量 >= 100 万的标的
-
-```json
-[
-  {"column": "close", "op": ">=", "value": 100},
-  {"column": "volume", "op": ">=", "value": 1000000}
-]
+```yaml
+universe:
+  type: static
+  symbols: ["SPY", "QQQ"]
+  point_in_time: false
+  survivorship_bias_policy: warn
 ```
 
-## 常见场景
+Treat `index` and `filter` universe as SDK or future/extended paths unless you
+verify a specific runtime path supports them.
 
-### 场景 1：手动指定标的
-用户说"我要投资 AAPL 和 GOOGL"
-→ universe_resolve_static(symbols=["AAPL", "GOOGL"])
+## Required Checks
 
-### 场景 2：流动性筛选
-用户说"从科技股中选出成交量大的"
-→ 先 data_load_symbols 下载数据
-→ universe_resolve_filter(base_symbols=[...], filters=[{"column": "volume", "op": ">=", "value": 1000000}])
+Before validating or backtesting:
 
-### 场景 3：价格过滤
-用户说"排除低于 10 元的股票"
-→ universe_resolve_filter(base_symbols=[...], filters=[{"column": "close", "op": ">=", "value": 10}])
+- ensure `symbols` is not empty
+- reject unsafe symbols containing `/`, `\`, `.`, `..`, or absolute paths
+- make sure local parquet data exists for every symbol
+- make benchmark symbols available in the same data directory
+- explain survivorship risk when `point_in_time: false`
+
+Check local data:
+
+```bash
+uv run python - <<'PY'
+from pathlib import Path
+
+data_dir = Path("/path/to/parquet")
+symbols = ["SPY", "QQQ"]
+missing = [s for s in symbols if not (data_dir / f"{s}.parquet").exists()]
+print("missing:", missing)
+PY
+```
+
+## SDK Path
+
+Use SDK only when the user explicitly needs dynamic universe logic:
+
+```python
+from oxq.universe.static import StaticUniverse
+
+universe = StaticUniverse(("SPY", "QQQ", "IWM"))
+```
+
+If using `FilterUniverse` or `IndexUniverse`, read the implementation and tests
+first, then state that this is outside the current audited CLI spec path.
+
+## Red Lines
+
+- Do not promise point-in-time index membership unless the data source proves it.
+- Do not hide survivorship warnings.
+- Do not mix unrelated markets or calendars in one spec without explaining the
+  data and currency implications.
