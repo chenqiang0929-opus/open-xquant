@@ -59,8 +59,8 @@ def run_robustness(run_dir: str | Path) -> dict:
     try:
         cost_x2_dir = run_path.parent / f"{run_path.name}_cost_x2"
         cost_spec = _clone_spec_with_cost_multiplier(spec, 2.0)
-        cost_result, _ = compile_run(cost_spec, out_dir=str(cost_x2_dir), data_dir=data_dir)
-        perturbed_sharpe = _finite_float(cost_result.sharpe_ratio())
+        _, cost_run_dir = compile_run(cost_spec, out_dir=str(cost_x2_dir), data_dir=data_dir)
+        perturbed_sharpe = _read_metric_sharpe(Path(cost_run_dir) / "metrics.json")
         if baseline_sharpe is None or perturbed_sharpe is None:
             tests.append({
                 "name": "cost_x2",
@@ -150,6 +150,13 @@ def _read_json_object(path: Path, name: str) -> tuple[dict[str, Any], str | None
     return value, None
 
 
+def _read_metric_sharpe(path: Path) -> float | None:
+    metrics, error = _read_json_object(path, path.name)
+    if error is not None:
+        return None
+    return _finite_float(metrics.get("sharpe_ratio"))
+
+
 def _finite_float(value: object) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -181,6 +188,7 @@ def _clone_spec_with_cost_multiplier(spec: StrategySpec, multiplier: float) -> S
         ),
         benchmark=spec.benchmark,
         validation=spec.validation,
+        metrics=spec.metrics,
         robustness=spec.robustness,
         decision_policy=spec.decision_policy,
     )

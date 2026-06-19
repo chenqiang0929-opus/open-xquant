@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+_UNSET = object()
+
 
 def make_strategy_id(description: str, max_length: int = 50) -> str:
     """Create a validator-safe strategy_id from free-form text."""
@@ -130,6 +132,63 @@ class ValidationSection:
     required_oos: bool = False
 
 
+@dataclass(init=False)
+class MetricsSection:
+    profile: str = "open_xquant_default"
+    risk_free_rate: float = 0.0
+    return_type: str = "simple"
+    annualization_days: int = 252
+    calmar_denominator: str = "max_drawdown"
+    evaluation_window: str = "full"
+    _explicit_fields: set[str] = field(default_factory=set, repr=False, compare=False, metadata={"serialize": False})
+
+    def __init__(
+        self,
+        profile: str = "open_xquant_default",
+        risk_free_rate: Any = _UNSET,
+        return_type: Any = _UNSET,
+        annualization_days: Any = _UNSET,
+        calmar_denominator: Any = _UNSET,
+        evaluation_window: Any = _UNSET,
+        _explicit_fields: set[str] | None = None,
+    ) -> None:
+        provided_fields = {"profile"} if profile != "open_xquant_default" else set()
+        values = {
+            "risk_free_rate": 0.0,
+            "return_type": "simple",
+            "annualization_days": 252,
+            "calmar_denominator": "max_drawdown",
+            "evaluation_window": "full",
+        }
+        for name, value in (
+            ("risk_free_rate", risk_free_rate),
+            ("return_type", return_type),
+            ("annualization_days", annualization_days),
+            ("calmar_denominator", calmar_denominator),
+            ("evaluation_window", evaluation_window),
+        ):
+            if value is not _UNSET:
+                values[name] = value
+                provided_fields.add(name)
+
+        object.__setattr__(self, "profile", profile)
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "_explicit_fields", set(_explicit_fields) if _explicit_fields is not None else provided_fields)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name in {
+            "profile",
+            "risk_free_rate",
+            "return_type",
+            "annualization_days",
+            "calmar_denominator",
+            "evaluation_window",
+        } and hasattr(self, "_explicit_fields"):
+            self._explicit_fields.add(name)
+
+
 @dataclass
 class RobustnessSection:
     cost_multiplier: list[float] = field(default_factory=list)
@@ -166,6 +225,7 @@ class StrategySpec:
     cost: CostSection = field(default_factory=CostSection)
     benchmark: BenchmarkSection = field(default_factory=BenchmarkSection)
     validation: ValidationSection = field(default_factory=ValidationSection)
+    metrics: MetricsSection = field(default_factory=MetricsSection)
     robustness: RobustnessSection = field(default_factory=RobustnessSection)
     decision_policy: DecisionPolicy = field(default_factory=DecisionPolicy)
 
@@ -173,6 +233,8 @@ class StrategySpec:
         """Compute sha256 hash of the spec for reproducibility tracking."""
         self.execution.normalize_lot_size_config()
         canonical_obj = _dataclass_to_canonical_dict(self)
+        if self.metrics == MetricsSection():
+            canonical_obj.pop("metrics", None)
         if (
             any((self.execution.order_timing, self.execution.price_bar, self.execution.price_type))
             and self.execution.fill_price_mode == "next_open"
@@ -208,6 +270,7 @@ class StrategySpec:
             cost=_parse_cost(raw.get("cost", {})),
             benchmark=_parse_benchmark(raw.get("benchmark", {})),
             validation=_parse_validation(raw.get("validation", {})),
+            metrics=_parse_metrics(raw.get("metrics", {})),
             robustness=_parse_robustness(raw.get("robustness", {})),
             decision_policy=_parse_decision_policy(raw.get("decision_policy", {})),
         )
@@ -233,6 +296,7 @@ class StrategySpec:
                 test_period=["2022-01-01", "2025-12-31"],
                 required_oos=True,
             ),
+            metrics=MetricsSection(),
         )
 
 
@@ -371,6 +435,45 @@ def _parse_validation(raw: dict) -> ValidationSection:
     )
 
 
+def _parse_metrics(raw: object) -> MetricsSection:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("metrics must be a mapping")
+    profile = _parse_str(raw.get("profile", "open_xquant_default"), "metrics.profile")
+    profile_defaults = _metrics_profile_defaults(profile)
+    return MetricsSection(
+        profile=profile,
+        risk_free_rate=_parse_float(raw.get("risk_free_rate", profile_defaults["risk_free_rate"]), "metrics.risk_free_rate"),
+        return_type=_parse_str(raw.get("return_type", profile_defaults["return_type"]), "metrics.return_type"),
+        annualization_days=_parse_int(raw.get("annualization_days", profile_defaults["annualization_days"]), "metrics.annualization_days"),
+        calmar_denominator=_parse_str(
+            raw.get("calmar_denominator", profile_defaults["calmar_denominator"]),
+            "metrics.calmar_denominator",
+        ),
+        evaluation_window=_parse_str(raw.get("evaluation_window", profile_defaults["evaluation_window"]), "metrics.evaluation_window"),
+        _explicit_fields=set(raw.keys()),
+    )
+
+
+def _metrics_profile_defaults(profile: str) -> dict[str, object]:
+    if profile == "xquant_production":
+        return {
+            "risk_free_rate": 0.02,
+            "return_type": "log",
+            "annualization_days": 252,
+            "calmar_denominator": "max_drawdown",
+            "evaluation_window": "full",
+        }
+    return {
+        "risk_free_rate": 0.0,
+        "return_type": "simple",
+        "annualization_days": 252,
+        "calmar_denominator": "max_drawdown",
+        "evaluation_window": "full",
+    }
+
+
 def _parse_robustness(raw: dict) -> RobustnessSection:
     return RobustnessSection(
         cost_multiplier=raw.get("cost_multiplier", []),
@@ -474,6 +577,9 @@ def _dataclass_to_dict(obj: Any) -> Any:
     """Recursively convert dataclass to dict for serialization."""
     from dataclasses import MISSING, fields, is_dataclass
 
+    if isinstance(obj, MetricsSection) and obj.profile != "open_xquant_default":
+        return _effective_metrics_dict(obj)
+
     if is_dataclass(obj):
         result = {}
         for f in fields(obj):
@@ -502,6 +608,9 @@ def _dataclass_to_canonical_dict(obj: Any) -> Any:
     """Recursively convert dataclass to a complete canonical dict."""
     from dataclasses import fields, is_dataclass
 
+    if isinstance(obj, MetricsSection) and obj.profile != "open_xquant_default":
+        return _effective_metrics_dict(obj)
+
     if is_dataclass(obj):
         result = {}
         for f in fields(obj):
@@ -514,3 +623,22 @@ def _dataclass_to_canonical_dict(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _dataclass_to_canonical_dict(v) for k, v in obj.items()}
     return obj
+
+
+def _effective_metrics_dict(obj: MetricsSection) -> dict[str, Any]:
+    defaults = _metrics_profile_defaults(obj.profile)
+    explicit_fields = set(getattr(obj, "_explicit_fields", set()))
+    return {
+        "profile": obj.profile,
+        "risk_free_rate": obj.risk_free_rate if "risk_free_rate" in explicit_fields else defaults["risk_free_rate"],
+        "return_type": obj.return_type if "return_type" in explicit_fields else defaults["return_type"],
+        "annualization_days": obj.annualization_days
+        if "annualization_days" in explicit_fields
+        else defaults["annualization_days"],
+        "calmar_denominator": obj.calmar_denominator
+        if "calmar_denominator" in explicit_fields
+        else defaults["calmar_denominator"],
+        "evaluation_window": obj.evaluation_window
+        if "evaluation_window" in explicit_fields
+        else defaults["evaluation_window"],
+    }
