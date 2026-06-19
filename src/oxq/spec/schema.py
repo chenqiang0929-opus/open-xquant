@@ -87,12 +87,28 @@ class RebalanceDef:
 
 
 @dataclass
+class LotSizeConfig:
+    default: int | None = None
+    by_symbol: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
 class ExecutionSection:
     trade_time: str = "next_open"
     fill_price_mode: str = "next_open"
     rebalance: RebalanceDef = field(default_factory=RebalanceDef)
     lot_size: int = 1
+    order_timing: str = ""
+    price_bar: str = ""
+    price_type: str = ""
+    lot_size_config: LotSizeConfig = field(default_factory=LotSizeConfig)
+    cash_annual_return: float = 0.0
     initial_cash: float = 100_000.0
+    _fill_price_mode_explicit: bool = field(default=False, repr=False, compare=False, metadata={"serialize": False})
+
+    def normalize_lot_size_config(self) -> None:
+        if self.lot_size_config.default is None:
+            self.lot_size_config.default = self.lot_size
 
 
 @dataclass
@@ -155,13 +171,20 @@ class StrategySpec:
 
     def compute_hash(self) -> str:
         """Compute sha256 hash of the spec for reproducibility tracking."""
-        from dataclasses import asdict
-
-        canonical = json.dumps(asdict(self), sort_keys=True, default=str)
+        self.execution.normalize_lot_size_config()
+        canonical_obj = _dataclass_to_canonical_dict(self)
+        if (
+            any((self.execution.order_timing, self.execution.price_bar, self.execution.price_type))
+            and self.execution.fill_price_mode == "next_open"
+            and not self.execution._fill_price_mode_explicit
+        ):
+            canonical_obj["execution"]["fill_price_mode"] = ""
+        canonical = json.dumps(canonical_obj, sort_keys=True, default=str)
         return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()[:16]}"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a nested dict suitable for YAML output."""
+        self.execution.normalize_lot_size_config()
         return _dataclass_to_dict(self)
 
     @classmethod
@@ -283,9 +306,17 @@ def _parse_portfolio(raw: dict) -> PortfolioSection:
 def _parse_execution(raw: dict) -> ExecutionSection:
     rebalance_raw = raw.get("rebalance", {})
     rebalance_frequency = rebalance_raw.get("frequency", "daily")
+    lot_size = _parse_int(raw.get("lot_size", 1), "execution.lot_size")
+    order_timing = _parse_str(raw.get("order_timing", ""), "execution.order_timing")
+    price_bar = _parse_str(raw.get("price_bar", ""), "execution.price_bar")
+    price_type = _parse_str(raw.get("price_type", ""), "execution.price_type")
+    fill_price_mode = _parse_str(
+        raw.get("fill_price_mode", "" if any((order_timing, price_bar, price_type)) else "next_open"),
+        "execution.fill_price_mode",
+    )
     return ExecutionSection(
         trade_time=raw.get("trade_time", "next_open"),
-        fill_price_mode=raw.get("fill_price_mode", "next_open"),
+        fill_price_mode=fill_price_mode,
         rebalance=RebalanceDef(
             frequency=rebalance_frequency,
             interval_days=_parse_int(
@@ -293,9 +324,31 @@ def _parse_execution(raw: dict) -> ExecutionSection:
                 "execution.rebalance.interval_days",
             ),
         ),
-        lot_size=_parse_int(raw.get("lot_size", 1), "execution.lot_size"),
+        lot_size=lot_size,
+        order_timing=order_timing,
+        price_bar=price_bar,
+        price_type=price_type,
+        lot_size_config=_parse_lot_size_config(raw.get("lot_size_config"), lot_size),
+        cash_annual_return=_parse_float(raw.get("cash_annual_return", 0.0), "execution.cash_annual_return"),
         initial_cash=_parse_float(raw.get("initial_cash", 100_000.0), "execution.initial_cash"),
+        _fill_price_mode_explicit="fill_price_mode" in raw,
     )
+
+
+def _parse_lot_size_config(raw: object, fallback_lot_size: int) -> LotSizeConfig:
+    if raw is None:
+        return LotSizeConfig(default=fallback_lot_size)
+    if not isinstance(raw, dict):
+        raise ValueError("execution.lot_size_config must be a mapping")
+    default = _parse_int(raw.get("default", fallback_lot_size), "execution.lot_size_config.default")
+    by_symbol_raw = raw.get("by_symbol", {})
+    if not isinstance(by_symbol_raw, dict):
+        raise ValueError("execution.lot_size_config.by_symbol must be a mapping")
+    by_symbol = {
+        str(symbol): _parse_int(value, f"execution.lot_size_config.by_symbol.{symbol}")
+        for symbol, value in by_symbol_raw.items()
+    }
+    return LotSizeConfig(default=default, by_symbol=by_symbol)
 
 
 def _parse_cost(raw: dict) -> CostSection:
@@ -371,6 +424,12 @@ def _parse_params(value: object, field_name: str) -> dict[str, Any]:
     return value
 
 
+def _parse_str(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    return value
+
+
 def _parse_float(value: object, field_name: str) -> float:
     if isinstance(value, bool):
         raise ValueError(f"{field_name} must be numeric")
@@ -418,6 +477,8 @@ def _dataclass_to_dict(obj: Any) -> Any:
     if is_dataclass(obj):
         result = {}
         for f in fields(obj):
+            if f.metadata.get("serialize") is False:
+                continue
             value = getattr(obj, f.name)
             if value is not None:
                 if f.default is not MISSING and value == f.default:
@@ -434,4 +495,22 @@ def _dataclass_to_dict(obj: Any) -> Any:
         return [_dataclass_to_dict(v) for v in obj]
     if isinstance(obj, dict):
         return {k: _dataclass_to_dict(v) for k, v in obj.items()}
+    return obj
+
+
+def _dataclass_to_canonical_dict(obj: Any) -> Any:
+    """Recursively convert dataclass to a complete canonical dict."""
+    from dataclasses import fields, is_dataclass
+
+    if is_dataclass(obj):
+        result = {}
+        for f in fields(obj):
+            if f.metadata.get("serialize") is False:
+                continue
+            result[f.name] = _dataclass_to_canonical_dict(getattr(obj, f.name))
+        return result
+    if isinstance(obj, (list, tuple)):
+        return [_dataclass_to_canonical_dict(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _dataclass_to_canonical_dict(v) for k, v in obj.items()}
     return obj

@@ -314,6 +314,14 @@ def test_missing_ratio_treats_non_midnight_daily_rows_as_sessions(tmp_path) -> N
     assert manifest["data_fingerprints"]["SPY"]["row_count"] == 2
 
 
+@pytest.mark.parametrize("calendar", ["XNYS", "ARCX", "XSHG", "XSHE"])
+def test_exchange_calendar_sessions_accepts_supported_calendar_names(calendar: str) -> None:
+    sessions = compiler._exchange_calendar_sessions(pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-05"), calendar)
+
+    assert sessions is not None
+    assert len(sessions) > 0
+
+
 def test_data_fingerprint_covers_non_midnight_daily_row_values() -> None:
     expected_index = pd.DatetimeIndex(["2024-01-02", "2024-01-03"], tz="UTC")
     dates = pd.to_datetime(["2024-01-02 21:00", "2024-01-03 21:00"], utc=True)
@@ -846,6 +854,134 @@ def test_compile_run_rejects_invalid_specs_before_execution(tmp_path) -> None:
         compile_run(spec, out_dir=tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("order_timing", "price_type", "expected_fill_price_mode"),
+    [
+        ("next_session_open", "open", compiler.FillPriceMode.NEXT_OPEN),
+        ("next_session_close", "close", compiler.FillPriceMode.NEXT_CLOSE),
+        ("next_session_mid", "mid", compiler.FillPriceMode.NEXT_MID),
+        ("next_session_avg", "avg", compiler.FillPriceMode.NEXT_AVG),
+    ],
+)
+def test_compile_run_explicit_next_session_modes_instantiate_matching_broker(
+    tmp_path,
+    monkeypatch,
+    order_timing,
+    price_type,
+    expected_fill_price_mode,
+) -> None:
+    spec = StrategySpec.template(strategy_id=f"explicit_{price_type}", hypothesis="explicit execution reaches broker")
+    spec.execution.fill_price_mode = ""
+    spec.execution.trade_time = "next_open"
+    spec.execution.order_timing = order_timing
+    spec.execution.price_bar = "next_session"
+    spec.execution.price_type = price_type
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    class BrokerProbe:
+        def __init__(self, *args, **kwargs) -> None:
+            assert kwargs["fill_price_mode"] == expected_fill_price_mode
+            raise RuntimeError("broker probe complete")
+
+    monkeypatch.setattr(compiler, "SimBroker", BrokerProbe)
+
+    with pytest.raises(RuntimeError, match="broker probe complete"):
+        compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+
+def test_compile_run_passes_cash_annual_return_to_engine(tmp_path, monkeypatch) -> None:
+    spec = StrategySpec.template(strategy_id="cash_return", hypothesis="cash return reaches runtime")
+    spec.execution.cash_annual_return = 0.025
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    captured: dict = {}
+
+    class EngineProbe:
+        def run(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(compiler, "Engine", EngineProbe)
+    monkeypatch.setattr(compiler, "_write_artifacts", lambda *args, **kwargs: None)
+
+    compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+    assert captured["cash_annual_return"] == 0.025
+
+
+def test_compile_run_uses_lot_size_config_default(tmp_path, monkeypatch) -> None:
+    spec = StrategySpec.template(strategy_id="lot_size_config", hypothesis="lot config controls runtime lot size")
+    spec.execution.lot_size = 1
+    spec.execution.lot_size_config.default = 100
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    captured: dict = {}
+
+    class EngineProbe:
+        def run(self, **kwargs):
+            captured.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(compiler, "Engine", EngineProbe)
+    monkeypatch.setattr(compiler, "_write_artifacts", lambda *args, **kwargs: None)
+
+    compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+    assert captured["lot_size"] == 100
+
+
+def test_compile_run_writes_execution_assumptions_artifact(tmp_path) -> None:
+    spec = StrategySpec.template(strategy_id="execution_assumptions", hypothesis="execution assumptions are auditable")
+    spec.market.calendar = "XSHE"
+    spec.execution.fill_price_mode = ""
+    spec.execution.order_timing = "next_session_open"
+    spec.execution.price_bar = "next_session"
+    spec.execution.price_type = "open"
+    spec.execution.cash_annual_return = 0.025
+    spec.execution.lot_size = 1
+    spec.execution.lot_size_config.default = 100
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-03"]
+    spec.validation.required_oos = False
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03"], utc=True)
+    pd.DataFrame(
+        {
+            "open": [1.0, 2.0],
+            "high": [1.0, 2.0],
+            "low": [1.0, 2.0],
+            "close": [1.0, 2.0],
+            "volume": [100, 100],
+        },
+        index=dates,
+    ).to_parquet(data_dir / "SPY.parquet")
+
+    _, run_dir = compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+    assumptions = json.loads((run_dir / "execution_assumptions.json").read_text(encoding="utf-8"))
+    hashes = json.loads((run_dir / "artifact_hashes.json").read_text(encoding="utf-8"))
+    assert assumptions == {
+        "schema_version": 1,
+        "calendar": "XSHE",
+        "runtime_calendar": "XSHG",
+        "order_timing": "next_session_open",
+        "price_bar": "next_session",
+        "price_type": "open",
+        "fill_price_mode": "next_open",
+        "compatibility_source": "explicit_fields",
+        "cash_annual_return": 0.025,
+        "lot_size": 1,
+        "lot_size_config": {
+            "default": 100,
+            "by_symbol": {},
+        },
+    }
+    assert "execution_assumptions.json" in hashes
+    assert audit_reproducibility(run_dir)["status"] == "pass"
+
+
 def test_compile_run_records_resolved_default_data_dir(tmp_path, monkeypatch) -> None:
     spec = StrategySpec.template(strategy_id="resolved_data_dir", hypothesis="default data dir is auditable")
     market_dir = tmp_path / "oxq_data" / "market"
@@ -914,6 +1050,32 @@ def test_compile_run_uses_spec_market_currency(tmp_path) -> None:
 
     assert result.portfolio.currency == "USD"
     assert {fill.order.currency for fill in result.trades} <= {"USD"}
+
+
+def test_compile_run_accepts_xshe_calendar_alias_and_preserves_manifest_calendar(tmp_path) -> None:
+    spec = StrategySpec.template(strategy_id="xshe_calendar", hypothesis="XSHE aliases for runtime calendar resolution")
+    spec.market.calendar = "XSHE"
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-03"]
+    spec.validation.required_oos = False
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    dates = pd.to_datetime(["2024-01-02", "2024-01-03"], utc=True)
+    pd.DataFrame(
+        {
+            "open": [1.0, 2.0],
+            "high": [1.0, 2.0],
+            "low": [1.0, 2.0],
+            "close": [1.0, 2.0],
+            "volume": [100, 100],
+        },
+        index=dates,
+    ).to_parquet(data_dir / "SPY.parquet")
+
+    _, run_dir = compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+    manifest = json.loads((run_dir / "data_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["calendar"] == "XSHE"
 
 
 def test_compile_run_expires_pending_buy_for_latched_sparse_symbol_missing_next_open(tmp_path) -> None:
@@ -1797,6 +1959,7 @@ def test_reproducibility_audit_allows_legacy_artifacts_without_source_fingerprin
         "trades.csv": current_hashes["trades.csv"],
         "metrics.json": current_hashes["metrics.json"],
     }
+    (tmp_path / "execution_assumptions.json").unlink(missing_ok=True)
     (tmp_path / "artifact_hashes.json").write_text(json.dumps(hashes), encoding="utf-8")
     (tmp_path.parent / "run_digests.jsonl").write_text(
         json.dumps({"run_id": tmp_path.name, "artifact_hashes": _hash_json_file(tmp_path / "artifact_hashes.json")}) + "\n",

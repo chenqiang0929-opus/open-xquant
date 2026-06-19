@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from oxq.market_calendar import normalize_exchange_calendar
+
 
 def audit_reproducibility(run_dir: str | Path) -> dict:
     """Verify that a backtest run's core outputs are consistent.
@@ -113,6 +115,7 @@ def audit_reproducibility(run_dir: str | Path) -> dict:
         **required_artifact_hashes,
         "strategy_spec.yaml": "strategy_spec_file_hash",
         "environment.json": "environment_hash",
+        "execution_assumptions.json": "execution_assumptions_hash",
         "positions.csv": "positions_hash",
         "orders.csv": "orders_hash",
     }
@@ -134,11 +137,18 @@ def audit_reproducibility(run_dir: str | Path) -> dict:
                         "fatal",
                         "artifact_hashes.json schema_version must be >= 1 for data_manifest schema_version >= 1",
                     ))
-                required_hashes = (
-                    new_required_artifact_hashes
-                    if manifest_schema_version >= 1 or artifact_schema_version >= 1
-                    else required_artifact_hashes
-                )
+                if artifact_schema_version >= 2:
+                    required_hashes = new_required_artifact_hashes
+                elif manifest_schema_version >= 1 or artifact_schema_version >= 1:
+                    required_hashes = {
+                        **required_artifact_hashes,
+                        "strategy_spec.yaml": "strategy_spec_file_hash",
+                        "environment.json": "environment_hash",
+                        "positions.csv": "positions_hash",
+                        "orders.csv": "orders_hash",
+                    }
+                else:
+                    required_hashes = required_artifact_hashes
                 missing_hash_keys = sorted(set(required_hashes).difference(expected_hashes))
             except (TypeError, ValueError):
                 checks.append(_check("artifact_hashes", False, "fatal", "artifact_hashes.json has invalid schema_version"))
@@ -170,7 +180,7 @@ def audit_reproducibility(run_dir: str | Path) -> dict:
                     actual = _hash_json_file(run_path / fname, exclude_keys={"run_id"})
                 elif fname == "environment.json":
                     actual = _hash_json_file(run_path / fname, exclude_keys={"run_timestamp"})
-                elif fname == "data_manifest.json":
+                elif fname in {"data_manifest.json", "execution_assumptions.json"}:
                     actual = _hash_json_file(run_path / fname)
                 else:
                     content = (run_path / fname).read_bytes()
@@ -342,7 +352,7 @@ def _align_to_calendar_sessions(df: pd.DataFrame, calendar: object, start: objec
         return df
     import exchange_calendars as xcals
 
-    cal = xcals.get_calendar(calendar)
+    cal = xcals.get_calendar(normalize_exchange_calendar(calendar))
     sessions = cal.sessions_in_range(pd.Timestamp(start).date(), pd.Timestamp(end).date())
     return _select_frame_for_session_fingerprint(df, pd.DatetimeIndex(sessions))
 

@@ -28,8 +28,10 @@ from oxq.core.strategy import Strategy
 from oxq.core.types import PortfolioOptimizer, Signal
 from oxq.data.loaders import resolve_data_dir
 from oxq.data.market import LocalMarketDataProvider
+from oxq.market_calendar import normalize_exchange_calendar
 from oxq.portfolio.analytics import RunResult
 from oxq.rules.constraint import RebalanceFrequencyRule
+from oxq.spec.execution import derive_execution_semantics
 from oxq.spec.schema import StrategySpec
 from oxq.trade.fees import PercentageFee
 from oxq.trade.sim_broker import FillPriceMode, SimBroker
@@ -39,7 +41,10 @@ from oxq.universe.static import StaticUniverse
 FILL_PRICE_MODE_MAP: dict[str, FillPriceMode] = {
     "close": FillPriceMode.CLOSE,
     "next_open": FillPriceMode.NEXT_OPEN,
+    "next_close": FillPriceMode.NEXT_CLOSE,
     "mid": FillPriceMode.MID,
+    "next_mid": FillPriceMode.NEXT_MID,
+    "next_avg": FillPriceMode.NEXT_AVG,
 }
 
 # Signals that fire on a single bar and should latch once triggered.
@@ -87,6 +92,13 @@ def _build_optimizer(spec: StrategySpec) -> PortfolioOptimizer:
         return _SignalFilteredEqualWeightOptimizer(signal_names=signal_names, signal_types=signal_types)
 
     return opt_cls(**spec.portfolio.params)
+
+
+def _effective_lot_size(spec: StrategySpec) -> int:
+    lot_size = spec.execution.lot_size_config.default
+    if isinstance(lot_size, int) and not isinstance(lot_size, bool) and lot_size > 0:
+        return lot_size
+    return spec.execution.lot_size
 
 
 class _SignalFilteredEqualWeightOptimizer:
@@ -232,12 +244,13 @@ def compile_run(
     # Data provider — use spec.data.data_dir as fallback
     _data_dir = data_dir or (spec.data.data_dir or None)
     data_path = resolve_data_dir(Path(_data_dir) if _data_dir else None).resolve()
-    market = LocalMarketDataProvider(data_dir=data_path, currency=spec.market.currency, calendar=spec.market.calendar)
+    runtime_calendar = normalize_exchange_calendar(spec.market.calendar)
+    market = LocalMarketDataProvider(data_dir=data_path, currency=spec.market.currency, calendar=runtime_calendar)
 
     # Broker with fee/slippage from spec
     fee_model = PercentageFee(rate=Decimal(str(spec.cost.fee_rate)), min_fee=Decimal(str(spec.cost.fee_min)))
     slippage_model = PercentageSlippage(rate=Decimal(str(spec.cost.slippage_rate)))
-    fill_mode_str = spec.execution.fill_price_mode
+    fill_mode_str = derive_execution_semantics(spec.execution).fill_price_mode
     fill_mode = FILL_PRICE_MODE_MAP.get(fill_mode_str)
     if fill_mode is None:
         valid = ", ".join(sorted(FILL_PRICE_MODE_MAP.keys()))
@@ -246,7 +259,7 @@ def compile_run(
         fee_model=fee_model,
         slippage_model=slippage_model,
         fill_price_mode=fill_mode,
-        market_calendar=spec.market.calendar,
+        market_calendar=runtime_calendar,
     )
 
     # Determine date range
@@ -280,7 +293,8 @@ def compile_run(
         start=start,
         end=end,
         initial_cash=spec.execution.initial_cash,
-        lot_size=spec.execution.lot_size,
+        lot_size=_effective_lot_size(spec),
+        cash_annual_return=spec.execution.cash_annual_return,
         rules=rules,
         data_start=spec.data.min_start_date or None,
     )
@@ -368,6 +382,10 @@ def _write_artifacts(spec: StrategySpec, result: RunResult, run_dir: Path, engin
     }
     (run_dir / "data_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
+    # execution_assumptions.json
+    execution_assumptions = _build_execution_assumptions(spec)
+    (run_dir / "execution_assumptions.json").write_text(json.dumps(execution_assumptions, indent=2) + "\n", encoding="utf-8")
+
     # metrics.json
     metrics = _sanitize_json(_build_metrics(spec, result, run_id))
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, allow_nan=False) + "\n")
@@ -419,10 +437,11 @@ def _write_artifacts(spec: StrategySpec, result: RunResult, run_dir: Path, engin
     pd.DataFrame(order_rows, columns=order_columns).to_csv(run_dir / "orders.csv", index=False)
 
     artifact_hashes = {
-        "schema_version": 1,
+        "schema_version": 2,
         "strategy_spec.yaml": _hash_file(run_dir / "strategy_spec.yaml"),
         "environment.json": _hash_json_file(run_dir / "environment.json", exclude_keys={"run_timestamp"}),
         "data_manifest.json": _hash_json_file(run_dir / "data_manifest.json"),
+        "execution_assumptions.json": _hash_json_file(run_dir / "execution_assumptions.json"),
         "equity_curve.csv": _hash_file(run_dir / "equity_curve.csv"),
         "trades.csv": _hash_file(run_dir / "trades.csv"),
         "positions.csv": _hash_file(run_dir / "positions.csv"),
@@ -446,6 +465,26 @@ def _write_artifacts(spec: StrategySpec, result: RunResult, run_dir: Path, engin
             )
             + "\n"
         )
+
+
+def _build_execution_assumptions(spec: StrategySpec) -> dict[str, Any]:
+    semantics = derive_execution_semantics(spec.execution)
+    return {
+        "schema_version": 1,
+        "calendar": spec.market.calendar,
+        "runtime_calendar": normalize_exchange_calendar(spec.market.calendar),
+        "order_timing": semantics.order_timing,
+        "price_bar": semantics.price_bar,
+        "price_type": semantics.price_type,
+        "fill_price_mode": semantics.fill_price_mode,
+        "compatibility_source": semantics.compatibility_source,
+        "cash_annual_return": spec.execution.cash_annual_return,
+        "lot_size": spec.execution.lot_size,
+        "lot_size_config": {
+            "default": spec.execution.lot_size_config.default,
+            "by_symbol": dict(spec.execution.lot_size_config.by_symbol),
+        },
+    }
 
 
 def _to_timestamp(ts_val: str | object, tz: object | None = None) -> pd.Timestamp:
@@ -541,7 +580,7 @@ def _exchange_calendar_sessions(start: pd.Timestamp, end: pd.Timestamp, calendar
     except ImportError:
         return None
     try:
-        cal = xcals.get_calendar(calendar)
+        cal = xcals.get_calendar(normalize_exchange_calendar(calendar))
         sessions = cal.sessions_in_range(start.date(), end.date())
     except Exception:
         return None

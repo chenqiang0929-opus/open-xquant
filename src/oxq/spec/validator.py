@@ -8,6 +8,8 @@ from datetime import date
 
 import pandas as pd
 
+from oxq.market_calendar import is_supported_market_calendar
+from oxq.spec.execution import derive_execution_semantics
 from oxq.spec.schema import StrategySpec
 
 
@@ -29,8 +31,8 @@ class ValidationResult:
         }
 
 
-def _err(severity: str, check: str, message: str) -> dict:
-    return {"severity": severity, "check": check, "message": message}
+def _err(severity: str, check: str, message: str, dimensions: list[str] | None = None) -> dict:
+    return {"severity": severity, "check": check, "message": message, "dimensions": dimensions or []}
 
 
 def _parse_date(value: str) -> date | None:
@@ -47,6 +49,10 @@ def _is_finite_number(value: object) -> bool:
         return math.isfinite(float(value))
     except (TypeError, ValueError):
         return False
+
+
+def _is_finite_real_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
 
 
 def _unsafe_strategy_id(strategy_id: str) -> bool:
@@ -323,6 +329,63 @@ def _is_non_empty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _has_any_explicit_execution_field(spec: StrategySpec) -> bool:
+    return any((spec.execution.order_timing, spec.execution.price_bar, spec.execution.price_type))
+
+
+def _validate_required_execution_columns(required_columns: set[str], fill_price_mode: str) -> list[dict]:
+    required_by_mode = {
+        "next_open": {"open"},
+        "mid": {"open"},
+        "next_mid": {"open"},
+        "next_avg": {"open", "high", "low"},
+    }
+    errors: list[dict] = []
+    for column in sorted(required_by_mode.get(fill_price_mode, set()) - required_columns):
+        errors.append(
+            _err(
+                "fatal",
+                f"required_columns_missing_{column}",
+                f"data.required_columns must include {column} for fill_price_mode={fill_price_mode}",
+            )
+        )
+    return errors
+
+
+def _validate_lot_size_config(spec: StrategySpec) -> list[dict]:
+    errors: list[dict] = []
+    config = spec.execution.lot_size_config
+    if config.default is not None and not _is_positive_int(config.default):
+        errors.append(
+            _err(
+                "fatal",
+                "lot_size_config_invalid",
+                "execution.lot_size_config.default must be a positive integer",
+                ["executable"],
+            )
+        )
+    if config.by_symbol:
+        errors.append(
+            _err(
+                "fatal",
+                "lot_size_config_by_symbol_unsupported",
+                "execution.lot_size_config.by_symbol is parsed but not executable yet; use a single default lot size",
+                ["executable"],
+            )
+        )
+    for symbol, lot_size in config.by_symbol.items():
+        if not _is_positive_int(lot_size):
+            errors.append(
+                _err(
+                    "fatal",
+                    "lot_size_config_invalid",
+                    f"execution.lot_size_config.by_symbol.{symbol} must be a positive integer",
+                    ["executable"],
+                )
+            )
+    return errors
+
+
 def _missing_signal_param(rule_name: str, param_name: str) -> dict:
     return _err(
         "fatal",
@@ -463,18 +526,51 @@ def validate(spec: StrategySpec) -> ValidationResult:
                 "warning",
                 "static_universe_survivorship",
                 "static universe with point_in_time=false may have survivorship bias",
+                ["conservative"],
             )
         )
 
     # --- Market ---
-    if spec.market.calendar != "XNYS":
+    if not is_supported_market_calendar(spec.market.calendar):
         errors.append(
             _err(
                 "fatal",
                 "market_calendar_unsupported",
                 f"market.calendar={spec.market.calendar} is not supported by the audited local compiler",
+                ["executable"],
             )
         )
+
+    # Derive execution semantics early so data requirements use effective explicit fields.
+    has_any_explicit_execution_field = _has_any_explicit_execution_field(spec)
+    valid_legacy_fill_modes = frozenset({"close", "mid", "next_avg", "next_close", "next_mid", "next_open"})
+    raw_legacy_fill_mode_invalid = (
+        bool(spec.execution.fill_price_mode)
+        and not has_any_explicit_execution_field
+        and spec.execution.fill_price_mode not in valid_legacy_fill_modes
+    )
+    effective_execution = None
+    if raw_legacy_fill_mode_invalid:
+        errors.append(
+            _err(
+                "fatal",
+                "fill_price_mode_invalid",
+                f"Unknown fill_price_mode '{spec.execution.fill_price_mode}'. "
+                f"Valid: {', '.join(sorted(valid_legacy_fill_modes))}",
+            )
+        )
+    elif spec.execution.fill_price_mode or has_any_explicit_execution_field:
+        try:
+            effective_execution = derive_execution_semantics(spec.execution)
+        except ValueError as exc:
+            errors.append(
+                _err(
+                    "fatal",
+                    "execution_semantics_invalid",
+                    f"execution semantics are invalid: {exc}",
+                    ["executable"],
+                )
+            )
 
     # --- Data ---
     if spec.data.provider != "local":
@@ -498,14 +594,8 @@ def validate(spec: StrategySpec) -> ValidationResult:
     required_columns = set(spec.data.required_columns)
     if "close" not in required_columns:
         errors.append(_err("fatal", "required_columns_missing_close", "data.required_columns must include close"))
-    if spec.execution.fill_price_mode in {"next_open", "mid"} and "open" not in required_columns:
-        errors.append(
-            _err(
-                "fatal",
-                "required_columns_missing_open",
-                f"data.required_columns must include open for fill_price_mode={spec.execution.fill_price_mode}",
-            )
-        )
+    if effective_execution is not None:
+        errors.extend(_validate_required_execution_columns(required_columns, effective_execution.fill_price_mode))
 
     # --- Signal ---
     if not spec.signal.signal_time:
@@ -522,10 +612,11 @@ def validate(spec: StrategySpec) -> ValidationResult:
     # --- Execution ---
     if not spec.execution.trade_time:
         errors.append(_err("fatal", "trade_time_missing", "execution.trade_time is missing — cannot determine fill timing"))
-    if not spec.execution.fill_price_mode:
+    if not spec.execution.fill_price_mode and not has_any_explicit_execution_field:
         errors.append(_err("fatal", "fill_price_mode_missing", "execution.fill_price_mode is missing"))
     if not isinstance(spec.execution.lot_size, int) or isinstance(spec.execution.lot_size, bool) or spec.execution.lot_size <= 0:
         errors.append(_err("fatal", "lot_size_invalid", "execution.lot_size must be a positive integer"))
+    errors.extend(_validate_lot_size_config(spec))
     if (
         not isinstance(spec.execution.rebalance.interval_days, int)
         or isinstance(spec.execution.rebalance.interval_days, bool)
@@ -542,54 +633,57 @@ def validate(spec: StrategySpec) -> ValidationResult:
         )
     if not _is_finite_number(spec.execution.initial_cash) or spec.execution.initial_cash <= 0:
         errors.append(_err("fatal", "initial_cash_invalid", "execution.initial_cash must be a positive finite number"))
-
-    # Validate fill mode against known values
-    valid_fill_modes = frozenset({"close", "next_open", "mid"})
-    if spec.execution.fill_price_mode and spec.execution.fill_price_mode not in valid_fill_modes:
+    if not _is_finite_real_number(spec.execution.cash_annual_return) or spec.execution.cash_annual_return < 0:
         errors.append(
             _err(
                 "fatal",
-                "fill_price_mode_invalid",
-                f"Unknown fill_price_mode '{spec.execution.fill_price_mode}'. "
-                f"Valid: {', '.join(sorted(valid_fill_modes))}",
+                "cash_annual_return_invalid",
+                "execution.cash_annual_return must be a non-negative finite number",
+                ["executable"],
             )
         )
+
+    effective_fill_price_mode = effective_execution.fill_price_mode if effective_execution is not None else spec.execution.fill_price_mode
     expected_trade_time = {
         "close": "close_t",
         "mid": "close_t",
+        "next_avg": "next_open",
+        "next_close": "next_open",
+        "next_mid": "next_open",
         "next_open": "next_open",
-    }.get(spec.execution.fill_price_mode)
+    }.get(effective_fill_price_mode)
     if expected_trade_time and spec.execution.trade_time != expected_trade_time:
         errors.append(
             _err(
                 "fatal",
                 "execution_timing_mismatch",
                 f"execution.trade_time={spec.execution.trade_time} does not match "
-                f"fill_price_mode={spec.execution.fill_price_mode}; expected {expected_trade_time}",
+                f"fill_price_mode={effective_fill_price_mode}; expected {expected_trade_time}",
             )
         )
 
-    # Fatal: same-bar signal generation and execution
-    if spec.signal.signal_time == "close_t":
-        if spec.execution.trade_time == "close_t":
+    if spec.signal.signal_time == "close_t" and effective_execution is not None:
+        if effective_execution.price_bar == "same_session" or effective_execution.order_timing.startswith("same_session"):
             errors.append(
                 _err(
                     "fatal",
                     "execution_lag",
-                    "signal_time=close_t and trade_time=close_t — "
-                    "signal generated and filled on same bar. "
-                    "Use trade_time=next_open.",
+                    "signal_time=close_t and execution fills in the same session — "
+                    "signal generated and filled on same bar. Use next-session execution.",
+                    ["causal"],
                 )
             )
-        if spec.execution.fill_price_mode in ("close", "mid"):
-            errors.append(
+        elif (
+            effective_execution.price_bar == "next_session"
+            and effective_execution.price_type in {"close", "mid", "avg"}
+        ):
+            warnings.append(
                 _err(
-                    "fatal",
-                    "execution_lag",
-                    f"signal_time=close_t and fill_price_mode={spec.execution.fill_price_mode} — "
-                    "signal computed at close but filled at same-bar price "
-                    f"({spec.execution.fill_price_mode}). "
-                    "Use fill_price_mode=next_open.",
+                    "warning",
+                    "execution_conservatism",
+                    f"next-session {effective_execution.price_type} fills are causal but not conservative; "
+                    "prefer next_session_open/open for audited replay.",
+                    ["conservative"],
                 )
             )
 
@@ -602,11 +696,21 @@ def validate(spec: StrategySpec) -> ValidationResult:
     if not finite_costs:
         errors.append(_err("fatal", "cost_model_invalid", "cost fields must be finite numbers"))
     elif spec.cost.fee_rate <= 0.0 and spec.cost.slippage_rate <= 0.0:
-        errors.append(_err(
-            "fatal",
-            "cost_model_missing",
-            "fee_rate and slippage_rate must be positive — zero or negative costs are not acceptable",
-        ))
+        if spec.cost.fee_rate == 0.0 and spec.cost.slippage_rate == 0.0 and has_any_explicit_execution_field:
+            warnings.append(
+                _err(
+                    "warning",
+                    "cost_model_zero",
+                    "fee_rate and slippage_rate are zero; acceptable only for declared replay-style validation",
+                    ["conservative", "production_consistent"],
+                )
+            )
+        else:
+            errors.append(_err(
+                "fatal",
+                "cost_model_missing",
+                "fee_rate and slippage_rate must be positive — zero or negative costs are not acceptable",
+            ))
     elif spec.cost.fee_rate <= 0.0:
         errors.append(_err("fatal", "fee_missing", "fee_rate must be positive"))
     elif spec.cost.slippage_rate <= 0.0:

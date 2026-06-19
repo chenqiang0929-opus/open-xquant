@@ -11,6 +11,7 @@ import yaml
 
 from oxq.audit.reproducibility import audit_reproducibility
 from oxq.audit.research_bias import audit_research
+from oxq.spec.execution import derive_execution_semantics
 from oxq.spec.schema import StrategySpec
 
 
@@ -20,6 +21,7 @@ def generate_report(run_dir: str | Path) -> str:
     spec = StrategySpec.from_yaml(str(run_path / "strategy_spec.yaml"))
     spec_dict = yaml.safe_load((run_path / "strategy_spec.yaml").read_text(encoding="utf-8")) or {}
     metrics = json.loads((run_path / "metrics.json").read_text(encoding="utf-8"))
+    execution_assumptions = _load_execution_assumptions(run_path)
     repro_audit = audit_reproducibility(run_dir)
     bias_audit = audit_research(run_dir)
 
@@ -56,7 +58,7 @@ def generate_report(run_dir: str | Path) -> str:
     for name, ind in spec.signal.indicators.items():
         lines.append(f"  - {name}: {ind.type} ({ind.params})")
     lines.append(f"- **Portfolio**: {spec.portfolio.type}")
-    lines.append(f"- **Execution**: {spec.execution.trade_time} trade, {spec.execution.fill_price_mode} fill")
+    lines.append(f"- **Execution**: {spec.execution.trade_time} trade, {_effective_fill_price_mode(spec)} fill")
     lines.append("")
 
     # 4. Data and Execution Assumptions
@@ -66,6 +68,11 @@ def generate_report(run_dir: str | Path) -> str:
     lines.append(f"- **Slippage**: {spec.cost.slippage_rate:.3%}")
     lines.append(f"- **Initial Cash**: ${spec.execution.initial_cash:,.0f}")
     lines.append(f"- **Price Adjustment**: {spec.data.price_adjustment}")
+    if execution_assumptions is not None:
+        lines.append("")
+        lines.append("### Execution Assumptions")
+        lines.append("")
+        lines.extend(_format_execution_assumption_lines(execution_assumptions))
     lines.append("")
 
     # 5. Backtest Metrics
@@ -242,6 +249,54 @@ def _format_float(value: object) -> str:
 def _format_money(value: object) -> str:
     parsed = _as_finite_float(value)
     return "N/A" if parsed is None else f"${parsed:.2f}"
+
+
+def _load_execution_assumptions(run_path: Path) -> dict | None:
+    assumptions_path = run_path / "execution_assumptions.json"
+    if not assumptions_path.exists():
+        return None
+    try:
+        assumptions = json.loads(assumptions_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    return assumptions if isinstance(assumptions, dict) else None
+
+
+def _effective_fill_price_mode(spec: StrategySpec) -> str:
+    try:
+        return derive_execution_semantics(spec.execution).fill_price_mode
+    except ValueError:
+        return spec.execution.fill_price_mode
+
+
+def _format_execution_assumption_lines(assumptions: dict) -> list[str]:
+    lines = [
+        f"- **order_timing**: {_format_assumption_value(assumptions.get('order_timing'))}",
+        f"- **price_bar**: {_format_assumption_value(assumptions.get('price_bar'))}",
+        f"- **price_type**: {_format_assumption_value(assumptions.get('price_type'))}",
+    ]
+    if "fill_price_mode" in assumptions:
+        lines.append(f"- **fill_price_mode**: {_format_assumption_value(assumptions.get('fill_price_mode'))}")
+    lines.append(f"- **cash_annual_return**: {_format_percent(assumptions.get('cash_annual_return'))}")
+    lines.append(f"- **default_lot_size**: {_format_assumption_value(_default_lot_size(assumptions))}")
+    if "calendar" in assumptions:
+        lines.append(f"- **calendar**: {_format_assumption_value(assumptions.get('calendar'))}")
+    if "runtime_calendar" in assumptions:
+        lines.append(f"- **runtime_calendar**: {_format_assumption_value(assumptions.get('runtime_calendar'))}")
+    return lines
+
+
+def _default_lot_size(assumptions: dict) -> object:
+    lot_size_config = assumptions.get("lot_size_config")
+    if isinstance(lot_size_config, dict) and "default" in lot_size_config:
+        return lot_size_config.get("default")
+    return assumptions.get("lot_size")
+
+
+def _format_assumption_value(value: object) -> str:
+    if value is None or value == "":
+        return "N/A"
+    return str(value)
 
 
 def _decision_explanation() -> str:
