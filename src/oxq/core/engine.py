@@ -99,6 +99,9 @@ class Engine:
         self._rules: list[Rule] = rules or []
         self._lot_size = lot_size
         self._cash_annual_return = cash_annual_return
+        reset_optimizer = getattr(strategy.portfolio, "reset", None)
+        if callable(reset_optimizer):
+            reset_optimizer()
         if tracer:
             tracer.on_run_start(
                 strategy_name=strategy.name,
@@ -219,7 +222,7 @@ class Engine:
                 sample = self._mktdata[self._universe.symbols[0]][sig_name]
                 tracer.on_signal(
                     name=sig_name, inputs=params,
-                    output_summary={"signal_count": int(sample.sum()) if hasattr(sample, 'sum') else 0},
+                    output_summary=_signal_output_summary(sample),
                     duration_ms=elapsed,
                 )
 
@@ -296,11 +299,22 @@ class Engine:
         set_held_symbols = getattr(strategy.portfolio, "set_held_symbols", None)
         if callable(set_held_symbols):
             set_held_symbols(list(portfolio.positions.keys()))
+        set_pending_buy_symbols = getattr(strategy.portfolio, "set_pending_buy_symbols", None)
+        if callable(set_pending_buy_symbols):
+            pending_buy_symbols = [
+                managed.order.symbol
+                for managed in broker.get_open_orders()
+                if managed.order.order_type == "market" and managed.order.side == "BUY"
+            ]
+            set_pending_buy_symbols(pending_buy_symbols)
         target_weights = strategy.portfolio.optimize(signals_data, indicators_data)
+        optimizer_hold = bool(getattr(strategy.portfolio, "skip_rebalance", False))
         raw_target_weights = dict(target_weights)
 
         # ── Step 3: Pre-trade rules ───────────────────────────────────
-        hold = False
+        rule_hold = False
+        rule_weight_override = False
+        rule_weight_overrides: dict[str, float] = {}
         rule_reasons: dict[str, list[str]] = {}
 
         def record_rule_reason(symbol: str, reason: str) -> None:
@@ -315,9 +329,11 @@ class Engine:
                 row = mktdata[symbol].loc[date]
                 result = rule.evaluate(symbol, row, portfolio, prices=bar_prices)
                 if result.hold:
-                    hold = True
+                    rule_hold = True
                     record_rule_reason("__all__", result.reason)
                 if result.weights is not None:
+                    rule_weight_override = True
+                    rule_weight_overrides.update(result.weights)
                     target_weights.update(result.weights)
                     for target_symbol in result.weights:
                         record_rule_reason(target_symbol, result.reason)
@@ -342,12 +358,81 @@ class Engine:
                 weights["CASH"] = float(portfolio.cash / total_value)
             return weights
 
+        def sync_pending_reductions() -> bool:
+            pending_reduction_symbols = set(getattr(strategy.portfolio, "pending_reduction_symbols", set()))
+            if not pending_reduction_symbols:
+                return True
+
+            total_value = portfolio.total_value(bar_prices)
+            pending_buy_symbols = {
+                managed.order.symbol
+                for managed in broker.get_open_orders()
+                if managed.order.order_type == "market" and managed.order.side == "BUY"
+            }
+            pending_sell_symbols = {
+                managed.order.symbol
+                for managed in broker.get_open_orders()
+                if managed.order.order_type == "market" and managed.order.side == "SELL"
+            }
+            reached_symbols: list[str] = []
+            all_reached = True
+            for symbol in pending_reduction_symbols:
+                position = portfolio.positions.get(symbol)
+                price = bar_prices.get(symbol)
+                if symbol in pending_buy_symbols or symbol in pending_sell_symbols:
+                    all_reached = False
+                    continue
+                if position is None or position.shares <= 0 or price is None or total_value <= 0:
+                    reached_symbols.append(symbol)
+                    continue
+                current_weight = float((Decimal(position.shares) * price) / total_value)
+                target_weight = float(target_weights.get(symbol, 0.0))
+                if current_weight > target_weight + 1e-9:
+                    all_reached = False
+                else:
+                    reached_symbols.append(symbol)
+
+            if reached_symbols:
+                clear_pending_reductions = getattr(strategy.portfolio, "clear_pending_reductions", None)
+                if callable(clear_pending_reductions):
+                    clear_pending_reductions(reached_symbols)
+            return all_reached
+
+        pending_reductions_reached = sync_pending_reductions()
+
+        def optimizer_hold_target_reached() -> bool:
+            if not pending_reductions_reached:
+                return False
+            for symbol, weight in target_weights.items():
+                if symbol == "CASH" or weight <= 0:
+                    continue
+                position = portfolio.positions.get(symbol)
+                if position is None or position.shares <= 0:
+                    return False
+            return True
+
+        hold = rule_hold or (
+            optimizer_hold
+            and not rule_weight_override
+            and optimizer_hold_target_reached()
+        )
+        if optimizer_hold and not rule_weight_override and hold:
+            record_rule_reason("__all__", "signal_hold")
+
         if hold:
             adjusted_weights = (
                 dict(self._snapshots[-1].adjusted_weights)
                 if self._snapshots
                 else current_portfolio_weights()
             )
+        elif optimizer_hold and rule_weight_override:
+            adjusted_weights = current_portfolio_weights()
+            adjusted_weights.update(rule_weight_overrides)
+            invested_weight = sum(
+                weight for symbol, weight in adjusted_weights.items()
+                if symbol != "CASH" and weight > 0
+            )
+            adjusted_weights["CASH"] = max(0.0, 1.0 - invested_weight)
         else:
             adjusted_weights = dict(target_weights)
 
@@ -355,24 +440,63 @@ class Engine:
         if not hold:
             total_capital = portfolio.total_value(bar_prices)
             estimate_market_buy_cost = getattr(broker, "estimate_market_buy_cost", None)
+            estimate_market_sell_proceeds = getattr(broker, "estimate_market_sell_proceeds", None)
             buy_cost_estimator = None
             if callable(estimate_market_buy_cost):
                 def buy_cost_estimator(symbol: str, price: Decimal, shares: int) -> Decimal:
                     return estimate_market_buy_cost(symbol, price, shares, portfolio.currency)
+            sell_proceeds_estimator = None
+            if callable(estimate_market_sell_proceeds):
+                def sell_proceeds_estimator(symbol: str, price: Decimal, shares: int) -> Decimal:
+                    return estimate_market_sell_proceeds(symbol, price, shares, portfolio.currency)
+
+            order_weights = adjusted_weights
+            order_positions = portfolio.positions
+            buying_power = None
+            if optimizer_hold and rule_weight_override:
+                overridden_symbols = set(rule_weight_overrides)
+                order_weights = {
+                    symbol: weight for symbol, weight in adjusted_weights.items()
+                    if symbol in overridden_symbols
+                }
+                order_positions = {
+                    symbol: position for symbol, position in portfolio.positions.items()
+                    if symbol in overridden_symbols
+                }
+                buying_power = portfolio.cash
+            else:
+                held_symbols = set(getattr(strategy.portfolio, "held_symbols", set()))
+                pending_reduction_symbols = set(getattr(strategy.portfolio, "pending_reduction_symbols", set()))
+                frozen_symbols = {
+                    symbol for symbol in held_symbols - pending_reduction_symbols
+                    if symbol in portfolio.positions
+                }
+                if frozen_symbols:
+                    order_weights = {
+                        symbol: weight for symbol, weight in adjusted_weights.items()
+                        if symbol not in frozen_symbols
+                    }
+                    order_positions = {
+                        symbol: position for symbol, position in portfolio.positions.items()
+                        if symbol not in frozen_symbols
+                    }
+                    buying_power = portfolio.cash
 
             planned = generate_orders(
                 target_weights={
                     s: Decimal(str(w))
-                    for s, w in target_weights.items()
+                    for s, w in order_weights.items()
                     if s != "CASH"
                 },
-                positions=portfolio.positions,
+                positions=order_positions,
                 prices=bar_prices,
                 total_capital=total_capital,
                 lot_size=self._lot_size,
                 currency=portfolio.currency,
                 pending_orders=[managed.order for managed in broker.get_open_orders() if managed.order.order_type == "market"],
                 buy_cost_estimator=buy_cost_estimator,
+                sell_proceeds_estimator=sell_proceeds_estimator,
+                buying_power=buying_power,
             )
             for p in planned:
                 broker.submit_order(p.order)
@@ -564,6 +688,33 @@ class Engine:
             self._tracer.on_run_end("ok")
 
         return self.result
+
+
+def _signal_output_summary(sample: pd.Series) -> dict[str, object]:
+    non_null = sample.dropna()
+    summary: dict[str, object] = {
+        "rows": len(sample),
+        "non_null": int(non_null.size),
+    }
+    if non_null.empty:
+        summary["signal_count"] = 0
+        return summary
+
+    if pd.api.types.is_bool_dtype(non_null):
+        summary["signal_count"] = int(non_null.astype(bool).sum())
+        return summary
+    if pd.api.types.is_numeric_dtype(non_null):
+        summary["signal_count"] = int((non_null != 0).sum())
+        return summary
+
+    labels = non_null.astype(str).str.upper()
+    counts = {label: int(count) for label, count in labels.value_counts().sort_index().items()}
+    summary["value_counts"] = counts
+    no_event_labels = {"", "0", "FALSE", "HOLD", "NONE", "NAN"}
+    summary["signal_count"] = int(
+        sum(count for label, count in counts.items() if label not in no_event_labels)
+    )
+    return summary
 
 
 def _apply_fill(portfolio: Portfolio, fill: Fill) -> bool:

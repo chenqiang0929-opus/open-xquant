@@ -96,6 +96,38 @@ def _validate_signal_column_references(spec: StrategySpec) -> list[dict]:
                         )
                     )
             errors.extend(_validate_relationship(rule_name, params.get("relationship", "gt")))
+        elif rule_def.type == "ROCTiming":
+            column = params.get("column")
+            if not _is_non_empty_string(column):
+                errors.append(_missing_signal_param(rule_name, "column"))
+            elif column not in available_data_columns:
+                errors.append(
+                    _err(
+                        "fatal",
+                        "signal_column_missing",
+                        f"signal.rules.{rule_name}.column references unknown column '{column}'",
+                    )
+                )
+            mode = params.get("mode", "fixed")
+            if mode == "fixed":
+                bottom = params.get("bottom", -5.0)
+                top = params.get("top", 5.0)
+                if not _is_finite_number(bottom) or not _is_finite_number(top):
+                    errors.append(
+                        _err(
+                            "fatal",
+                            "signal_threshold_invalid",
+                            f"signal.rules.{rule_name}.bottom and top must be finite numbers",
+                        )
+                    )
+                elif float(bottom) >= float(top):
+                    errors.append(
+                        _err(
+                            "fatal",
+                            "signal_threshold_invalid",
+                            f"signal.rules.{rule_name}.bottom must be less than top",
+                        )
+                    )
         elif rule_def.type == "Comparison":
             for param_name in ("left", "right"):
                 column = params.get(param_name)
@@ -201,6 +233,37 @@ def _validate_derived_column_names(spec: StrategySpec) -> list[dict]:
     return errors
 
 
+_CATEGORICAL_SIGNAL_DOMAIN = {"BUY", "SELL", "HOLD"}
+
+
+def _signal_output_domain(rule_def: object) -> set[str]:
+    return {
+        str(value).upper()
+        for value in getattr(rule_def, "output_domain", [])
+    }
+
+
+def _is_categorical_signal_rule(rule_def: object) -> bool:
+    return (
+        getattr(rule_def, "type", "") == "ROCTiming"
+        or bool(_signal_output_domain(rule_def) & _CATEGORICAL_SIGNAL_DOMAIN)
+    )
+
+
+def _unsupported_categorical_labels(rule_def: object) -> set[str]:
+    declared_domain = _signal_output_domain(rule_def)
+    if not declared_domain or not (declared_domain & _CATEGORICAL_SIGNAL_DOMAIN):
+        return set()
+    return declared_domain - _CATEGORICAL_SIGNAL_DOMAIN
+
+
+def _observed_signal_domain(values: pd.Series) -> set[str]:
+    return {
+        str(value).upper()
+        for value in values.dropna().unique()
+    }
+
+
 def _validate_optimizer_params(spec: StrategySpec) -> list[dict]:
     errors: list[dict] = []
     params = spec.portfolio.params
@@ -229,6 +292,35 @@ def _validate_optimizer_params(spec: StrategySpec) -> list[dict]:
         pct = params.get("pct", 0.10)
         if not _is_finite_number(pct) or not 0.0 < float(pct) <= 1.0:
             errors.append(_optimizer_param_error("portfolio.params.pct must be in (0, 1]"))
+    elif spec.portfolio.type == "SignalToPosition":
+        signal_name = params.get("signal")
+        if not _is_non_empty_string(signal_name):
+            errors.append(_optimizer_param_error("portfolio.params.signal is required"))
+        elif signal_name not in spec.signal.rules:
+            errors.append(_optimizer_param_error("portfolio.params.signal must reference a signal rule"))
+        else:
+            rule_def = spec.signal.rules[signal_name]
+            unsupported_labels = _unsupported_categorical_labels(rule_def)
+            if unsupported_labels:
+                errors.append(
+                    _optimizer_param_error(
+                        "portfolio.params.signal output_domain may only contain BUY, SELL, or HOLD; "
+                        f"unsupported labels: {sorted(unsupported_labels)}"
+                    )
+                )
+            elif not _is_categorical_signal_rule(rule_def):
+                errors.append(
+                    _optimizer_param_error(
+                        "portfolio.params.signal must reference a BUY/SELL/HOLD categorical signal rule"
+                    )
+                )
+        for param_name in ("buy_weight", "sell_weight"):
+            weight = params.get(param_name, 1.0 if param_name == "buy_weight" else 0.0)
+            if not _is_finite_number(weight) or not 0.0 <= float(weight) <= 1.0:
+                errors.append(_optimizer_param_error(f"portfolio.params.{param_name} must be in [0, 1]"))
+        hold_behavior = params.get("hold_behavior", "maintain")
+        if hold_behavior != "maintain":
+            errors.append(_optimizer_param_error("portfolio.params.hold_behavior must be 'maintain'"))
 
     return errors
 
@@ -252,6 +344,25 @@ def _validate_terminal_signal_rules(spec: StrategySpec) -> list[dict]:
             "signal_terminal_ambiguous",
             "EqualWeight specs with signal.rules must declare exactly one terminal signal rule; "
             f"found {terminal or 'none'}",
+        )
+    ]
+
+
+def _validate_categorical_signal_portfolio(spec: StrategySpec) -> list[dict]:
+    if not spec.signal.rules or spec.portfolio.type != "EqualWeight":
+        return []
+    categorical_rules = [
+        name for name, rule_def in spec.signal.rules.items()
+        if _is_categorical_signal_rule(rule_def)
+    ]
+    if not categorical_rules:
+        return []
+    return [
+        _err(
+            "fatal",
+            "signal_categorical_portfolio_invalid",
+            "categorical BUY/SELL/HOLD signal rules require portfolio.type=SignalToPosition; "
+            f"found {categorical_rules}",
         )
     ]
 
@@ -514,7 +625,20 @@ def _validate_compute_params(spec: StrategySpec) -> list[dict]:
     for signal_name, signal_def in spec.signal.rules.items():
         try:
             signal = _resolve_signal(signal_def.type)()
-            frame[signal_name] = signal.compute(frame, **signal_def.params)
+            output = signal.compute(frame, **signal_def.params)
+            declared_domain = _signal_output_domain(signal_def)
+            if declared_domain:
+                observed_domain = _observed_signal_domain(output)
+                if not observed_domain.issubset(declared_domain):
+                    errors.append(
+                        _err(
+                            "fatal",
+                            "signal_output_domain_mismatch",
+                            f"signal.rules.{signal_name} output {sorted(observed_domain)} "
+                            f"does not match declared output_domain {sorted(declared_domain)}",
+                        )
+                    )
+            frame[signal_name] = output
         except Exception as exc:
             errors.append(
                 _err(
@@ -846,7 +970,7 @@ def validate(spec: StrategySpec) -> ValidationResult:
             _err("warning", "parameter_count", f"signal indicators have {param_count} total params — risk of overfitting")
         )
 
-    if spec.signal.rules and spec.portfolio.type not in {"EqualWeight"}:
+    if spec.signal.rules and spec.portfolio.type not in {"EqualWeight", "SignalToPosition"}:
         errors.append(
             _err(
                 "fatal",
@@ -857,6 +981,7 @@ def validate(spec: StrategySpec) -> ValidationResult:
 
     errors.extend(_validate_derived_column_names(spec))
     errors.extend(_validate_signal_column_references(spec))
+    errors.extend(_validate_categorical_signal_portfolio(spec))
     errors.extend(_validate_terminal_signal_rules(spec))
     errors.extend(_validate_composite_lifecycle_rules(spec))
     errors.extend(_validate_optimizer_params(spec))

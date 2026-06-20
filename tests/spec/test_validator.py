@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
-from oxq.spec.schema import IndicatorDef, SignalRuleDef, StrategySpec
+import oxq.core.registry as registry
+from oxq.spec.schema import IndicatorDef, SignalRuleDef, StrategySpec, _dataclass_to_canonical_dict
 from oxq.spec.validator import validate
 
 
@@ -1282,3 +1284,265 @@ def test_validate_rejects_or_composite_mixing_event_and_level_signals() -> None:
 
     assert result.status == "fail"
     assert any(error["check"] == "signal_lifecycle_ambiguous" for error in result.errors)
+
+
+def test_signal_to_position_accepts_signal_rules() -> None:
+    spec = StrategySpec.template(
+        strategy_id="roc_timing_position",
+        hypothesis="ROC timing maps categorical signals to positions",
+    )
+    spec.universe.symbols = ["CSI300"]
+    spec.signal.indicators = {
+        "roc_120": IndicatorDef(type="ROC", params={"column": "close", "period": 120})
+    }
+    spec.signal.rules = {
+        "timing": SignalRuleDef(
+            type="ROCTiming",
+            params={"column": "roc_120", "mode": "fixed", "bottom": -5.0, "top": 5.0},
+        )
+    }
+    spec.portfolio.type = "SignalToPosition"
+    spec.portfolio.params = {"signal": "timing", "buy_weight": 1.0, "sell_weight": 0.0}
+    spec.validation.train_period = ["2020-01-01", "2023-12-31"]
+    spec.validation.test_period = ["2024-01-01", "2025-01-01"]
+    spec.benchmark.symbols = ["CSI300"]
+    spec.cost.fee_rate = 0.001
+    spec.cost.slippage_rate = 0.001
+
+    result = validate(spec)
+
+    assert result.status == "pass"
+
+
+def test_signal_to_position_requires_declared_signal_rule() -> None:
+    spec = StrategySpec.template(
+        strategy_id="roc_timing_bad_signal",
+        hypothesis="SignalToPosition must consume a declared signal rule",
+    )
+    spec.signal.rules = {
+        "timing": SignalRuleDef(
+            type="ROCTiming",
+            params={"column": "close", "mode": "fixed", "bottom": -5.0, "top": 5.0},
+        )
+    }
+    spec.portfolio.type = "SignalToPosition"
+    spec.portfolio.params = {"signal": "missing"}
+
+    result = validate(spec)
+
+    assert result.status == "fail"
+    assert any(
+        error["check"] == "optimizer_param_invalid"
+        and "portfolio.params.signal must reference a signal rule" in error["message"]
+        for error in result.errors
+    )
+
+
+def test_signal_to_position_rejects_non_categorical_signal_rule() -> None:
+    spec = StrategySpec.template(
+        strategy_id="signal_to_position_boolean",
+        hypothesis="SignalToPosition must consume categorical signals",
+    )
+    spec.signal.rules = {
+        "entry": SignalRuleDef(type="Threshold", params={"column": "close", "threshold": 1.0})
+    }
+    spec.portfolio.type = "SignalToPosition"
+    spec.portfolio.params = {"signal": "entry"}
+
+    result = validate(spec)
+
+    assert result.status == "fail"
+    assert any(
+        error["check"] == "optimizer_param_invalid"
+        and "BUY/SELL/HOLD" in error["message"]
+        for error in result.errors
+    )
+
+
+def test_equal_weight_rejects_categorical_signal_rule() -> None:
+    spec = StrategySpec.template(
+        strategy_id="equal_weight_categorical",
+        hypothesis="Categorical trading-intent labels require an explicit position mapper",
+    )
+    spec.signal.indicators = {
+        "roc_120": IndicatorDef(type="ROC", params={"column": "close", "period": 120})
+    }
+    spec.signal.rules = {
+        "timing": SignalRuleDef(
+            type="ROCTiming",
+            params={"column": "roc_120", "mode": "fixed", "bottom": -5.0, "top": 5.0},
+        )
+    }
+
+    result = validate(spec)
+
+    assert result.status == "fail"
+    assert any(error["check"] == "signal_categorical_portfolio_invalid" for error in result.errors)
+
+
+def test_equal_weight_rejects_partial_trading_intent_output_domain(monkeypatch) -> None:
+    class BuySellOnlySignal:
+        name = "BuySellOnlyForValidationTest"
+
+        def compute(self, mktdata: pd.DataFrame) -> pd.Series:
+            return pd.Series(["BUY", "SELL"], index=mktdata.index)
+
+    monkeypatch.setitem(registry._SIGNAL_REGISTRY, BuySellOnlySignal.name, BuySellOnlySignal)
+    spec = StrategySpec.template(
+        strategy_id="equal_weight_partial_intent_domain",
+        hypothesis="Any trading-intent label domain requires an explicit position mapper",
+    )
+    spec.signal.rules = {
+        "timing": SignalRuleDef(type=BuySellOnlySignal.name, output_domain=["BUY", "SELL"])
+    }
+
+    result = validate(spec)
+
+    assert result.status == "fail"
+    assert any(error["check"] == "signal_categorical_portfolio_invalid" for error in result.errors)
+
+
+def test_signal_to_position_rejects_unsupported_output_domain_labels(monkeypatch) -> None:
+    class BuyFlatSignal:
+        name = "BuyFlatForValidationTest"
+
+        def compute(self, mktdata: pd.DataFrame) -> pd.Series:
+            return pd.Series(["BUY", "FLAT"], index=mktdata.index)
+
+    monkeypatch.setitem(registry._SIGNAL_REGISTRY, BuyFlatSignal.name, BuyFlatSignal)
+    spec = StrategySpec.template(
+        strategy_id="signal_to_position_unsupported_domain",
+        hypothesis="SignalToPosition should reject non BUY/SELL/HOLD labels",
+    )
+    spec.signal.rules = {
+        "timing": SignalRuleDef(type=BuyFlatSignal.name, output_domain=["BUY", "FLAT"])
+    }
+    spec.portfolio.type = "SignalToPosition"
+    spec.portfolio.params = {"signal": "timing"}
+
+    result = validate(spec)
+
+    assert result.status == "fail"
+    assert any(
+        error["check"] == "optimizer_param_invalid"
+        and "unsupported labels" in error["message"]
+        and "FLAT" in error["message"]
+        for error in result.errors
+    )
+
+
+def test_signal_rule_output_domain_is_metadata_not_compute_params(tmp_path) -> None:
+    spec_path = tmp_path / "strategy_spec.yaml"
+    spec_path.write_text(
+        """
+schema_version: "0.1"
+strategy_id: categorical_metadata
+research:
+  hypothesis: custom categorical signal metadata should not be passed to compute
+universe:
+  type: static
+  symbols: [AAA]
+signal:
+  signal_time: close_t
+  rules:
+    timing:
+      type: Threshold
+      output_domain: [BUY, SELL, HOLD]
+      params:
+        column: close
+        threshold: 1.0
+portfolio:
+  type: SignalToPosition
+  params:
+    signal: timing
+execution:
+  trade_time: next_open
+  fill_price_mode: next_open
+cost:
+  fee_rate: 0.001
+  slippage_rate: 0.001
+validation:
+  train_period: [2020-01-01, 2022-12-31]
+  test_period: [2023-01-01, 2023-12-31]
+benchmark:
+  symbols: [AAA]
+""",
+        encoding="utf-8",
+    )
+
+    spec = StrategySpec.from_yaml(spec_path)
+    result = validate(spec)
+
+    assert spec.signal.rules["timing"].output_domain == ["BUY", "SELL", "HOLD"]
+    assert "output_domain" not in spec.signal.rules["timing"].params
+    assert result.status == "fail"
+    assert any(
+        error["check"] == "signal_output_domain_mismatch"
+        and "does not match declared output_domain" in error["message"]
+        for error in result.errors
+    )
+
+
+def test_custom_categorical_signal_can_declare_output_domain(monkeypatch) -> None:
+    class CustomTimingSignal:
+        name = "CustomTimingForValidationTest"
+
+        def compute(self, mktdata: pd.DataFrame) -> pd.Series:
+            return pd.Series(["BUY", "HOLD", "SELL"], index=mktdata.index)
+
+    monkeypatch.setitem(registry._SIGNAL_REGISTRY, CustomTimingSignal.name, CustomTimingSignal)
+    spec = StrategySpec.template(
+        strategy_id="custom_categorical_signal",
+        hypothesis="custom categorical signals can drive position latching",
+    )
+    spec.universe.symbols = ["AAA"]
+    spec.signal.rules = {
+        "timing": SignalRuleDef(type=CustomTimingSignal.name, output_domain=["BUY", "SELL", "HOLD"])
+    }
+    spec.portfolio.type = "SignalToPosition"
+    spec.portfolio.params = {"signal": "timing"}
+    spec.validation.train_period = ["2020-01-01", "2022-12-31"]
+    spec.validation.test_period = ["2023-01-01", "2023-12-31"]
+    spec.benchmark.symbols = ["AAA"]
+    spec.cost.fee_rate = 0.001
+    spec.cost.slippage_rate = 0.001
+
+    result = validate(spec)
+
+    assert result.status == "pass"
+
+
+def test_empty_signal_output_domain_is_not_part_of_canonical_hash_input() -> None:
+    spec = StrategySpec.template(
+        strategy_id="empty_output_domain_hash",
+        hypothesis="default signal metadata should not change historical hashes",
+    )
+    spec.signal.rules = {
+        "entry": SignalRuleDef(type="Threshold", params={"column": "close", "threshold": 1.0})
+    }
+
+    canonical = _dataclass_to_canonical_dict(spec)
+
+    assert "output_domain" not in canonical["signal"]["rules"]["entry"]
+
+
+def test_roc_timing_fixed_thresholds_must_not_overlap() -> None:
+    spec = StrategySpec.template(
+        strategy_id="roc_timing_bad_thresholds",
+        hypothesis="ambiguous fixed thresholds fail validation",
+    )
+    spec.signal.rules = {
+        "timing": SignalRuleDef(
+            type="ROCTiming",
+            params={"column": "close", "mode": "fixed", "bottom": 5.0, "top": -5.0},
+        )
+    }
+
+    result = validate(spec)
+
+    assert result.status == "fail"
+    assert any(
+        error["check"] == "signal_threshold_invalid"
+        and "bottom must be less than top" in error["message"]
+        for error in result.errors
+    )

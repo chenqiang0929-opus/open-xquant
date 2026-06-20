@@ -21,9 +21,16 @@ Fix any errors. Spec MUST pass validation before proceeding.
 
 ### Step 2: Backtest
 ```bash
-oxq backtest run strategy_spec.yaml --out runs/auto
+oxq backtest run strategy_spec.yaml --out runs/auto --json > backtest.json
 ```
-Note the run directory path printed by the command.
+Read `run_dir` and artifact paths from `backtest.json`. Use `target_weights.csv`
+for target allocation comparisons and `trades.csv` for execution comparisons.
+
+When a strategy produces `BUY`, `SELL`, or `HOLD` labels, model that as a
+categorical Signal and map it with `SignalToPosition`. Do not wire categorical
+labels directly to `EqualWeight`. For custom categorical signals in spec, place
+`output_domain: [BUY, SELL, HOLD]` at the signal rule top level, not under
+`params`.
 
 ### Step 3: Audit
 ```bash

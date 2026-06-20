@@ -67,6 +67,7 @@ class IndicatorDef:
 class SignalRuleDef:
     type: str
     params: dict[str, Any] = field(default_factory=dict)
+    output_domain: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -352,6 +353,7 @@ def _parse_signal(raw: dict) -> SignalSection:
         rules[name] = SignalRuleDef(
             type=defn.get("type", ""),
             params=_parse_params(defn.get("params", {}), f"signal.rules.{name}.params"),
+            output_domain=_parse_str_list(defn.get("output_domain", []), f"signal.rules.{name}.output_domain"),
         )
     return SignalSection(
         signal_time=raw.get("signal_time", "close_t"),
@@ -615,6 +617,8 @@ def _dataclass_to_canonical_dict(obj: Any) -> Any:
         result = {}
         for f in fields(obj):
             if f.metadata.get("serialize") is False:
+                continue
+            if isinstance(obj, SignalRuleDef) and f.name == "output_domain" and not obj.output_domain:
                 continue
             result[f.name] = _dataclass_to_canonical_dict(getattr(obj, f.name))
         return result

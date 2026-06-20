@@ -53,9 +53,17 @@ Write tests with hand-crafted data:
 - protocol compliance with `Signal`
 - non-empty `name`
 - output domain is boolean or the declared categorical set
+- categorical trading-intent signals must use exact uppercase labels such as
+  `BUY`, `SELL`, and `HOLD`
+- if a categorical custom signal is used from spec, declare
+  `signal.rules.<name>.output_domain: [BUY, SELL, HOLD]` as rule metadata;
+  do not place `output_domain` in `params` because `params` are passed to
+  `Signal.compute()`
 - trigger scenario
 - no-trigger scenario
 - NaN or insufficient-history behavior when relevant
+- causal threshold behavior; rolling thresholds must not include the current
+  row when they are used to classify that row
 
 Run the new test and confirm the missing implementation fails before coding.
 
