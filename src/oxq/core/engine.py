@@ -301,6 +301,13 @@ class Engine:
 
         # ── Step 3: Pre-trade rules ───────────────────────────────────
         hold = False
+        rule_reasons: dict[str, list[str]] = {}
+
+        def record_rule_reason(symbol: str, reason: str) -> None:
+            if not reason:
+                return
+            rule_reasons.setdefault(symbol, []).append(reason)
+
         for rule in self._rules:
             for symbol in universe.symbols:
                 if date not in mktdata[symbol].index:
@@ -309,10 +316,40 @@ class Engine:
                 result = rule.evaluate(symbol, row, portfolio, prices=bar_prices)
                 if result.hold:
                     hold = True
+                    record_rule_reason("__all__", result.reason)
                 if result.weights is not None:
                     target_weights.update(result.weights)
+                    for target_symbol in result.weights:
+                        record_rule_reason(target_symbol, result.reason)
+                if result.constraints is not None:
+                    for constrained_symbol in result.constraints:
+                        record_rule_reason(constrained_symbol, result.reason)
 
-        adjusted_weights = dict(target_weights)
+        def current_portfolio_weights() -> dict[str, float]:
+            total_value = portfolio.total_value(bar_prices)
+            if total_value <= 0:
+                return {}
+
+            weights: dict[str, float] = {}
+            for symbol, position in portfolio.positions.items():
+                price = bar_prices.get(symbol)
+                if price is None:
+                    continue
+                value = Decimal(position.shares) * price
+                if value != 0:
+                    weights[symbol] = float(value / total_value)
+            if portfolio.cash != 0:
+                weights["CASH"] = float(portfolio.cash / total_value)
+            return weights
+
+        if hold:
+            adjusted_weights = (
+                dict(self._snapshots[-1].adjusted_weights)
+                if self._snapshots
+                else current_portfolio_weights()
+            )
+        else:
+            adjusted_weights = dict(target_weights)
 
         # ── Step 4: Trading algorithm (skip if hold) ──────────────────
         if not hold:
@@ -359,6 +396,7 @@ class Engine:
                 result = rule.evaluate(symbol, row, portfolio, prices=bar_prices)
                 if result.target_positions is not None:
                     for sym, target_ratio in result.target_positions.items():
+                        record_rule_reason(sym, result.reason)
                         if sym in exit_targets:
                             exit_targets[sym] = min(exit_targets[sym], target_ratio)
                         else:
@@ -366,6 +404,20 @@ class Engine:
 
         # ── Step 7: Execute exits ─────────────────────────────────────
         if exit_targets:
+            held_weights = current_portfolio_weights()
+            adjusted_weights = {}
+            cash_weight = float(held_weights.get("CASH", 0.0))
+            for sym, target_ratio in exit_targets.items():
+                base_weight = float(held_weights.get(sym, 0.0))
+                retained_weight = float(base_weight) * float(target_ratio)
+                adjusted_weights[sym] = retained_weight
+                cash_weight += float(base_weight) - retained_weight
+            for sym, held_weight in held_weights.items():
+                if sym == "CASH" or sym in exit_targets:
+                    continue
+                adjusted_weights[sym] = float(held_weight)
+            if cash_weight:
+                adjusted_weights["CASH"] = cash_weight
             for sym, target_ratio in exit_targets.items():
                 if sym not in portfolio.positions:
                     continue
@@ -427,6 +479,7 @@ class Engine:
                 positions=pos_snapshot,
                 cash=float(portfolio.cash),
                 total_value=tv,
+                rule_reasons={symbol: "; ".join(reasons) for symbol, reasons in rule_reasons.items()},
             )
         )
 

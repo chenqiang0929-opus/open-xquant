@@ -551,6 +551,103 @@ def test_engine_notifies_optimizer_after_full_exit() -> None:
     assert optimizer.reset_symbols_seen == ["AAA", "AAA"]
 
 
+def test_snapshot_adjusted_weights_include_exit_targets() -> None:
+    dates = pd.bdate_range("2024-01-01", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+            },
+            index=dates,
+        ),
+    }
+    strategy = Strategy(
+        name="snapshot_exit_target",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=AlwaysBuyOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(),
+        start="2024-01-01",
+        end="2024-01-02",
+        rules=[AlwaysExitRule()],
+    )
+
+    assert result.snapshots[0].target_weights["AAA"] == 1.0
+    assert result.snapshots[0].adjusted_weights["AAA"] == 0.0
+
+
+def test_snapshot_adjusted_weights_partial_exit_uses_held_exposure() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+            },
+            index=dates,
+        ),
+    }
+
+    class BuyThenCashOptimizer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def optimize(
+            self,
+            signals: dict[str, pd.DataFrame],
+            indicators: dict[str, pd.DataFrame],
+        ) -> dict[str, float]:
+            self.calls += 1
+            if self.calls == 1:
+                return {"AAA": 1.0}
+            return {"CASH": 1.0}
+
+    class HalfExitRule:
+        name = "HalfExit"
+
+        def evaluate(
+            self,
+            symbol: str,
+            row: pd.Series,
+            portfolio: Portfolio,
+            prices: dict[str, Decimal] | None = None,
+        ) -> RuleResult:
+            if symbol in portfolio.positions:
+                return RuleResult(target_positions={symbol: 0.5})
+            return RuleResult()
+
+    strategy = Strategy(
+        name="snapshot_partial_exit_target",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=BuyThenCashOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(fill_price_mode=FillPriceMode.NEXT_OPEN, market_calendar="XNYS"),
+        start="2024-01-02",
+        end="2024-01-03",
+        rules=[HalfExitRule()],
+    )
+
+    assert result.snapshots[1].target_weights == {"CASH": 1.0}
+    assert result.snapshots[1].adjusted_weights == {"AAA": 0.5, "CASH": 0.5}
+
+
 def test_engine_notifies_optimizer_after_normal_broker_full_exit() -> None:
     dates = pd.bdate_range("2024-01-01", periods=2, tz="UTC")
     data = {
