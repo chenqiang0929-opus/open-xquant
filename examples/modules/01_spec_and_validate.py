@@ -42,8 +42,19 @@ spec.signal.rules = {
 
 spec.execution.trade_time = "next_open"
 spec.execution.fill_price_mode = "next_open"
+spec.execution.order_timing = "next_session_open"
+spec.execution.price_bar = "next_session"
+spec.execution.price_type = "open"
 spec.cost.fee_rate = 0.001
 spec.cost.slippage_rate = 0.001
+spec.execution.cash_annual_return = 0.0
+spec.execution.lot_size_config.default = 1
+spec.metrics.profile = "open_xquant_default"
+spec.metrics.risk_free_rate = 0.0
+spec.metrics.return_type = "simple"
+spec.metrics.annualization_days = 252
+spec.metrics.calmar_denominator = "max_drawdown"
+spec.metrics.evaluation_window = "full"
 spec.benchmark.symbols = ["SPY"]
 spec.validation.train_period = ["2018-01-01", "2021-12-31"]
 spec.validation.test_period = ["2022-01-01", "2025-12-31"]
@@ -54,8 +65,26 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 spec_path = OUT_DIR / "strategy_spec.yaml"
 import yaml  # noqa: E402
 
+spec_yaml = spec.to_dict()
+spec_yaml.setdefault("execution", {}).update(
+    {
+        "cash_annual_return": spec.execution.cash_annual_return,
+        "lot_size_config": {
+            "default": spec.execution.lot_size_config.default,
+            "by_symbol": dict(spec.execution.lot_size_config.by_symbol),
+        },
+    }
+)
+spec_yaml["metrics"] = {
+    "profile": spec.metrics.profile,
+    "risk_free_rate": spec.metrics.risk_free_rate,
+    "return_type": spec.metrics.return_type,
+    "annualization_days": spec.metrics.annualization_days,
+    "calmar_denominator": spec.metrics.calmar_denominator,
+    "evaluation_window": spec.metrics.evaluation_window,
+}
 spec_path.write_text(
-    yaml.dump(spec.to_dict(), sort_keys=False, allow_unicode=True, default_flow_style=False),
+    yaml.dump(spec_yaml, sort_keys=False, allow_unicode=True, default_flow_style=False),
     encoding="utf-8",
 )
 print(f"[SDK] Spec written to {spec_path}")
@@ -89,6 +118,9 @@ CLI equivalents:
 bad_spec = StrategySpec.template(strategy_id="bad", hypothesis="")
 bad_spec.execution.trade_time = "close_t"
 bad_spec.execution.fill_price_mode = "close"
+bad_spec.execution.order_timing = "same_session_close"
+bad_spec.execution.price_bar = "same_session"
+bad_spec.execution.price_type = "close"
 bad_spec.signal.signal_time = "close_t"
 
 bad_result = validate(bad_spec)

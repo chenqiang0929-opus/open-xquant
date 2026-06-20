@@ -20,7 +20,7 @@ from oxq.observe.experiment_registry import add_experiment
 from oxq.report import generate_report
 from oxq.robustness import run_robustness
 from oxq.spec import StrategySpec, compile_run, validate
-from oxq.spec.schema import IndicatorDef, SignalRuleDef
+from oxq.spec.schema import IndicatorDef
 
 OUT_DIR = Path("/tmp/oxq_examples/e2e_momentum")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -50,15 +50,11 @@ spec.name = "Momentum Top-1 Rotation — E2E Example"
 spec.universe.symbols = list(SYMBOLS)
 spec.data.price_adjustment = "adjusted"
 
-# Signal: 20-day return, positive filter, Top-1 ranking
+# Signal: 20-day return. The TopNRanking portfolio consumes the indicator
+# directly and filters negative scores.
 spec.signal.signal_time = "close_t"
 spec.signal.indicators = {
     "momentum_20": IndicatorDef(type="NdayReturn", params={"column": "close", "period": 20}),
-}
-spec.signal.rules = {
-    "positive_momentum": SignalRuleDef(
-        type="Threshold", params={"column": "momentum_20", "threshold": 0, "relationship": "gt"}
-    ),
 }
 
 # Portfolio: Top-1 by momentum score
@@ -68,12 +64,25 @@ spec.portfolio.params = {"score_col": "momentum_20", "n": 1, "filter_negative": 
 # Execution: weekly, next_open fill
 spec.execution.trade_time = "next_open"
 spec.execution.fill_price_mode = "next_open"
+spec.execution.order_timing = "next_session_open"
+spec.execution.price_bar = "next_session"
+spec.execution.price_type = "open"
 spec.execution.initial_cash = 100_000
 spec.execution.rebalance.interval_days = 5
+spec.execution.cash_annual_return = 0.0
+spec.execution.lot_size_config.default = 1
 
 # Costs
 spec.cost.fee_rate = 0.001
 spec.cost.slippage_rate = 0.001
+
+# Metrics profile
+spec.metrics.profile = "open_xquant_default"
+spec.metrics.risk_free_rate = 0.0
+spec.metrics.return_type = "simple"
+spec.metrics.annualization_days = 252
+spec.metrics.calmar_denominator = "max_drawdown"
+spec.metrics.evaluation_window = "full"
 
 # Validation
 spec.benchmark.symbols = ["SPY"]
@@ -95,8 +104,26 @@ spec.decision_policy.reject_if = {
 spec.decision_policy.promote_if = {"oos_sharpe_gte": 1.0, "max_drawdown_gte": -0.20}
 
 spec_path = OUT_DIR / "strategy_spec.yaml"
+spec_yaml = spec.to_dict()
+spec_yaml.setdefault("execution", {}).update(
+    {
+        "cash_annual_return": spec.execution.cash_annual_return,
+        "lot_size_config": {
+            "default": spec.execution.lot_size_config.default,
+            "by_symbol": dict(spec.execution.lot_size_config.by_symbol),
+        },
+    }
+)
+spec_yaml["metrics"] = {
+    "profile": spec.metrics.profile,
+    "risk_free_rate": spec.metrics.risk_free_rate,
+    "return_type": spec.metrics.return_type,
+    "annualization_days": spec.metrics.annualization_days,
+    "calmar_denominator": spec.metrics.calmar_denominator,
+    "evaluation_window": spec.metrics.evaluation_window,
+}
 spec_path.write_text(
-    yaml.dump(spec.to_dict(), sort_keys=False, allow_unicode=True, default_flow_style=False),
+    yaml.dump(spec_yaml, sort_keys=False, allow_unicode=True, default_flow_style=False),
     encoding="utf-8",
 )
 print(f"Spec:    {spec_path.name}")
