@@ -68,7 +68,7 @@ open-xquant/
 │   ├── rules/                      # 交易规则（止损、止盈、风控熔断）
 │   ├── audit/                      # 审计系统（reproducibility + research bias）
 │   ├── robustness/                 # 稳健性测试（成本扰动、参数扰动、IS/OOS 对比）
-│   ├── report/                     # 研究报告生成器（research_report.md）
+│   ├── report/                     # 研究报告生成器（Markdown、HTML、report_assets）
 │   ├── observe/                    # 可观测性（追踪、审计记录、实验日志）
 │   ├── optimize/                   # 参数优化（网格搜索、滚动前推、交叉验证）
 │   ├── factor_eval/                # 因子评估（IC、ICIR、衰减、Tearsheet）
@@ -456,27 +456,48 @@ baseline Sharpe，而应保留 fragile、warn 和 error 状态。
 
 ---
 
-## 8. Report Generator（新增）
+## 8. Report Assets And Agent Report Writing（新增）
 
-生成 `research_report.md`，结构：
+程序负责生成 run artifacts、审计结果、稳健性结果、指标和图表资产
+manifest。最终 `research_report.md` 必须由 Agent 调用
+`research-report-writer` skill 写作，默认语言是中文；`research_report.html`
+从最终 Markdown 渲染，不重新生成报告叙事。
 
 ```text
-1. Executive Decision (Reject / Watchlist / Paper Trading Candidate)
-2. Hypothesis
-3. Strategy Spec Summary
-4. Data and Execution Assumptions
-5. Backtest Metrics
-6. Benchmark Comparison
-7. Reproducibility Audit
-8. Research Bias Audit
-9. Robustness Tests
-10. Failure Modes
-11. Next Actions
+1. 执行结论 / Executive Decision
+2. 研究假设 / Hypothesis
+3. 策略配置摘要 / Strategy Spec Summary
+4. 数据与执行假设 / Data and Execution Assumptions
+5. 回测指标 / Backtest Metrics
+6. 基准比较 / Benchmark Comparison
+7. 图表资产 / Report Assets
+8. 复现性审计 / Reproducibility Audit
+9. 研究偏差审计 / Research Bias Audit
+10. 稳健性测试 / Robustness Tests
+11. 失败模式 / Failure Modes
+12. 下一步 / Next Actions
 ```
 
 决策规则：存在 fatal audit finding → Reject；无 fatal 但 OOS 显著退化 → Watchlist；通过 audit 且稳健性尚可 → Paper Trading Candidate。
 
-命令：`oxq report write runs/<run_id>/`
+图表和附件通过 manifest 登记：
+
+```text
+runs/<run_id>/
+  report_assets/
+    manifest.json
+    figures/
+    scripts/
+    attachments/
+```
+
+报告资产命令：
+
+```bash
+oxq report asset add runs/<run_id>/ chart.png --id chart_id --title "Chart"
+oxq report asset add-batch runs/<run_id>/ runs/<run_id>/report_assets/assets.json
+oxq report asset list runs/<run_id>/
+```
 
 ---
 
@@ -502,11 +523,11 @@ oxq backtest run strategy_spec.yaml --out runs/auto --json
 oxq audit reproducibility runs/<run_id>/
 oxq audit research runs/<run_id>/
 oxq robustness run runs/<run_id>/
-oxq report write runs/<run_id>/
 oxq experiment add runs/<run_id>/
 ```
 
-CLI 是 SDK 的薄封装。业务逻辑在 SDK 中实现。
+CLI 是 SDK 的薄封装。业务逻辑在 SDK 中实现；最终研究报告文本由
+Agent skill 完成。
 
 ---
 
@@ -602,7 +623,7 @@ Tool 定义与传输协议无关。每个 Tool 是 SDK 的薄封装。
 | **engine** | `engine_run`, `engine_results`, `engine_trade_list` | 回测执行 |
 | **audit** | `audit_reproducibility`, `audit_research` | 审计 |
 | **robustness** | `robustness_run` | 稳健性测试 |
-| **report** | `report_write` | 报告生成 |
+| **report** | report asset CLI only | 图表与附件资产登记 |
 | **experiment** | `experiment_add` | 实验登记 |
 | **optimize** | `grid_search`, `walk_forward`, `cross_validate` | 参数优化 |
 | **factor_eval** | `factor_evaluate`, `factor_evaluate_ts` | 因子评估 |
@@ -685,8 +706,8 @@ agent/opencode/
 
 ### Phase 3: Audit 与 Report ✅ 已完成
 - `src/oxq/audit/reproducibility.py`, `research_bias.py`
-- `src/oxq/report/generator.py`
-- CLI: `oxq audit reproducibility`, `oxq audit research`, `oxq report write`, `oxq experiment add`
+- `src/oxq/report/assets.py`, `html.py`
+- CLI: `oxq audit reproducibility`, `oxq audit research`, `oxq report asset *`, `oxq experiment add`
 
 ### Phase 4: Robustness 与 Experiment Registry ✅ 已完成
 - `src/oxq/robustness/runner.py`
@@ -731,7 +752,6 @@ oxq spec validate strategy_spec.yaml
 oxq backtest run strategy_spec.yaml --out runs/auto --json
 oxq audit research runs/<run_id>/
 oxq robustness run runs/<run_id>/
-oxq report write runs/<run_id>/
 oxq experiment add runs/<run_id>/
 ```
 

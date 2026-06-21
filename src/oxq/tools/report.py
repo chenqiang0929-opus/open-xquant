@@ -1,47 +1,10 @@
-"""Report tools — generate research reports from backtest artifacts."""
+"""Report-adjacent tools for experiment tracking."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from oxq.tools.registry import registry
-
-
-@registry.tool(
-    name="report_write",
-    description="Generate a research_report.md from a backtest run directory. "
-    "Reads strategy_spec.yaml, metrics.json, runs both audits, and produces a structured "
-    "report with executive decision (REJECT/WATCHLIST/PAPER TRADING CANDIDATE). "
-    "Returns the report path and executive decision.",
-)
-def report_write(run_dir: str, out: str | None = None) -> dict[str, Any]:
-    """Generate a research report from a backtest run."""
-    from oxq.report import generate_report
-
-    report_md = generate_report(run_dir)
-    output_path = Path(out) if out else Path(run_dir) / "research_report.md"
-    output_path.write_text(report_md, encoding="utf-8")
-
-    strategy_id = ""
-    for line in report_md.split("\n"):
-        if line.startswith("## 1. Executive Decision"):
-            break
-        if line.startswith("# Research Report: "):
-            strategy_id = line.replace("# Research Report: ", "").strip()
-
-    decision = ""
-    for line in report_md.split("\n"):
-        if line.startswith("**") and ("REJECT" in line or "WATCHLIST" in line or "CANDIDATE" in line):
-            decision = line.strip("*").strip()
-            break
-
-    return {
-        "status": "ok",
-        "output": str(output_path),
-        "strategy_id": strategy_id,
-        "decision": decision,
-    }
 
 
 @registry.tool(

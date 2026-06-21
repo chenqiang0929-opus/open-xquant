@@ -326,20 +326,96 @@ def report():
     """Generate research reports from backtest runs."""
 
 
-@report.command()
-@click.argument("run_dir", type=click.Path(exists=True))
-@click.option("--out", "-o", default=None, help="Output file path (default: run_dir/research_report.md)")
-def write(run_dir: str, out: str | None):
-    """Generate a research report from a backtest run directory.
+@report.group(name="asset")
+def report_asset():
+    """Manage report assets for a backtest run."""
 
-    RUN_DIR is the path to a run directory (e.g. runs/20260616_153000_strategy_id/).
-    """
-    from oxq.report import generate_report
 
-    report_md = generate_report(run_dir)
-    output_path = Path(out) if out else Path(run_dir) / "research_report.md"
-    output_path.write_text(report_md, encoding="utf-8")
-    click.echo(f"Report written to {output_path}")
+@report_asset.command(name="add")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--id", "asset_id", required=True, help="Stable asset id")
+@click.option("--title", required=True, help="Human-readable asset title")
+@click.option("--caption", default="", help="Optional asset caption")
+@click.option("--section", default="results", show_default=True, help="Report section")
+@click.option("--order", default=100, show_default=True, type=int, help="Sort order within section")
+@click.option("--source-script", default=None, type=click.Path(exists=True, dir_okay=False), help="Plotting script path")
+@click.option("--source-artifact", multiple=True, help="Input run artifact used to create this asset")
+def report_asset_add(
+    run_dir: str,
+    file_path: str,
+    asset_id: str,
+    title: str,
+    caption: str,
+    section: str,
+    order: int,
+    source_script: str | None,
+    source_artifact: tuple[str, ...],
+):
+    """Register a figure or attachment as a report asset."""
+    from oxq.report.assets import add_report_asset
+
+    try:
+        asset = add_report_asset(
+            run_dir,
+            file_path,
+            asset_id=asset_id,
+            title=title,
+            caption=caption,
+            section=section,
+            order=order,
+            source_script=source_script,
+            source_artifacts=list(source_artifact),
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Added report asset {asset.id}")
+    click.echo(f"  Kind: {asset.kind}")
+    click.echo(f"  Path: {asset.path}")
+    click.echo(f"  Hash: {asset.sha256}")
+
+
+@report_asset.command(name="add-batch")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("items_json", type=click.Path(exists=True, dir_okay=False))
+def report_asset_add_batch(run_dir: str, items_json: str):
+    """Register multiple report assets from a JSON array."""
+    from oxq.report.assets import add_report_assets
+
+    try:
+        raw = json.loads(Path(items_json).read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            raise ValueError("report asset batch JSON must be an array")
+        assets = add_report_assets(run_dir, raw)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Added {len(assets)} report assets")
+    for asset in assets:
+        click.echo(f"  {asset.id}")
+        click.echo(f"    Kind: {asset.kind}")
+        click.echo(f"    Path: {asset.path}")
+        click.echo(f"    Hash: {asset.sha256}")
+
+
+@report_asset.command(name="list")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+def report_asset_list(run_dir: str):
+    """List registered report assets."""
+    from oxq.report.assets import list_report_assets
+
+    assets = list_report_assets(run_dir)
+    if not assets:
+        click.echo("No report assets registered.")
+        return
+
+    for asset in assets:
+        click.echo(f"{asset.id}")
+        click.echo(f"  Kind: {asset.kind}")
+        click.echo(f"  Title: {asset.title}")
+        click.echo(f"  Path: {asset.path}")
+        click.echo(f"  Hash: {asset.sha256}")
 
 
 @main.group()

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
 import yaml
 
 from oxq.report.generator import (
+    _benchmark_relative_metrics,
+    _decision_summary,
     _determine_decision,
     _format_float,
     _format_money,
@@ -75,6 +78,21 @@ def test_decision_watchlists_when_promote_oos_metric_is_below_threshold() -> Non
     assert decision == "WATCHLIST"
 
 
+def test_decision_watchlists_when_configured_robustness_is_unverified() -> None:
+    decision = _determine_decision(
+        bias_audit={"fatal_count": 0, "warning_count": 0},
+        spec_dict={
+            "robustness": {"cost_multiplier": [2.0]},
+            "decision_policy": {"promote_if": {"oos_sharpe_gte": 1.0}},
+        },
+        metrics={"trade_count": 12, "oos_trade_count": 12, "oos_sharpe_ratio": 2.0},
+        repro_audit={"status": "pass"},
+        robustness_result=None,
+    )
+
+    assert decision == "WATCHLIST"
+
+
 def test_decision_rejects_fragile_robustness_result() -> None:
     decision = _determine_decision(
         bias_audit={"fatal_count": 0, "warning_count": 0},
@@ -97,6 +115,36 @@ def test_decision_rejects_unverified_robustness_result() -> None:
     )
 
     assert decision == "REJECT"
+
+
+def test_decision_returns_no_evidence_when_oos_has_no_trades() -> None:
+    decision = _determine_decision(
+        bias_audit={"fatal_count": 0, "warning_count": 0},
+        spec_dict={"decision_policy": {"promote_if": {"oos_sharpe_gte": 1.0}}},
+        metrics={"trade_count": 20, "oos_trade_count": 0, "oos_sharpe_ratio": 3.0},
+        repro_audit={"status": "pass"},
+        robustness_result={"status": "warn", "tests": []},
+    )
+
+    assert decision == "NO EVIDENCE"
+
+
+def test_decision_returns_no_evidence_when_oos_trade_count_is_missing_for_test_period() -> None:
+    decision = _determine_decision(
+        bias_audit={"fatal_count": 0, "warning_count": 1},
+        spec_dict={
+            "validation": {
+                "test_period": ["2024-01-01", "2024-12-31"],
+                "required_oos": False,
+            },
+            "decision_policy": {"promote_if": {"oos_sharpe_gte": 1.0}},
+        },
+        metrics={"trade_count": 25, "oos_sharpe_ratio": 3.0, "oos_max_drawdown": -0.05},
+        repro_audit={"status": "pass"},
+        robustness_result={"status": "warn", "tests": []},
+    )
+
+    assert decision == "NO EVIDENCE"
 
 
 def test_decision_watchlists_warn_robustness_before_promotion() -> None:
@@ -183,6 +231,310 @@ def test_validation_classification_reports_unclassified_failures() -> None:
     assert "- **unclassified**: fatal:metrics_profile_unsupported" in lines
 
 
+def test_report_includes_decision_rationale_and_evidence(tmp_path) -> None:
+    run_dir = _write_report_run(tmp_path)
+
+    report = generate_report(run_dir, lang="en")
+
+    assert "### Decision Rationale" in report
+    assert "- **Primary reason**:" in report
+    assert "### Supporting Evidence" in report
+    assert "Research bias audit has no fatal findings" in report
+    assert "### Blocking Risks" in report
+    assert "### Recommended Next Actions" in report
+
+
+def test_report_includes_benchmark_relative_metrics(monkeypatch, tmp_path) -> None:
+    run_dir = _write_report_run(tmp_path)
+    spec = StrategySpec.template(
+        strategy_id="report_benchmark_relative",
+        hypothesis="benchmark relative results should be visible",
+    )
+    spec.benchmark.symbols = ["SPY"]
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-03"]
+    spec.validation.required_oos = False
+    (run_dir / "strategy_spec.yaml").write_text(
+        yaml.safe_dump(spec.to_dict(), sort_keys=False),
+        encoding="utf-8",
+    )
+    (run_dir / "equity_curve.csv").write_text(
+        "date,value\n2024-01-02,100\n2024-01-03,120\n",
+        encoding="utf-8",
+    )
+    (run_dir / "benchmark_curve.csv").write_text(
+        "date,value\n2024-01-02,200\n2024-01-03,220\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "oxq.report.generator.audit_reproducibility",
+        lambda run_dir: {"status": "pass", "checks": [], "fatal_count": 0, "warning_count": 0},
+    )
+
+    report = generate_report(run_dir, lang="en")
+
+    assert "### Benchmark Relative Metrics" in report
+    assert "| Strategy Total Return | 20.00% |" in report
+    assert "| Benchmark Total Return | 10.00% |" in report
+    assert "| Excess Total Return | 10.00% |" in report
+
+
+def test_report_omits_benchmark_relative_metrics_when_benchmark_hash_fails(monkeypatch, tmp_path) -> None:
+    run_dir = _write_report_run(tmp_path)
+    spec = StrategySpec.template(
+        strategy_id="report_untrusted_benchmark",
+        hypothesis="benchmark metrics should require a trusted benchmark artifact",
+    )
+    spec.benchmark.symbols = ["SPY"]
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-03"]
+    spec.validation.required_oos = False
+    (run_dir / "strategy_spec.yaml").write_text(
+        yaml.safe_dump(spec.to_dict(), sort_keys=False),
+        encoding="utf-8",
+    )
+    (run_dir / "equity_curve.csv").write_text(
+        "date,value\n2024-01-02,100\n2024-01-03,120\n",
+        encoding="utf-8",
+    )
+    (run_dir / "benchmark_curve.csv").write_text(
+        "date,value\n2024-01-02,200\n2024-01-03,220\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "oxq.report.generator.audit_reproducibility",
+        lambda run_dir: {
+            "status": "fail",
+            "checks": [
+                {
+                    "id": "benchmark_hash",
+                    "severity": "fatal",
+                    "status": "fail",
+                    "message": "benchmark_curve.csv hash mismatch",
+                }
+            ],
+            "fatal_count": 1,
+            "warning_count": 0,
+        },
+    )
+
+    report = generate_report(run_dir, lang="en")
+
+    assert "### Benchmark Relative Metrics" not in report
+    assert "Total return exceeds benchmark" not in report
+
+
+def test_report_omits_benchmark_relative_metrics_when_artifact_hash_guard_fails(monkeypatch, tmp_path) -> None:
+    run_dir = _write_report_run(tmp_path)
+    spec = StrategySpec.template(
+        strategy_id="report_untrusted_benchmark_guard",
+        hypothesis="benchmark metrics should require a trusted hash manifest",
+    )
+    spec.benchmark.symbols = ["SPY"]
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-03"]
+    spec.validation.required_oos = False
+    (run_dir / "strategy_spec.yaml").write_text(
+        yaml.safe_dump(spec.to_dict(), sort_keys=False),
+        encoding="utf-8",
+    )
+    (run_dir / "equity_curve.csv").write_text(
+        "date,value\n2024-01-02,100\n2024-01-03,120\n",
+        encoding="utf-8",
+    )
+    (run_dir / "benchmark_curve.csv").write_text(
+        "date,value\n2024-01-02,200\n2024-01-03,220\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "oxq.report.generator.audit_reproducibility",
+        lambda run_dir: {
+            "status": "fail",
+            "checks": [
+                {
+                    "id": "artifact_hashes",
+                    "severity": "fatal",
+                    "status": "fail",
+                    "message": "artifact_hashes.json missing required keys: ['benchmark_curve.csv']",
+                }
+            ],
+            "fatal_count": 1,
+            "warning_count": 0,
+        },
+    )
+
+    report = generate_report(run_dir, lang="en")
+
+    assert "### Benchmark Relative Metrics" not in report
+    assert "Total return exceeds benchmark" not in report
+
+
+def test_report_omits_benchmark_relative_metrics_when_audit_files_are_missing(monkeypatch, tmp_path) -> None:
+    run_dir = _write_report_run(tmp_path)
+    spec = StrategySpec.template(
+        strategy_id="report_missing_hash_manifest",
+        hypothesis="missing audit files should make benchmark evidence untrusted",
+    )
+    spec.benchmark.symbols = ["SPY"]
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-03"]
+    spec.validation.required_oos = False
+    (run_dir / "strategy_spec.yaml").write_text(
+        yaml.safe_dump(spec.to_dict(), sort_keys=False),
+        encoding="utf-8",
+    )
+    (run_dir / "equity_curve.csv").write_text(
+        "date,value\n2024-01-02,100\n2024-01-03,120\n",
+        encoding="utf-8",
+    )
+    (run_dir / "benchmark_curve.csv").write_text(
+        "date,value\n2024-01-02,200\n2024-01-03,220\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "oxq.report.generator.audit_reproducibility",
+        lambda run_dir: {
+            "status": "fail",
+            "checks": [
+                {
+                    "id": "missing_files",
+                    "severity": "fatal",
+                    "status": "fail",
+                    "message": "Missing files: ['artifact_hashes.json']",
+                }
+            ],
+            "fatal_count": 1,
+            "warning_count": 0,
+        },
+    )
+
+    report = generate_report(run_dir, lang="en")
+
+    assert "### Benchmark Relative Metrics" not in report
+    assert "Total return exceeds benchmark" not in report
+
+
+def test_benchmark_relative_metrics_aligns_curve_dates(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "equity_curve.csv").write_text(
+        "date,value\n2024-01-01,100\n2024-01-02,110\n2024-01-03,120\n",
+        encoding="utf-8",
+    )
+    (run_dir / "benchmark_curve.csv").write_text(
+        "date,value\n2024-01-02,200\n2024-01-03,220\n",
+        encoding="utf-8",
+    )
+
+    metrics = _benchmark_relative_metrics(run_dir)
+
+    assert metrics is not None
+    assert metrics["strategy_total_return"] == pytest.approx(120 / 110 - 1.0)
+    assert metrics["benchmark_total_return"] == pytest.approx(220 / 200 - 1.0)
+    assert metrics["excess_total_return"] == pytest.approx((120 / 110) - (220 / 200))
+
+
+def test_benchmark_relative_metrics_requires_two_overlapping_dates(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "equity_curve.csv").write_text(
+        "date,value\n2024-01-01,100\n2024-01-02,110\n",
+        encoding="utf-8",
+    )
+    (run_dir / "benchmark_curve.csv").write_text(
+        "date,value\n2024-01-02,200\n2024-01-03,220\n",
+        encoding="utf-8",
+    )
+
+    assert _benchmark_relative_metrics(run_dir) is None
+
+
+def test_benchmark_relative_metrics_normalizes_timestamp_dates(tmp_path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "equity_curve.csv").write_text(
+        "date,value\n2024-01-02 00:00:00+08:00,100\n2024-01-03 00:00:00+08:00,120\n",
+        encoding="utf-8",
+    )
+    (run_dir / "benchmark_curve.csv").write_text(
+        "date,value\n2024-01-02,200\n2024-01-03,220\n",
+        encoding="utf-8",
+    )
+
+    metrics = _benchmark_relative_metrics(run_dir)
+
+    assert metrics is not None
+    assert metrics["strategy_total_return"] == pytest.approx(0.2)
+    assert metrics["benchmark_total_return"] == pytest.approx(0.1)
+
+
+def test_decision_summary_uses_chinese_empty_risk_fallback() -> None:
+    summary = _decision_summary(
+        "PAPER TRADING CANDIDATE",
+        {
+            "trade_count": 10,
+            "oos_trade_count": 10,
+            "oos_sharpe_ratio": 1.2,
+        },
+        repro_audit={"status": "pass"},
+        bias_audit={"fatal_count": 0, "warning_count": 0},
+        robustness_result={"status": "robust"},
+        benchmark_metrics={
+            "strategy_total_return": 0.2,
+            "benchmark_total_return": 0.1,
+            "excess_total_return": 0.1,
+        },
+        lang="zh",
+    )
+
+    assert summary["risks"] == ["配置检查未发现阻碍资金决策的风险。"]
+
+
+def test_decision_summary_does_not_block_on_unconfigured_benchmark_or_robustness() -> None:
+    summary = _decision_summary(
+        "PAPER TRADING CANDIDATE",
+        {
+            "trade_count": 10,
+            "oos_trade_count": 10,
+            "oos_sharpe_ratio": 1.2,
+        },
+        repro_audit={"status": "pass"},
+        bias_audit={"fatal_count": 0, "warning_count": 0},
+        robustness_result=None,
+        benchmark_metrics=None,
+        lang="en",
+        robustness_configured=False,
+        benchmark_configured=False,
+    )
+
+    risks = "\n".join(summary["risks"])
+    assert "Verified robustness artifact is missing" not in risks
+    assert "Benchmark-relative return could not be computed" not in risks
+    assert summary["risks"] == ["No blocking risks were detected by configured checks."]
+
+
+def test_decision_summary_surfaces_research_audit_warnings_as_risks() -> None:
+    summary = _decision_summary(
+        "WATCHLIST",
+        {
+            "trade_count": 10,
+            "oos_trade_count": 10,
+            "oos_sharpe_ratio": 1.2,
+        },
+        repro_audit={"status": "pass"},
+        bias_audit={"fatal_count": 0, "warning_count": 2},
+        robustness_result=None,
+        benchmark_metrics=None,
+        lang="en",
+        robustness_configured=False,
+        benchmark_configured=False,
+    )
+
+    risks = "\n".join(summary["risks"])
+    assert "Research bias audit has 2 warning(s)" in risks
+    assert "No blocking risks were detected" not in risks
+
+
 def test_report_includes_execution_assumptions_when_artifact_exists(tmp_path) -> None:
     run_dir = _write_report_run(tmp_path)
     (run_dir / "execution_assumptions.json").write_text(
@@ -203,7 +555,7 @@ def test_report_includes_execution_assumptions_when_artifact_exists(tmp_path) ->
         encoding="utf-8",
     )
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "### Execution Assumptions" in report
     assert "- **order_timing**: next_session_open" in report
@@ -216,10 +568,57 @@ def test_report_includes_execution_assumptions_when_artifact_exists(tmp_path) ->
     assert "- **runtime_calendar**: XSHG" in report
 
 
+def test_chinese_report_localizes_professional_metric_sections(tmp_path) -> None:
+    run_dir = _write_report_run(tmp_path)
+    (run_dir / "execution_assumptions.json").write_text(
+        json.dumps(
+            {
+                "order_timing": "next_session_open",
+                "price_bar": "next_session",
+                "price_type": "open",
+                "fill_price_mode": "next_open",
+                "cash_annual_return": 0.025,
+            }
+        ),
+        encoding="utf-8",
+    )
+    metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    metrics.update(
+        {
+            "is_total_return": 0.06,
+            "is_annualized_return": 0.12,
+            "is_annualized_volatility": 0.10,
+            "is_max_drawdown": -0.02,
+            "is_sharpe_ratio": 1.45,
+            "is_calmar_ratio": 6.0,
+            "oos_total_return": 0.04,
+            "oos_annualized_return": 0.08,
+            "oos_annualized_volatility": 0.12,
+            "oos_calmar_ratio": 2.67,
+            "sortino_ratio": 1.4,
+            "calmar_ratio": 1.6,
+            "cost_paid": 3.0,
+        }
+    )
+    (run_dir / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+
+    report = generate_report(run_dir, lang="zh")
+
+    assert "### 执行假设" in report
+    assert "### 指标口径" in report
+    assert "### IS/OOS 指标" in report
+    assert "| 总收益 | 10.00% |" in report
+    assert "| 样本内夏普比率 | 1.45 |" in report
+    assert "| 样本外 Calmar 比率 | 2.67 |" in report
+    assert "### Execution Assumptions" not in report
+    assert "### Metrics Profile" not in report
+    assert "| Metric | Value |" not in report
+
+
 def test_report_generation_does_not_fail_without_execution_assumptions(tmp_path) -> None:
     run_dir = _write_report_run(tmp_path)
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "# Research Report: report_execution_assumptions" in report
     assert "### Execution Assumptions" not in report
@@ -229,7 +628,7 @@ def test_report_generation_ignores_malformed_execution_assumptions(tmp_path) -> 
     run_dir = _write_report_run(tmp_path)
     (run_dir / "execution_assumptions.json").write_text("{not-json", encoding="utf-8")
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "# Research Report: report_execution_assumptions" in report
     assert "## 5. Backtest Metrics" in report
@@ -252,7 +651,7 @@ def test_report_summary_uses_effective_execution_fill_mode(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "- **Execution**: next_open trade, next_close fill" in report
 
@@ -315,7 +714,7 @@ def test_report_includes_metric_assumptions_oos_and_validation_classification(tm
         encoding="utf-8",
     )
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "### Metrics Profile" in report
     assert "- **Profile**: xquant_production" in report
@@ -348,7 +747,7 @@ def test_report_missing_metric_assumptions_uses_legacy_defaults(tmp_path) -> Non
         encoding="utf-8",
     )
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "- **Profile**: open_xquant_default" in report
     assert "- **return_type**: simple" in report
@@ -356,8 +755,28 @@ def test_report_missing_metric_assumptions_uses_legacy_defaults(tmp_path) -> Non
     assert "Non-default metrics profile" not in report
 
 
-def test_report_includes_robustness_artifact_summary(tmp_path) -> None:
+def test_report_includes_robustness_artifact_summary(tmp_path, monkeypatch) -> None:
     run_dir = _write_report_run(tmp_path)
+    (run_dir / "artifact_hashes.json").write_text(
+        json.dumps({"robustness.json": "sha256:unused"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "oxq.report.generator.audit_reproducibility",
+        lambda *_args, **_kwargs: {
+            "status": "pass",
+            "checks": [
+                {
+                    "id": "robustness_hash",
+                    "severity": "fatal",
+                    "status": "pass",
+                    "message": "robustness.json hash: OK",
+                }
+            ],
+            "fatal_count": 0,
+            "warning_count": 0,
+        },
+    )
     (run_dir / "robustness.json").write_text(
         json.dumps(
             {
@@ -394,7 +813,7 @@ def test_report_includes_robustness_artifact_summary(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "**Status**: WARN" in report
     assert "- [PASS] **cost_x2**: costs are stable" in report
@@ -440,7 +859,7 @@ def test_report_rejects_fragile_robustness_result(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "## 1. Executive Decision\n\n**REJECT**" in report
 
@@ -453,10 +872,23 @@ def test_report_does_not_trust_unhashed_robustness_artifact(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "## 1. Executive Decision\n\n**REJECT**" in report
     assert "**Status**: ROBUST" not in report
+
+
+def test_report_does_not_trust_robustness_without_artifact_hashes(tmp_path) -> None:
+    run_dir = _write_report_run(tmp_path)
+    (run_dir / "robustness.json").write_text(
+        json.dumps({"status": "robust", "baseline_sharpe": 1.1, "tests": []}),
+        encoding="utf-8",
+    )
+
+    report = generate_report(run_dir, lang="en")
+
+    assert "**Status**: ROBUST" not in report
+    assert "Robustness checks passed" not in report
 
 
 def test_report_regime_only_config_does_not_claim_no_robustness_tests(tmp_path) -> None:
@@ -474,7 +906,7 @@ def test_report_regime_only_config_does_not_claim_no_robustness_tests(tmp_path) 
         encoding="utf-8",
     )
 
-    report = generate_report(run_dir)
+    report = generate_report(run_dir, lang="en")
 
     assert "- Regime analysis: enabled" in report
     assert "(No robustness tests configured)" not in report
