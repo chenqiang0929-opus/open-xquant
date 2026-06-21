@@ -109,8 +109,13 @@ class ReportQAResult:
         }
 
 
-def run_report_qa(run_dir: str | Path) -> ReportQAResult:
-    """Run final report QA checks for a backtest run directory."""
+def run_report_qa(run_dir: str | Path, *, include_advisory_checks: bool = True) -> ReportQAResult:
+    """Run report QA checks for a backtest run directory.
+
+    Deterministic artifact checks always run. Advisory semantic checks are kept
+    available for targeted tests and tooling, but the CLI leaves them to the
+    research-report-reviewer skill by default.
+    """
     run_path = Path(run_dir)
     artifacts = RunArtifacts.load(run_path)
     facts = build_report_facts(artifacts)
@@ -138,10 +143,12 @@ def run_report_qa(run_dir: str | Path) -> ReportQAResult:
     _check_markdown_images(markdown_images, registered_paths, registered_figure_paths, findings)
     _check_html_images(html_images, registered_paths, registered_figure_paths, findings)
     _check_manifest_assets(run_path, manifest_assets, findings)
+    _check_source_script_paths(manifest_assets, findings)
     _check_required_date_disclosure(markdown, html, facts, findings)
-    _check_cjk_font_risk(run_path, manifest_assets, findings)
-    _check_numeric_claims(markdown, facts, findings, source_label="Markdown")
-    _check_numeric_claims(_html_text(html), facts, findings, source_label="HTML")
+    if include_advisory_checks:
+        _check_cjk_font_risk(run_path, manifest_assets, findings)
+        _check_numeric_claims(markdown, facts, findings, source_label="Markdown")
+        _check_numeric_claims(_html_text(html), facts, findings, source_label="HTML")
 
     status = "fail" if any(f.severity == "fatal" for f in findings) else ("warn" if findings else "pass")
     return ReportQAResult(status=status, findings=findings, facts=facts)
@@ -351,6 +358,21 @@ def _check_manifest_assets(run_path: Path, assets: list[dict[str, Any]], finding
                 findings.append(ReportQAFinding("image_dimensions_invalid", "fatal", f"figure {asset_id} has invalid dimensions"))
 
 
+def _check_source_script_paths(assets: list[dict[str, Any]], findings: list[ReportQAFinding]) -> None:
+    for asset in assets:
+        source = asset.get("source")
+        script_reference = source.get("script") if isinstance(source, dict) else None
+        if isinstance(script_reference, str) and not _safe_source_script_path(script_reference):
+            asset_label = "figure" if asset.get("kind") == "figure" else "asset"
+            findings.append(
+                ReportQAFinding(
+                    "source_script_path_invalid",
+                    "fatal",
+                    f"{asset_label} {asset.get('id', 'unknown')} has unsafe source script path: {script_reference}",
+                )
+            )
+
+
 def _check_required_date_disclosure(markdown: str, html: str, facts: ReportFacts, findings: list[ReportQAFinding]) -> None:
     html_text = _html_text(html)
     if facts.effective_last_trading_day is None:
@@ -417,13 +439,6 @@ def _check_cjk_font_risk(run_path: Path, assets: list[dict[str, Any]], findings:
         script_reference = source.get("script") if isinstance(source, dict) else None
         if isinstance(script_reference, str):
             if not _safe_source_script_path(script_reference):
-                findings.append(
-                    ReportQAFinding(
-                        "source_script_path_invalid",
-                        "fatal",
-                        f"figure {asset.get('id', 'unknown')} has unsafe source script path: {script_reference}",
-                    )
-                )
                 continue
             script_path = run_path / "report_assets" / script_reference
             script_text = _read_optional_text(script_path)

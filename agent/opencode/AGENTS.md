@@ -1,15 +1,26 @@
 # open-xquant OpenCode Integration
 
-This directory contains OpenCode agent definitions, commands, and skills
-for the open-xquant Agentic Quant Research Kernel.
+This directory contains OpenCode agent definitions and commands for the
+open-xquant Agentic Quant Research Kernel.
+
+OpenCode skill definitions are single-sourced from `agent/skills/`. Do not add
+or edit duplicate skills under `agent/opencode/skills/`.
 
 ## Usage
 
-Copy or symlink this directory to your OpenCode workspace:
+Copy or symlink the repository `agent/` directory to your OpenCode workspace
+root, and load OpenCode from that same workspace root, so
+`agent/opencode/opencode.json` can resolve the shared `agent/skills/`
+directory:
 
 ```bash
-cp -r agent/opencode /path/to/opencode/workspace/
+cp -r agent /path/to/opencode/workspace/
 ```
+
+The canonical skill text lives in `agent/skills/*.md`. OpenCode discovers
+skills through `agent/skills/<name>/SKILL.md` symlink adapters that point back
+to those canonical files. Keep those adapters inside `agent/skills/`; never
+create a second skill copy under `agent/opencode/skills/`.
 
 ## Agent Roles
 
