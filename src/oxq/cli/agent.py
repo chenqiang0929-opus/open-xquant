@@ -7,6 +7,7 @@ import json
 import shlex
 import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,12 @@ from oxq.cli.agent_targets import (
     render_skill_for_target,
     resolve_source_root,
     resolve_target,
+)
+from oxq.cli.sdk_bundle import (
+    build_sdk_bundle,
+    remove_sdk_bundle,
+    sdk_bundle_can_be_removed,
+    sdk_bundle_contains_active_runner,
 )
 
 MANAGED_MARKER = ".open-xquant-managed.json"
@@ -77,10 +84,11 @@ If the current directory has no `.open-xquant/workspace.yaml`, run
 
 Before running open-xquant commands in a new directory:
 - Read `~/.config/open-xquant/agent.yaml`.
-- Use `preferred_runner` in place of `oxq` or `uv run oxq`.
-- If that is missing or fails, read
-  `~/.config/open-xquant/agent-install.json` and run
-  `uv run --project <source.path> oxq ...`.
+- Prefer `preferred_runner_argv` when your shell tool accepts argv; otherwise
+  use `preferred_runner` in place of `oxq` or `uv run oxq`.
+- These runners point at the cached SDK bundle under
+  `~/.config/open-xquant/sdk-bundles/`, not the original source checkout.
+- If runner metadata is needed, read `~/.config/open-xquant/agent-install.json`.
 - Keep the shell in the user's research directory. Do not search unrelated
   home directories for another open-xquant checkout.
 
@@ -104,15 +112,44 @@ If the current directory has no `.open-xquant/workspace.yaml`, run
 
 Before running open-xquant commands in a new directory:
 - Read `~/.config/open-xquant/agent.yaml`.
-- Use `preferred_runner` in place of `oxq` or `uv run oxq`.
-- If that is missing or fails, read
-  `~/.config/open-xquant/agent-install.json` and run
-  `uv run --project <source.path> oxq ...`.
+- Prefer `preferred_runner_argv` when your shell tool accepts argv; otherwise
+  use `preferred_runner` in place of `oxq` or `uv run oxq`.
+- These runners point at the cached SDK bundle under
+  `~/.config/open-xquant/sdk-bundles/`, not the original source checkout.
+- If runner metadata is needed, read `~/.config/open-xquant/agent-install.json`.
 - Keep the shell in the user's research directory. Do not search unrelated
   home directories for another open-xquant checkout.
 
 If this project has an `AGENTS.md`, also read it when it is relevant to
 open-xquant work.
+
+Stable spec fields include explicit execution assumptions
+(`order_timing`, `price_bar`, `price_type`, `cash_annual_return`,
+`lot_size_config`), supported calendars (`XNYS`, `ARCX`, `XSHG`, `XSHE`),
+and metrics profiles (`open_xquant_default`, `xquant_production`)."""
+
+
+GENERIC_AGENT_BLOCK = """## open-xquant
+
+When the user asks about quant strategy, backtest, factor evaluation,
+parameter tuning, audit, robustness, report, broker connectivity, or live
+trading, use the installed open-xquant skills.
+
+If the current directory has no `.open-xquant/workspace.yaml`, run
+`<preferred runner> research init` before creating strategy artifacts.
+
+Before running open-xquant commands in a new directory:
+- Read `~/.config/open-xquant/agent.yaml`.
+- Use `preferred_runner` in place of `oxq` or `uv run oxq`.
+- For generic installs, this runner is only valid where the open-xquant
+  command is already available. To get a portable cached runner, rerun
+  `oxq agent install` with a concrete target such as `codex`, `opencode`,
+  `claude-code`, `cursor`, `openclaw`, or `trae`.
+- Keep the shell in the user's research directory. Do not search unrelated
+  home directories for another open-xquant checkout.
+
+Default workflow:
+`strategy_spec.yaml` -> validate -> backtest -> audit -> robustness -> report.
 
 Stable spec fields include explicit execution assumptions
 (`order_timing`, `price_bar`, `price_type`, `cash_annual_return`,
@@ -144,12 +181,14 @@ def install(target: str | None, all_targets: bool, from_local: str | None, dry_r
 
     source_root = resolve_source_root(from_local)
     skills = _discover_skills_or_raise(source_root)
+    sdk_bundle = build_sdk_bundle(source_root, config_dir(), dry_run=dry_run)
     manifest = _load_manifest()
     now = _now()
     manifest.setdefault("schema_version", MANIFEST_SCHEMA_VERSION)
     manifest.setdefault("installed_at", now)
     manifest["updated_at"] = now
     manifest["source"] = _source_metadata(source_root, "local")
+    _record_sdk_bundle(manifest, sdk_bundle)
     manifest.setdefault("targets", {})
 
     installed: list[str] = []
@@ -167,7 +206,7 @@ def install(target: str | None, all_targets: bool, from_local: str | None, dry_r
         manifest["targets"][target_id] = target_state
         installed.append(target_id)
 
-    _ensure_agent_config(dry_run=dry_run, installed_targets=installed, source_root=source_root)
+    _ensure_agent_config(dry_run=dry_run, installed_targets=installed, sdk_bundle=sdk_bundle)
     if not dry_run:
         write_json_file(manifest_path(), manifest)
     click.echo("Installed open-xquant agent support: " + ", ".join(installed))
@@ -190,6 +229,30 @@ def uninstall(target: str | None, all_targets: bool, dry_run: bool, purge_config
     manifest = _require_manifest()
     targets = manifest.get("targets", {})
     selected = list(targets) if all_targets else [target]
+    bundles_to_purge: list[dict[str, Any]] = []
+    if not dry_run and purge_config and all_targets:
+        bundles_to_purge = _manifest_sdk_bundles(manifest)
+        active_bundles = [
+            _bundle_label(bundle)
+            for bundle in bundles_to_purge
+            if sdk_bundle_contains_active_runner(bundle, config_dir())
+        ]
+        if active_bundles:
+            raise click.ClickException(
+                "Refusing to purge config while running from the active cached SDK runner: "
+                + ", ".join(active_bundles)
+                + ". Re-run this command from a non-cached open-xquant checkout or installed Python environment."
+            )
+        failed = [
+            _bundle_label(bundle)
+            for bundle in bundles_to_purge
+            if not sdk_bundle_can_be_removed(bundle, config_dir())
+        ]
+        if failed:
+            raise click.ClickException(
+                "Refusing to purge config because SDK bundle removal was not verified: "
+                + ", ".join(failed)
+            )
     for target_id in selected:
         state = targets.get(target_id)
         if not isinstance(state, dict) or not state.get("installed"):
@@ -199,11 +262,29 @@ def uninstall(target: str | None, all_targets: bool, dry_run: bool, purge_config
         if not dry_run:
             state["installed"] = False
             state["updated_at"] = _now()
-    if purge_config and not dry_run and agent_config_path().exists():
-        agent_config_path().unlink()
     if not dry_run:
-        manifest["updated_at"] = _now()
-        write_json_file(manifest_path(), manifest)
+        if purge_config and all_targets:
+            failed = [
+                _bundle_label(bundle)
+                for bundle in bundles_to_purge
+                if not remove_sdk_bundle(bundle, config_dir())
+            ]
+            if failed:
+                manifest["updated_at"] = _now()
+                write_json_file(manifest_path(), manifest)
+                raise click.ClickException(
+                    "Refusing to purge config because SDK bundle removal was not verified: "
+                    + ", ".join(failed)
+                )
+            if agent_config_path().exists():
+                agent_config_path().unlink()
+            if manifest_path().exists():
+                manifest_path().unlink()
+        else:
+            if purge_config and agent_config_path().exists():
+                agent_config_path().unlink()
+            manifest["updated_at"] = _now()
+            write_json_file(manifest_path(), manifest)
     click.echo("Uninstall complete")
 
 
@@ -253,16 +334,26 @@ def upgrade(
 
     del yes
     manifest = _require_manifest()
-    source_root = _upgrade_source(from_local, repo, git_ref)
-    skills = _discover_skills_or_raise(source_root)
     targets = manifest.get("targets", {})
     selected = list(targets) if all_targets or target is None else [target]
-    updated: list[str] = []
+    upgrade_ids: list[str] = []
     for target_id in selected:
-        state = targets.get(target_id)
+        state = targets.get(target_id) if isinstance(targets, dict) else None
         if not isinstance(state, dict) or not state.get("installed"):
             click.echo(f"{target_id}: not installed")
             continue
+        upgrade_ids.append(target_id)
+    if not upgrade_ids:
+        click.echo("Upgrade complete: ")
+        return
+
+    source_root = _upgrade_source(from_local, repo, git_ref)
+    skills = _discover_skills_or_raise(source_root)
+    sdk_bundle = build_sdk_bundle(source_root, config_dir(), dry_run=dry_run)
+    updated: list[str] = []
+    for target_id in upgrade_ids:
+        state = targets.get(target_id)
+        assert isinstance(state, dict)
         target_obj = resolve_target(target_id)
         skipped = _upgrade_target(target_obj, state, skills, source_root, dry_run=dry_run)
         updated.append(target_id)
@@ -271,8 +362,9 @@ def upgrade(
     if not dry_run:
         manifest["updated_at"] = _now()
         manifest["source"] = _source_metadata(source_root, "local" if from_local else "git")
+        _record_sdk_bundle(manifest, sdk_bundle)
         write_json_file(manifest_path(), manifest)
-    _ensure_agent_config(dry_run=dry_run, installed_targets=updated, source_root=source_root)
+    _ensure_agent_config(dry_run=dry_run, installed_targets=updated, sdk_bundle=sdk_bundle)
     click.echo("Upgrade complete: " + ", ".join(updated))
 
 
@@ -396,7 +488,7 @@ def _upgrade_target(
 ) -> list[str]:
     assert target.skills_dir is not None
     by_name = {skill.name: skill for skill in skills}
-    old_records = {
+    old_records: dict[str, dict[str, Any]] = {
         record["name"]: record
         for record in state.get("skills", [])
         if isinstance(record, dict) and isinstance(record.get("name"), str)
@@ -416,19 +508,19 @@ def _upgrade_target(
             removed_names.append(name)
     for source_skill in skills:
         name = source_skill.name
-        record = old_records.get(name)
+        existing_record = old_records.get(name)
         dest = (
-            expand_path(record["dest"])
-            if record and isinstance(record.get("dest"), str)
+            expand_path(existing_record["dest"])
+            if existing_record and isinstance(existing_record.get("dest"), str)
             else _safe_skill_dest_dir(target, name) / "SKILL.md"
         )
         marker = dest.parent / MANAGED_MARKER
         if dest.parent.exists() and not marker.exists():
             click.echo(f"{target.id}: skip unmarked existing skill {dest.parent}")
             continue
-        if record and dest.exists() and sha256_file(dest) != record.get("dest_sha256"):
+        if existing_record and dest.exists() and sha256_file(dest) != existing_record.get("dest_sha256"):
             skipped.append(name)
-            new_skill_records.append(record)
+            new_skill_records.append(existing_record)
             continue
         content = render_skill_for_target(source_skill, target.id)
         dest_sha = _sha256_text(content)
@@ -556,33 +648,106 @@ def _load_agent_config() -> dict[str, Any]:
     loaded = read_yaml_file(agent_config_path())
     merged = default_agent_config()
     merged.update(loaded)
+    if _should_drop_preferred_runner_argv(
+        merged.get("preferred_runner"),
+        merged.get("preferred_runner_argv"),
+    ):
+        merged.pop("preferred_runner_argv", None)
     return merged
 
 
 def _ensure_agent_config(
     dry_run: bool,
     installed_targets: list[str],
-    source_root: Path | None = None,
+    sdk_bundle: dict[str, Any] | None = None,
 ) -> None:
     config = _load_agent_config()
     existing = config.get("installed_targets")
     target_set = set(existing if isinstance(existing, list) else [])
     target_set.update(installed_targets)
     config["installed_targets"] = sorted(target_set)
-    if source_root is not None and _should_update_preferred_runner(config.get("preferred_runner")):
-        config["preferred_runner"] = _project_runner(source_root)
+    if sdk_bundle is not None and _should_update_preferred_runner(config.get("preferred_runner")):
+        runner = sdk_bundle.get("runner", {})
+        if isinstance(runner, dict) and isinstance(runner.get("oxq"), str):
+            runner_oxq = runner["oxq"]
+            config["preferred_runner"] = _quote_runner_for_shell(runner_oxq)
+            argv = runner.get("argv")
+            config["preferred_runner_argv"] = [item for item in argv if isinstance(item, str)] if isinstance(argv, list) else [runner_oxq]
     if not dry_run:
         write_yaml_file(agent_config_path(), config)
+
+
+def _quote_runner_for_shell(value: str) -> str:
+    if _looks_like_windows_runner(value):
+        quoted = subprocess.list2cmdline([value])
+        return f"& {quoted}" if sys.platform == "win32" else quoted
+    return shlex.quote(value)
+
+
+def _looks_like_windows_runner(value: str) -> bool:
+    has_drive = len(value) >= 3 and value[1] == ":" and value[2] in {"\\", "/"}
+    return sys.platform == "win32" or has_drive or ("\\" in value and value.lower().endswith(".exe"))
 
 
 def _should_update_preferred_runner(value: Any) -> bool:
     if value in (None, "", "uv run oxq"):
         return True
-    return isinstance(value, str) and value.startswith("uv run --project ") and value.endswith(" oxq")
+    if not isinstance(value, str):
+        return False
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("uv run --project ") and normalized.endswith(" oxq"):
+        return True
+    return "/sdk-bundles/" in normalized
 
 
-def _project_runner(source_root: Path) -> str:
-    return f"uv run --project {shlex.quote(str(source_root.resolve()))} oxq"
+def _should_drop_preferred_runner_argv(preferred_runner: Any, argv: Any) -> bool:
+    if _should_update_preferred_runner(preferred_runner):
+        return False
+    return argv == ["uv", "run", "oxq"] or _runner_argv_points_to_sdk_bundle(argv)
+
+
+def _runner_argv_points_to_sdk_bundle(argv: Any) -> bool:
+    if not isinstance(argv, list):
+        return False
+    return any(isinstance(item, str) and "/sdk-bundles/" in item.replace("\\", "/") for item in argv)
+
+
+def _record_sdk_bundle(manifest: dict[str, Any], sdk_bundle: dict[str, Any]) -> None:
+    bundles = _manifest_sdk_bundles(manifest)
+    bundles.append(sdk_bundle)
+    manifest["sdk_bundle"] = sdk_bundle
+    manifest["sdk_bundles"] = _dedupe_sdk_bundles(bundles)
+
+
+def _manifest_sdk_bundles(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    bundles: list[dict[str, Any]] = []
+    current = manifest.get("sdk_bundle")
+    if isinstance(current, dict):
+        bundles.append(current)
+    historical = manifest.get("sdk_bundles")
+    if isinstance(historical, list):
+        bundles.extend(bundle for bundle in historical if isinstance(bundle, dict))
+    return _dedupe_sdk_bundles(bundles)
+
+
+def _dedupe_sdk_bundles(bundles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for bundle in bundles:
+        key = _bundle_label(bundle)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(bundle)
+    return deduped
+
+
+def _bundle_label(bundle: dict[str, Any]) -> str:
+    root = bundle.get("root")
+    if isinstance(root, str) and root:
+        return root
+    bundle_id = bundle.get("id")
+    return str(bundle_id) if bundle_id else "<unknown-sdk-bundle>"
 
 
 def _status_payload() -> dict[str, Any]:
@@ -683,4 +848,4 @@ def _print_generic() -> None:
     click.echo("Install these skills into your Agent's SKILL.md directory:")
     click.echo("agent/skills/*.md")
     click.echo("")
-    click.echo(GLOBAL_AGENT_BLOCK)
+    click.echo(GENERIC_AGENT_BLOCK)

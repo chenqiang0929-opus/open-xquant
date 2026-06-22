@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
+from oxq.cli.agent import _quote_runner_for_shell, _should_update_preferred_runner
 from oxq.cli.agent_manifest import read_yaml_file
 from oxq.cli.main import main
 
@@ -22,6 +24,59 @@ def _write_source(root: Path, skills: dict[str, str] | None = None) -> None:
             f"---\nname: {name}\ndescription: >-\n  {description}\n---\n\n# {title}\n",
             encoding="utf-8",
         )
+
+
+@pytest.fixture(autouse=True)
+def fake_sdk_bundle(monkeypatch, tmp_path):
+    calls: list[tuple[Path, Path, bool]] = []
+
+    def build(source_root: Path, config_root: Path, *, dry_run: bool = False) -> dict:
+        calls.append((source_root, config_root, dry_run))
+        root = config_root / "sdk-bundles" / "bundle-test"
+        wheel = root / "dist" / "open_xquant-0.1.0-py3-none-any.whl"
+        lock = root / "requirements.lock.txt"
+        packages = root / "packages.json"
+        python = root / "runner" / ".venv" / "bin" / "python"
+        runner = root / "runner" / ".venv" / "bin" / "oxq"
+        if not dry_run:
+            wheel.parent.mkdir(parents=True, exist_ok=True)
+            wheel.write_text("wheel", encoding="utf-8")
+            lock.write_text("open-xquant @ file://wheel\n", encoding="utf-8")
+            packages.write_text("[]\n", encoding="utf-8")
+            runner.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            python.chmod(0o755)
+            runner.chmod(0o755)
+        return {
+            "id": "bundle-test",
+            "root": str(root),
+            "profile": "full-research",
+            "extras": ["chart", "scipy", "yfinance", "akshare", "live", "mcp", "agent"],
+            "excluded_extras": ["dev", "docs", "talib"],
+            "wheel": {
+                "path": str(wheel),
+                "sha256": "wheel-sha",
+                "version": "0.1.0",
+                "source_commit": "commit-sha",
+            },
+            "dependencies": {
+                "lock_file": str(lock),
+                "lock_sha256": "lock-sha",
+                "packages_file": str(packages),
+                "packages_count": 1,
+            },
+            "runner": {
+                "venv": str(root / "runner" / ".venv"),
+                "python": str(python),
+                "oxq": str(runner),
+                "argv": [str(runner)],
+            },
+            "uv_cache_dir": str(root / "uv-cache"),
+        }
+
+    monkeypatch.setattr("oxq.cli.agent.build_sdk_bundle", build, raising=False)
+    return calls
 
 
 def test_agent_install_all_targets_writes_managed_skills(monkeypatch, tmp_path) -> None:
@@ -52,8 +107,10 @@ def test_agent_install_all_targets_writes_managed_skills(monkeypatch, tmp_path) 
     assert json.loads(marker.read_text(encoding="utf-8"))["target"] == "codex"
 
     manifest = home / ".config/open-xquant/agent-install.json"
-    targets = json.loads(manifest.read_text(encoding="utf-8"))["targets"]
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    targets = payload["targets"]
     assert set(targets) == {"codex", "opencode", "claude-code", "cursor", "openclaw", "trae"}
+    assert payload["sdk_bundle"]["id"] == "bundle-test"
 
 
 def test_agent_install_trae_writes_global_skills(monkeypatch, tmp_path) -> None:
@@ -76,10 +133,11 @@ def test_agent_install_trae_writes_global_skills(monkeypatch, tmp_path) -> None:
     assert json.loads(marker.read_text(encoding="utf-8"))["target"] == "trae"
 
     config = read_yaml_file(home / ".config/open-xquant/agent.yaml")
-    assert config["preferred_runner"] == f"uv run --project {source.resolve()} oxq"
+    assert config["preferred_runner"].endswith("/sdk-bundles/bundle-test/runner/.venv/bin/oxq")
+    assert config["preferred_runner_argv"] == [config["preferred_runner"]]
 
 
-def test_agent_install_writes_cross_directory_runner(monkeypatch, tmp_path) -> None:
+def test_agent_install_writes_cached_runner(monkeypatch, tmp_path, fake_sdk_bundle) -> None:
     source = tmp_path / "source"
     home = tmp_path / "home"
     _write_source(source)
@@ -93,13 +151,122 @@ def test_agent_install_writes_cross_directory_runner(monkeypatch, tmp_path) -> N
     assert result.exit_code == 0, result.output
     raw_config = (home / ".config/open-xquant/agent.yaml").read_text(encoding="utf-8")
     config = read_yaml_file(home / ".config/open-xquant/agent.yaml")
-    assert config["preferred_runner"] == f"uv run --project {source.resolve()} oxq"
-    assert f"preferred_runner: uv run --project {source.resolve()} oxq" in raw_config
+    assert fake_sdk_bundle == [(source.resolve(), home / ".config/open-xquant", False)]
+    assert config["preferred_runner"].endswith("/sdk-bundles/bundle-test/runner/.venv/bin/oxq")
+    assert config["preferred_runner_argv"] == [config["preferred_runner"]]
+    assert "sdk-bundles/bundle-test" in raw_config
+    assert str(source.resolve()) not in config["preferred_runner"]
 
     instructions = (home / ".config/opencode/AGENTS.md").read_text(encoding="utf-8")
     assert "agent.yaml" in instructions
     assert "agent-install.json" in instructions
-    assert "uv run --project <source.path> oxq" in instructions
+    assert "preferred_runner_argv" in instructions
+
+
+def test_agent_install_generic_does_not_advertise_cached_runner(monkeypatch, tmp_path, fake_sdk_bundle) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+
+    result = CliRunner().invoke(main, ["agent", "install", "--target", "generic", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert fake_sdk_bundle == []
+    assert "agent/skills/*.md" in result.output
+    assert "sdk-bundles" not in result.output
+    assert "agent-install.json" not in result.output
+    assert "preferred_runner_argv" not in result.output
+    config = read_yaml_file(home / ".config/open-xquant/agent.yaml")
+    assert config["preferred_runner"] == "uv run oxq"
+    assert "preferred_runner_argv" not in config
+    assert not (home / ".config/open-xquant/agent-install.json").exists()
+
+
+def test_agent_install_quotes_shell_runner_but_keeps_raw_argv(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source"
+    home = tmp_path / "home with spaces"
+    _write_source(source)
+    monkeypatch.setenv("HOME", str(home))
+
+    result = CliRunner().invoke(
+        main,
+        ["agent", "install", "--target", "opencode", "--from-local", str(source), "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    config = read_yaml_file(home / ".config/open-xquant/agent.yaml")
+    assert config["preferred_runner"].startswith("'")
+    assert config["preferred_runner"].endswith("'")
+    assert config["preferred_runner_argv"] == [config["preferred_runner"].strip("'")]
+
+
+def test_agent_install_preserves_custom_runner_without_default_argv(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source"
+    home = tmp_path / "home"
+    config_dir = home / ".config/open-xquant"
+    _write_source(source)
+    monkeypatch.setenv("HOME", str(home))
+    config_dir.mkdir(parents=True)
+    (config_dir / "agent.yaml").write_text(
+        "schema_version: 1\npreferred_runner: custom-oxq\ninstalled_targets: []\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["agent", "install", "--target", "opencode", "--from-local", str(source), "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    config = read_yaml_file(config_dir / "agent.yaml")
+    assert config["preferred_runner"] == "custom-oxq"
+    assert "preferred_runner_argv" not in config
+
+
+def test_agent_install_drops_stale_sdk_bundle_argv_for_custom_runner(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source"
+    home = tmp_path / "home"
+    config_dir = home / ".config/open-xquant"
+    old_runner = home / ".config/open-xquant/sdk-bundles/old/runner/.venv/bin/oxq"
+    _write_source(source)
+    monkeypatch.setenv("HOME", str(home))
+    config_dir.mkdir(parents=True)
+    (config_dir / "agent.yaml").write_text(
+        "schema_version: 1\n"
+        "preferred_runner: custom-oxq\n"
+        "preferred_runner_argv:\n"
+        f"  - {old_runner}\n"
+        "installed_targets: []\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["agent", "install", "--target", "opencode", "--from-local", str(source), "--yes"],
+    )
+
+    assert result.exit_code == 0, result.output
+    config = read_yaml_file(config_dir / "agent.yaml")
+    assert config["preferred_runner"] == "custom-oxq"
+    assert "preferred_runner_argv" not in config
+
+
+def test_agent_runner_update_recognizes_windows_sdk_bundle_path() -> None:
+    runner = r"C:\Users\Alice\.config\open-xquant\sdk-bundles\old\runner\.venv\Scripts\oxq.exe"
+
+    assert _should_update_preferred_runner(runner) is True
+
+
+def test_agent_runner_shell_quote_uses_windows_command_line_quotes() -> None:
+    runner = r"C:\Users\Alice Smith\.config\open-xquant\sdk-bundles\bundle\runner\.venv\Scripts\oxq.exe"
+
+    assert _quote_runner_for_shell(runner) == f'"{runner}"'
+
+
+def test_agent_runner_shell_quote_uses_powershell_call_operator_on_windows(monkeypatch) -> None:
+    runner = r"C:\Users\Alice Smith\.config\open-xquant\sdk-bundles\bundle\runner\.venv\Scripts\oxq.exe"
+    monkeypatch.setattr("oxq.cli.agent.sys.platform", "win32")
+
+    assert _quote_runner_for_shell(runner) == f'& "{runner}"'
 
 
 def test_agent_status_json_reports_installed_targets(monkeypatch, tmp_path) -> None:
