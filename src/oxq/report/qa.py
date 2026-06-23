@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import math
@@ -22,28 +21,6 @@ _MD_IMAGE_RE = re.compile(r"!\[[^\]]*]\((?P<src>[^)]+)\)")
 _NUMBER_PATTERN = r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 _PERCENT_RE = re.compile(rf"(?<![\w.,])(?P<value>{_NUMBER_PATTERN})%")
 _PLAIN_NUMBER_RE = re.compile(rf"(?<![\w.%/-])(?P<value>{_NUMBER_PATTERN})(?!(?:\.\d)|[\w%/-])")
-_CJK_RE = re.compile(r"[\u3400-\u9fff]")
-_CJK_FONT_NAMES = (
-    "Noto Sans CJK",
-    "Noto Serif CJK",
-    "Source Han",
-    "SourceHan",
-    "SimHei",
-    "Microsoft YaHei",
-    "PingFang",
-    "Heiti",
-    "Hiragino Sans GB",
-    "Arial Unicode",
-    "WenQuanYi",
-    "Songti",
-    "STSong",
-    "KaiTi",
-    "Kaiti",
-    "FangSong",
-    "Yu Gothic",
-    "Meiryo",
-    "Malgun Gothic",
-)
 _ASSET_KIND_REQUIRED_PREFIX = {"figure": "figures", "attachment": "attachments"}
 _EFFECTIVE_LAST_TRADING_DAY_LABELS = ("effective last trading day", "有效数据最后交易日")
 _CONFIGURED_END_DATE_LABELS = ("configured end date", "配置结束日")
@@ -146,7 +123,6 @@ def run_report_qa(run_dir: str | Path, *, include_advisory_checks: bool = True) 
     _check_source_script_paths(manifest_assets, findings)
     _check_required_date_disclosure(markdown, html, facts, findings)
     if include_advisory_checks:
-        _check_cjk_font_risk(run_path, manifest_assets, findings)
         _check_numeric_claims(markdown, facts, findings, source_label="Markdown")
         _check_numeric_claims(_html_text(html), facts, findings, source_label="HTML")
 
@@ -428,34 +404,6 @@ def _check_required_date_disclosure(markdown: str, html: str, facts: ReportFacts
             )
 
 
-def _check_cjk_font_risk(run_path: Path, assets: list[dict[str, Any]], findings: list[ReportQAFinding]) -> None:
-    for asset in assets:
-        if asset.get("kind") != "figure":
-            continue
-        title_caption = f"{asset.get('title', '')}\n{asset.get('caption', '')}"
-        source = asset.get("source")
-        script_text = ""
-        script_path = None
-        script_reference = source.get("script") if isinstance(source, dict) else None
-        if isinstance(script_reference, str):
-            if not _safe_source_script_path(script_reference):
-                continue
-            script_path = run_path / "report_assets" / script_reference
-            script_text = _read_optional_text(script_path)
-        has_cjk = _contains_cjk(title_caption) or _contains_cjk(script_text)
-        if not has_cjk:
-            continue
-        if not script_text or not _has_verified_cjk_font(script_text):
-            script_label = str(script_path.relative_to(run_path)) if script_path and script_path.exists() else "missing source script"
-            findings.append(
-                ReportQAFinding(
-                    "cjk_font_unverified",
-                    "warning",
-                    f"figure {asset.get('id', 'unknown')} contains CJK labels but no CJK font configuration was verified in {script_label}",
-                )
-            )
-
-
 def _check_numeric_claims(text: str, facts: ReportFacts, findings: list[ReportQAFinding], *, source_label: str) -> None:
     percent_values = _known_values(facts, _is_percent_known_number)
     lines = text.splitlines()
@@ -530,94 +478,6 @@ def _normalize_label_text(text: str) -> str:
     normalized = text.replace("`", "").replace("*", "").replace("_", "").lower()
     normalized = re.sub(r"<[^>]+>", " ", normalized)
     return re.sub(r"\s+", " ", normalized).strip()
-
-
-def _has_verified_cjk_font(script_text: str) -> bool:
-    try:
-        tree = ast.parse(script_text)
-    except SyntaxError:
-        return False
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            if any(_is_rcparams_font_target(target) for target in node.targets) and _ast_contains_cjk_font_name(node.value):
-                return True
-        elif isinstance(node, ast.AnnAssign):
-            if _is_rcparams_font_target(node.target) and _ast_contains_cjk_font_name(node.value):
-                return True
-        elif isinstance(node, ast.Call):
-            if _is_rcparams_update_font_call(node) or _is_matplotlib_rc_font_call(node):
-                return True
-    return False
-
-
-def _is_rcparams_font_target(target: ast.expr) -> bool:
-    if not isinstance(target, ast.Subscript):
-        return False
-    if not _is_rcparams_object(target.value):
-        return False
-    key = _literal_string(target.slice)
-    return key is not None and key.startswith("font.")
-
-
-def _is_rcparams_object(node: ast.expr) -> bool:
-    if isinstance(node, ast.Name):
-        return node.id == "rcParams"
-    return isinstance(node, ast.Attribute) and node.attr == "rcParams"
-
-
-def _is_rcparams_update_font_call(node: ast.Call) -> bool:
-    if not (
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == "update"
-        and _is_rcparams_object(node.func.value)
-    ):
-        return False
-    payloads = [*node.args, *(keyword.value for keyword in node.keywords)]
-    return any(_dict_sets_font_key(payload) and _ast_contains_cjk_font_name(payload) for payload in payloads)
-
-
-def _is_matplotlib_rc_font_call(node: ast.Call) -> bool:
-    name = _call_name(node.func)
-    if name != "rc":
-        return False
-    if not node.args or _literal_string(node.args[0]) != "font":
-        return False
-    payloads = [*node.args[1:], *(keyword.value for keyword in node.keywords)]
-    return any(_ast_contains_cjk_font_name(payload) for payload in payloads)
-
-
-def _call_name(node: ast.expr) -> str | None:
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
-
-
-def _dict_sets_font_key(node: ast.expr) -> bool:
-    if not isinstance(node, ast.Dict):
-        return False
-    return any(
-        raw_key is not None and (key := _literal_string(raw_key)) is not None and key.startswith("font.")
-        for raw_key in node.keys
-    )
-
-
-def _ast_contains_cjk_font_name(node: ast.AST | None) -> bool:
-    if node is None:
-        return False
-    for child in ast.walk(node):
-        if isinstance(child, ast.Constant) and isinstance(child.value, str):
-            if any(name in child.value for name in _CJK_FONT_NAMES):
-                return True
-    return False
-
-
-def _literal_string(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    return None
 
 
 def _known_values(facts: ReportFacts, include_name: Callable[[str], bool]) -> list[float]:
@@ -1310,17 +1170,6 @@ def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
 def _svg_dimension(text: str, attr: str) -> int | None:
     match = re.search(rf'{attr}=["\'](?P<value>\d+)(?:\.\d+)?(?:px)?["\']', text)
     return int(match.group("value")) if match else None
-
-
-def _read_optional_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8") if path.exists() else ""
-    except (OSError, UnicodeDecodeError):
-        return ""
-
-
-def _contains_cjk(text: str) -> bool:
-    return bool(_CJK_RE.search(text))
 
 
 def _int_value(value: Any, default: int) -> int:

@@ -17,16 +17,23 @@ handing the final narrative to `research-report-writer`.
 1. Confirm the run directory and required artifacts exist.
    - Read `metrics.json`, `equity_curve.csv`, `benchmark_curve.csv`,
      `trades.csv`, `positions.csv`, and `target_weights.csv` only if present.
+   - scan the run directory for available data assets before recommending
+     charts.
    - Do not modify metrics.
    - Do not modify audit artifacts.
 
-2. Discuss chart requirements with the user.
+2. Discuss chart requirements and recommend a chart set.
+   - Use the Chart Applicability Matrix below.
    - Ask what decision the chart should support.
    - Clarify chart type, time range, benchmark, grouping, and labels.
-   - Explain when the requested chart cannot be produced from available data.
+   - List the recommended chart set sorted by rotation-strategy value and data
+     availability.
    - If the user does not give a chart list, propose the Default Professional
      Chart Pack and ask whether to build the full pack, a smaller subset, or a
      custom set.
+   - Ask the user to confirm the batch before generating charts.
+   - Explain when a useful or requested chart cannot be produced from available
+     data.
 
 3. Write plotting Python.
    - Prefer a small script under `report_assets/scripts`.
@@ -34,10 +41,8 @@ handing the final narrative to `research-report-writer`.
    - Write figure outputs under `report_assets/figures`.
    - Keep plotting deterministic and local; do not download new data unless the
      user explicitly asks.
-   - For Chinese chart labels, explicitly configure an available CJK font such
-     as `Noto Sans CJK`, `Microsoft YaHei`, `PingFang`, or `SimHei`. If a CJK
-     font cannot be verified, default to English labels instead of risking
-     missing glyphs.
+   - Prefer English chart labels. Use local-language labels only when the final
+     rendered image is already known to be readable in the current environment.
 
 4. Register generated assets.
 
@@ -94,12 +99,16 @@ After registration, verify every generated figure:
 - The path is under `report_assets/figures`.
 - The figure is present in `report_assets/manifest.json`.
 - The manifest hash matches the current file.
-- Chinese charts either use a verified CJK font or default to English labels.
+- Charts default to English labels unless the rendered image proves the chosen
+  local-language labels are readable.
 - The chart is not blank or visually empty.
 - The caption names the source artifact and the interpretation limit.
 
 Use `oxq report qa runs/<run_id>/` after final Markdown and HTML exist to
-re-check image references, fonts, and manifest state.
+re-check deterministic report artifacts: image references, dates, and manifest
+state. Numeric claim review is semantic/advisory; route it through
+`research-report-reviewer` or an explicitly advisory QA pass rather than
+treating the CLI command as proof that all numeric claims are sourced.
 
 5. Hand off final writing to `research-report-writer`.
 
@@ -152,6 +161,45 @@ charts. Skip any chart whose source artifact is unavailable, and say why.
 Every professional chart must have a message title, a caption, and registered
 metadata that names each source artifact. A chart may make the report more
 readable, but it does not replace artifact-backed evidence.
+
+## Chart Applicability Matrix
+
+- Equity Curve
+  - Data: `equity_curve.csv`, optional `benchmark_curve.csv`
+  - Rotation-strategy value: core
+- Drawdown
+  - Data: `equity_curve.csv`
+  - Rotation-strategy value: core
+- Monthly Returns Heatmap
+  - Data: `equity_curve.csv` with at least three months
+  - Rotation-strategy value: high
+- IS/OOS Bar Chart
+  - Data: `metrics.json` with IS/OOS fields
+  - Rotation-strategy value: high
+- Cost Sensitivity
+  - Data: `robustness.json` with cost stress results
+  - Rotation-strategy value: high
+- Position Exposure
+  - Data: `target_weights.csv`
+  - Rotation-strategy value: high
+- Trade Distribution
+  - Data: non-empty `trades.csv`
+  - Rotation-strategy value: medium
+- Violin Plot
+  - Data: per-symbol return data for at least two assets
+  - Rotation-strategy value: high
+- Pair Plot
+  - Data: per-symbol return data for at least three assets
+  - Rotation-strategy value: high
+- Parameter Perturbation
+  - Data: `robustness.json` with parameter perturbation results
+  - Rotation-strategy value: medium
+- Regime Analysis
+  - Data: `robustness.json` with regime analysis results
+  - Rotation-strategy value: medium
+- Trade PnL Distribution
+  - Data: `trades.csv` with `closed_pnl`
+  - Rotation-strategy value: low
 
 ## Red Lines
 

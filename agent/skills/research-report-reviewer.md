@@ -30,8 +30,9 @@ Read:
 - `report_assets/manifest.json`, captions, source scripts, and figure files
 - `equity_curve.csv`, `benchmark_curve.csv`, `trades.csv`, `positions.csv`,
   and `target_weights.csv` when needed to verify a claim
-- the `oxq report qa` output, especially any `numeric_claim_unverified`
-  warnings from optional or legacy checks
+- the deterministic `oxq report qa` output
+- optional/advisory numeric QA output when available, especially any
+  `numeric_claim_unverified` warnings
 
 Do not rewrite metrics, audits, robustness output, or backtest artifacts. Do not
 rewrite the report to hide adverse evidence. If a report edit is needed, change
@@ -75,12 +76,12 @@ Markdown, and rerun deterministic QA.
    - Claims like "OOS 优于 IS 表明没有过拟合", "方向正确", "风险可控", or
      "适合 paper trading" require explicit artifact-backed reasoning.
 
-5. Chart and CJK review.
+5. Chart review.
    - Inspect registered figures when they support key conclusions.
    - Check that charts are not blank, nearly blank, unreadable, mislabeled, or
      purely decorative.
-   - Review CJK font risk from the final PNG/HTML appearance when possible;
-     script configuration alone does not prove glyphs rendered correctly.
+   - Prefer English chart labels unless the final rendered figure already
+     proves local-language labels are readable.
    - Captions must identify source artifacts and avoid unsupported conclusions.
 
 6. Markdown/HTML semantic consistency.
@@ -105,5 +106,5 @@ Return a concise review with:
 - Do not approve positive risk language that omits fatal or material warnings.
 - Do not let many low-value numeric warnings hide a decision-critical mismatch.
 - Do not use chart aesthetics as evidence of strategy quality.
-- Do not claim CJK rendering is correct solely because a script configured a
-  font.
+- Do not claim chart text is readable solely because plotting code configured
+  styling; inspect the final rendered figure when readability matters.

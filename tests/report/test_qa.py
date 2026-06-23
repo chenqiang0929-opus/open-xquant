@@ -15,10 +15,7 @@ def test_report_qa_passes_complete_registered_report(tmp_path) -> None:
     run_dir = _write_qa_run(tmp_path)
     script = run_dir / "report_assets/scripts/plot.py"
     script.parent.mkdir(parents=True)
-    script.write_text(
-        'import matplotlib.pyplot as plt\nplt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC"]\n',
-        encoding="utf-8",
-    )
+    script.write_text('import matplotlib.pyplot as plt\nplt.plot([1, 2, 3])\n', encoding="utf-8")
     figure = tmp_path / "equity.png"
     _write_png(figure)
     add_report_asset(
@@ -81,7 +78,7 @@ def test_report_qa_flags_report_image_manifest_hash_and_number_problems(tmp_path
     assert "numeric_claim_unverified" in finding_ids
 
 
-def test_report_qa_warns_when_cjk_chart_lacks_font_check(tmp_path) -> None:
+def test_report_qa_does_not_validate_chart_text_rendering(tmp_path) -> None:
     run_dir = _write_qa_run(tmp_path)
     script = run_dir / "report_assets/scripts/plot.py"
     script.parent.mkdir(parents=True)
@@ -107,8 +104,8 @@ def test_report_qa_warns_when_cjk_chart_lacks_font_check(tmp_path) -> None:
 
     result = run_report_qa(run_dir)
 
-    assert result.status == "warn"
-    assert any(finding.id == "cjk_font_unverified" for finding in result.findings)
+    assert result.status == "pass"
+    assert result.warning_count == 0
 
 
 def test_report_qa_flags_missing_html_date_disclosures(tmp_path) -> None:
@@ -698,53 +695,6 @@ def test_report_qa_allows_strategy_spec_cost_and_cash_claims(tmp_path) -> None:
     result = run_report_qa(run_dir)
 
     assert result.status == "pass"
-
-
-def test_report_qa_does_not_treat_generic_font_sans_serif_as_cjk_font(tmp_path) -> None:
-    run_dir = _write_qa_run(tmp_path)
-    script = run_dir / "report_assets/scripts/plot.py"
-    script.parent.mkdir(parents=True)
-    script.write_text(
-        'import matplotlib.pyplot as plt\nplt.rcParams["font.sans-serif"] = ["DejaVu Sans"]\nplt.title("策略净值")\n',
-        encoding="utf-8",
-    )
-    figure = tmp_path / "equity.png"
-    _write_png(figure)
-    add_report_asset(run_dir, figure, asset_id="equity", title="策略净值", source_script=script)
-    markdown = "# 研究报告\n\n有效数据最后交易日：2024-03-29\n\n配置结束日：2024-03-31\n\n![策略净值](report_assets/figures/equity.png)\n"
-    (run_dir / "research_report.md").write_text(markdown, encoding="utf-8")
-    (run_dir / "research_report.html").write_text(render_markdown_html_report(markdown), encoding="utf-8")
-
-    result = run_report_qa(run_dir)
-
-    assert result.status == "warn"
-    assert any(finding.id == "cjk_font_unverified" for finding in result.findings)
-
-
-def test_report_qa_requires_actual_cjk_font_configuration(tmp_path) -> None:
-    run_dir = _write_qa_run(tmp_path)
-    script = run_dir / "report_assets/scripts/plot.py"
-    script.parent.mkdir(parents=True)
-    script.write_text(
-        (
-            "import matplotlib.pyplot as plt\n"
-            "# Noto Sans CJK SC should be configured by callers.\n"
-            "font_candidates = ['Noto Sans CJK SC']\n"
-            "plt.title('策略净值')\n"
-        ),
-        encoding="utf-8",
-    )
-    figure = tmp_path / "equity.png"
-    _write_png(figure)
-    add_report_asset(run_dir, figure, asset_id="equity", title="策略净值", source_script=script)
-    markdown = "# 研究报告\n\n有效数据最后交易日：2024-03-29\n\n配置结束日：2024-03-31\n\n![策略净值](report_assets/figures/equity.png)\n"
-    (run_dir / "research_report.md").write_text(markdown, encoding="utf-8")
-    (run_dir / "research_report.html").write_text(render_markdown_html_report(markdown), encoding="utf-8")
-
-    result = run_report_qa(run_dir)
-
-    assert result.status == "warn"
-    assert any(finding.id == "cjk_font_unverified" for finding in result.findings)
 
 
 def test_report_qa_checks_numeric_claims_in_html_text(tmp_path) -> None:

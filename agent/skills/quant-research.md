@@ -10,6 +10,26 @@ audit -> report.
 
 ## Workflow
 
+### Step 0: Experiment Lifecycle Check
+
+Before starting a new run, inspect `runs/` and classify existing experiments by
+the presence of:
+
+- `metrics.json`
+- `research_report.md`
+- `research_bias_audit.json`
+- `robustness.json`
+
+Skip robustness sub-runs such as `<run_id>_cost_x2` and parameter-perturbation
+siblings when deciding whether a user experiment is unfinished. Treat those
+directories as child artifacts of the parent run, not resumable experiments.
+
+If any run has `metrics.json` but no `research_report.md`, ask whether to
+continue that unfinished experiment or abandon it and start a new one. Do not
+delete abandoned runs; read `.open-xquant/workspace.yaml` and resolve
+`paths.experiment_registry`, falling back to `experiments.jsonl`, before
+recording abandonment when the registry exists.
+
 ### Step 1: Create Spec
 
 ```bash
@@ -23,6 +43,10 @@ oxq spec validate strategy_spec.yaml
 ```
 
 Fix any errors. Spec MUST pass validation before proceeding.
+
+After validation passes, use `spec-auditor` to trace material field sources.
+Any unconfirmed field blocks the backtest until the user confirms or changes
+the grouped assumptions and the spec passes validation again.
 
 ### Step 2: Backtest
 
@@ -81,9 +105,24 @@ effective last trading day.
 
 Then use `research-report-reviewer` to check decision_policy consistency,
 audit/robustness fidelity, numeric warning triage, chart narrative quality,
-CJK/font risk, and whether the report structure supports the stated decision.
+chart readability, and whether the report structure supports the stated
+decision.
 If the reviewer requires Markdown report edits, render `research_report.html`
 again from the updated Markdown before rerunning `oxq report qa`.
+
+When the user accepts the completed experiment, ask whether to mark it as final.
+If yes, read `.open-xquant/workspace.yaml` and resolve both
+`paths.final_dir` and `paths.experiment_registry`; fall back to `runs/final`
+and `experiments.jsonl` when config values are absent. Write the lightweight
+final pointer there:
+
+- `<final_dir>/strategy_spec.yaml`
+- `<final_dir>/selected.json`
+- `<final_dir>/README.md`
+
+Mark the accepted run as final in the resolved experiment registry when
+present. The final pointer is a copy of the selected spec plus metadata, not a
+copy of the full run directory.
 
 ## Quality Gates
 

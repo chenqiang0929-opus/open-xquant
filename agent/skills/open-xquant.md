@@ -62,6 +62,8 @@ SDK-based custom research code.
   installation guide, but installed Agents must not depend on that file.
 - New strategy idea, strategy spec creation, spec validation, or audited
   backtest workflow: use `strategy-builder`.
+- Spec field provenance or pre-backtest assumption confirmation: use
+  `spec-auditor`.
 - Complete idea-to-report research workflow: use `quant-research`.
 - Universe, symbols, index membership, survivorship, or tradable pool design:
   use `universe-builder`.
@@ -84,6 +86,8 @@ SDK-based custom research code.
 - Indicator overlays or quick chart inspection: use `chart-indicator`.
 - Report chart assets, figure requirements, plotting scripts, image QA, or
   registering generated figures: use `report-chart-builder`.
+- Cross-run experiment comparison, spec diff, metric comparison, or comparison
+  report: use `experiment-comparator`.
 - Final human-readable report writing or editing `research_report.md` /
   `research_report.html`: use `research-report-writer`.
 - Semantic review of a completed report, decision consistency, audit fidelity,
@@ -135,9 +139,11 @@ under `open-xquant/`.
 ## Common Sequences
 
 - "Build and test this idea":
-  `strategy-builder` -> `strategy-monitor` -> ask the user whether charts are needed ->
-  `report-chart-builder` if the user wants figures ->
-  `research-report-writer` -> `research-report-reviewer`.
+  `strategy-builder` -> `spec-auditor` -> `strategy-monitor` ->
+  ask the user whether charts are needed -> `report-chart-builder` if the user
+  wants figures -> `research-report-writer` -> `research-report-reviewer`.
+- "Compare two experiments":
+  `experiment-comparator` -> review `comparisons/<comparison_id>/`.
 - "Generate charts for this run":
   `report-chart-builder` -> update report through `research-report-writer` ->
   run deterministic `oxq report qa` -> use `research-report-reviewer`.

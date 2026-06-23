@@ -13,7 +13,7 @@ from typing import Any
 import click
 
 from oxq.cli.agent import manifest_path
-from oxq.cli.agent_manifest import read_json_file
+from oxq.cli.agent_manifest import read_json_file, read_yaml_file
 from oxq.cli.research import initialize_workspace
 
 
@@ -99,17 +99,50 @@ def _check_workspace() -> dict[str, Any]:
     workspace = Path.cwd() / ".open-xquant" / "workspace.yaml"
     if not workspace.exists():
         return {"status": "missing", "fixes": ["oxq research init"]}
+    try:
+        config = read_yaml_file(workspace)
+    except Exception as exc:
+        return {
+            "status": "fail",
+            "path": str(workspace),
+            "error": str(exc),
+            "fixes": ["oxq research init --force"],
+        }
+    configured_paths = _workspace_required_paths(config)
     missing = [
         str(path)
-        for path in (
-            Path.cwd() / "strategy_specs",
-            Path.cwd() / "runs",
-            Path.cwd() / "reports",
-            Path.cwd() / "experiments.jsonl",
-        )
+        for path in configured_paths
         if not path.exists()
     ]
     return {"status": "ok" if not missing else "warn", "missing": missing}
+
+
+def _workspace_required_paths(config: dict[str, Any]) -> list[Path]:
+    paths = config.get("paths")
+    if not isinstance(paths, dict):
+        paths = {}
+    required_keys = (
+        "specs_dir",
+        "runs_dir",
+        "reports_dir",
+        "final_dir",
+        "comparisons_dir",
+        "experiment_registry",
+        "comparison_registry",
+    )
+    configured = [
+        Path.cwd() / value
+        for key in required_keys
+        if isinstance((value := paths.get(key)), str) and value
+    ]
+    if configured:
+        return configured
+    return [
+        Path.cwd() / "runs",
+        Path.cwd() / "runs" / "final",
+        Path.cwd() / "comparisons",
+        Path.cwd() / "experiments.jsonl",
+    ]
 
 
 def _check_data() -> dict[str, Any]:
@@ -125,6 +158,7 @@ def _check_deps() -> dict[str, Any]:
         "scipy": "uv sync --extra scipy",
         "matplotlib": "uv sync --extra chart",
         "mplfinance": "uv sync --extra chart",
+        "seaborn": "uv sync --extra chart",
         "httpx": "uv sync --extra live",
         "socksio": "uv sync --extra live",
         "websockets": "uv sync --extra live",
