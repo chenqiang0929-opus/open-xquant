@@ -95,6 +95,50 @@ def validate(spec_file: str, as_json: bool):
         raise SystemExit(1)
 
 
+@spec.command(name="hash")
+@click.argument("spec_file", type=click.Path(exists=True))
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+def spec_hash(spec_file: str, as_json: bool):
+    """Compute the canonical strategy spec hash."""
+    parsed = StrategySpec.from_yaml(spec_file)
+    digest = parsed.compute_hash()
+    if as_json:
+        click.echo(json.dumps({"spec_hash": digest}, indent=2))
+    else:
+        click.echo(digest)
+
+
+@spec.command(name="fields")
+@click.argument("spec_file", type=click.Path(exists=True))
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+def spec_fields(spec_file: str, as_json: bool):
+    """Export deterministic flattened fields from a strategy spec."""
+    parsed = StrategySpec.from_yaml(spec_file)
+    fields = [{"path": path, "value": value} for path, value in _flatten_fields(parsed.to_effective_dict())]
+    if as_json:
+        click.echo(json.dumps({"spec_hash": parsed.compute_hash(), "fields": fields}, indent=2, ensure_ascii=False, default=str))
+        return
+    for item in fields:
+        click.echo(f"{item['path']}={json.dumps(item['value'], ensure_ascii=False, sort_keys=True, default=str)}")
+
+
+def _flatten_fields(value: object, prefix: str = "") -> list[tuple[str, object]]:
+    if isinstance(value, dict):
+        rows: list[tuple[str, object]] = []
+        for key in sorted(value):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            rows.extend(_flatten_fields(value[key], path))
+        return rows
+    if isinstance(value, list):
+        if all(not isinstance(item, (dict, list)) for item in value):
+            return [(prefix, value)]
+        rows = []
+        for index, item in enumerate(value):
+            rows.extend(_flatten_fields(item, f"{prefix}[{index}]"))
+        return rows
+    return [(prefix, value)]
+
+
 @main.group()
 def backtest():
     """Run backtests from strategy specs."""
@@ -234,6 +278,147 @@ def run(spec_file: str, out: str, data_dir: str | None, as_json: bool):
     click.echo(f"  Trade Count:  {len(result.trades)}")
 
 
+@backtest.command(name="attach-provenance")
+@click.argument("run_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--spec-audit", required=True, type=click.Path(exists=True, dir_okay=False), help="spec_audit.json path.")
+@click.option(
+    "--component-catalog",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="component_catalog.json path.",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+def attach_provenance(run_dir: str, spec_audit: str, component_catalog: str, as_json: bool):
+    """Attach pre-run provenance artifacts while preserving run digests."""
+    from oxq.audit import audit_reproducibility
+    from oxq.core.component_catalog import _catalog_hash, _stable_hash
+    from oxq.spec.audit_schema import validate_spec_audit_file
+    from oxq.spec.compiler import _append_run_digest, _hash_file, _hash_json_file
+
+    run_path = Path(run_dir)
+    artifact_hashes_path = run_path / "artifact_hashes.json"
+    if not artifact_hashes_path.exists():
+        raise click.ClickException(f"missing artifact_hashes.json in run directory: {run_dir}")
+    artifact_hashes = json.loads(artifact_hashes_path.read_text(encoding="utf-8"))
+    if not isinstance(artifact_hashes, dict):
+        raise click.ClickException("artifact_hashes.json must be an object")
+    pre_attach_audit = audit_reproducibility(run_path)
+    if pre_attach_audit.get("status") == "fail":
+        failing = [
+            check.get("id", "unknown")
+            for check in pre_attach_audit.get("checks", [])
+            if check.get("severity") == "fatal" and check.get("status") == "fail"
+        ]
+        raise click.ClickException(f"run reproducibility must pass before attaching provenance: {failing}")
+
+    audit_validation = validate_spec_audit_file(spec_audit)
+    if audit_validation["status"] == "fail":
+        raise click.ClickException(f"invalid spec audit: {audit_validation['errors']}")
+
+    audit_payload = json.loads(Path(spec_audit).read_text(encoding="utf-8"))
+    catalog_payload = json.loads(Path(component_catalog).read_text(encoding="utf-8"))
+    audit_status = _require_json_str(audit_payload, "status")
+    if audit_status != "pass":
+        raise click.ClickException(f"spec audit status must be pass before attaching provenance: {audit_status}")
+    blocking_findings = audit_payload.get("blocking_findings")
+    if isinstance(blocking_findings, list) and blocking_findings:
+        raise click.ClickException("spec audit has blocking findings")
+    if blocking_findings is not None and not isinstance(blocking_findings, list):
+        raise click.ClickException("blocking_findings must be a list")
+    _reject_blocking_spec_audit_rows(audit_payload)
+
+    run_spec_hash_path = run_path / "spec_hash.txt"
+    if not run_spec_hash_path.exists():
+        raise click.ClickException(f"missing spec_hash.txt in run directory: {run_dir}")
+    run_spec_hash = run_spec_hash_path.read_text(encoding="utf-8").strip()
+    audit_spec_hash = _require_json_str(audit_payload, "spec_hash")
+    if audit_spec_hash != run_spec_hash:
+        raise click.ClickException(f"spec audit hash mismatch: audit={audit_spec_hash}, run={run_spec_hash}")
+
+    conversation_hash = _require_json_str(audit_payload, "conversation_hash")
+    catalog_hash = _require_json_str(catalog_payload, "catalog_hash")
+    computed_catalog_hash = _catalog_hash(catalog_payload)
+    if computed_catalog_hash != catalog_hash:
+        raise click.ClickException(f"component catalog hash mismatch: stored={catalog_hash}, actual={computed_catalog_hash}")
+    audit_catalog_hash = _require_json_str(audit_payload, "catalog_hash")
+    if audit_catalog_hash != catalog_hash:
+        raise click.ClickException(f"catalog hash mismatch: audit={audit_catalog_hash}, catalog={catalog_hash}")
+    recipe_catalog_hash = _require_json_str(catalog_payload, "recipe_catalog_hash")
+    computed_recipe_catalog_hash = _stable_hash(catalog_payload.get("recipes", []))
+    if computed_recipe_catalog_hash != recipe_catalog_hash:
+        raise click.ClickException(
+            f"recipe catalog hash mismatch: stored={recipe_catalog_hash}, actual={computed_recipe_catalog_hash}"
+        )
+
+    (run_path / "spec_audit.json").write_text(Path(spec_audit).read_text(encoding="utf-8"), encoding="utf-8")
+    (run_path / "conversation_hash.txt").write_text(conversation_hash + "\n", encoding="utf-8")
+    (run_path / "component_catalog_hash.txt").write_text(catalog_hash + "\n", encoding="utf-8")
+    (run_path / "recipe_catalog_hash.txt").write_text(recipe_catalog_hash + "\n", encoding="utf-8")
+
+    artifact_hashes.update(
+        {
+            "spec_audit.json": _hash_json_file(run_path / "spec_audit.json"),
+            "conversation_hash.txt": _hash_file(run_path / "conversation_hash.txt"),
+            "component_catalog_hash.txt": _hash_file(run_path / "component_catalog_hash.txt"),
+            "recipe_catalog_hash.txt": _hash_file(run_path / "recipe_catalog_hash.txt"),
+        }
+    )
+    artifact_hashes_path.write_text(json.dumps(artifact_hashes, indent=2) + "\n", encoding="utf-8")
+    artifact_hashes_digest = _hash_json_file(artifact_hashes_path)
+    _append_run_digest(run_path, artifact_hashes_digest)
+
+    result = {
+        "status": "pass",
+        "run_dir": str(run_path),
+        "artifact_hashes_digest": artifact_hashes_digest,
+        "attached": [
+            "spec_audit.json",
+            "conversation_hash.txt",
+            "component_catalog_hash.txt",
+            "recipe_catalog_hash.txt",
+        ],
+    }
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo("Status: PASS")
+        click.echo(f"Run dir: {run_path}")
+        click.echo(f"Artifact hashes digest: {artifact_hashes_digest}")
+
+
+def _require_json_str(payload: object, key: str) -> str:
+    if not isinstance(payload, dict) or not isinstance(payload.get(key), str) or not payload[key]:
+        raise click.ClickException(f"{key} must be present")
+    return payload[key]
+
+
+def _reject_blocking_spec_audit_rows(audit_payload: object) -> None:
+    if not isinstance(audit_payload, dict):
+        raise click.ClickException("spec audit must be an object")
+    blocking_lists = {
+        "missing_user_requirements": "spec audit has missing user requirements",
+        "agent_added_fields": "spec audit has agent-added fields",
+        "contradictions": "spec audit has contradictions",
+    }
+    for key, message in blocking_lists.items():
+        value = audit_payload.get(key)
+        if isinstance(value, list) and value:
+            raise click.ClickException(message)
+
+    blocking_field_statuses = {"unconfirmed", "contradiction", "agent_added"}
+    blocking_component_statuses = {"missing", "non_canonical"}
+    for index, item in enumerate(audit_payload.get("field_audits", [])):
+        if not isinstance(item, dict):
+            continue
+        if item.get("blocking") is True or item.get("status") in blocking_field_statuses:
+            raise click.ClickException(f"spec audit has blocking field audit row: field_audits[{index}]")
+    for index, item in enumerate(audit_payload.get("component_audits", [])):
+        if not isinstance(item, dict):
+            continue
+        if item.get("blocking") is True or item.get("status") in blocking_component_statuses:
+            raise click.ClickException(f"spec audit has blocking component audit row: component_audits[{index}]")
+
+
 @main.group()
 def strategy():
     """Manage compiled strategies."""
@@ -262,6 +447,52 @@ def compile(spec_file: str):
     click.echo(f"  Signals:   {list(spec.signal.rules.keys())}")
     click.echo(f"  Portfolio: {spec.portfolio.type}")
     click.echo(f"  Hash:      {spec.compute_hash()}")
+
+
+@main.group()
+def registry():
+    """Inspect deterministic component registry artifacts."""
+
+
+@registry.command(name="export")
+@click.option("--out", "-o", required=True, type=click.Path(dir_okay=False), help="Output component catalog JSON path.")
+def registry_export(out: str):
+    """Export registered components and canonical recipes.
+
+    This command performs no semantic strategy matching. It writes the current
+    registry/catalog artifact for Agents and Studio gates to consume.
+    """
+    from oxq.core.component_catalog import build_component_catalog, component_catalog_json
+
+    output_path = Path(out)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog = build_component_catalog()
+    output_path.write_text(component_catalog_json(catalog), encoding="utf-8")
+    click.echo(f"Component catalog written to {output_path}")
+    click.echo(f"Catalog hash: {catalog['catalog_hash']}")
+
+
+@main.group(name="spec-audit")
+def spec_audit():
+    """Validate Agent-authored spec audit artifacts."""
+
+
+@spec_audit.command(name="validate")
+@click.argument("audit_file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+def spec_audit_validate(audit_file: str, as_json: bool):
+    """Validate spec_audit.json schema without semantic language judgment."""
+    from oxq.spec.audit_schema import validate_spec_audit_file
+
+    result = validate_spec_audit_file(audit_file)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        click.echo(f"Status: {result['status'].upper()}")
+        for error in result["errors"]:
+            click.echo(f"  {error['path']}: {error['message']}")
+    if result["status"] == "fail":
+        raise SystemExit(1)
 
 
 @main.group()
