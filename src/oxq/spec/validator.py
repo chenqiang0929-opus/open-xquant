@@ -498,6 +498,75 @@ def _validate_lot_size_config(spec: StrategySpec) -> list[dict]:
     return errors
 
 
+def _validate_portfolio_rules(spec: StrategySpec) -> list[dict]:
+    errors: list[dict] = []
+    for rule_name, rule_def in sorted(spec.portfolio.rules.items()):
+        if rule_name != "rebalance":
+            errors.append(
+                _err(
+                    "fatal",
+                    "portfolio_rule_unsupported",
+                    f"portfolio.rules.{rule_name} is not supported by the audited runtime",
+                    ["executable"],
+                )
+            )
+            continue
+        if rule_def.type != "RebalanceFrequencyRule":
+            errors.append(
+                _err(
+                    "fatal",
+                    "portfolio_rebalance_rule_unsupported",
+                    "portfolio.rules.rebalance must use RebalanceFrequencyRule",
+                    ["executable"],
+                )
+            )
+            continue
+        unsupported_params = sorted(set(rule_def.params) - {"interval_days"})
+        if unsupported_params:
+            errors.append(
+                _err(
+                    "fatal",
+                    "portfolio_rebalance_params_unsupported",
+                    "portfolio.rules.rebalance.params contains unsupported keys: "
+                    + ", ".join(unsupported_params),
+                    ["executable"],
+                )
+            )
+            continue
+        interval_days = rule_def.params.get("interval_days")
+        if not isinstance(interval_days, int) or isinstance(interval_days, bool) or interval_days <= 0:
+            errors.append(
+                _err(
+                    "fatal",
+                    "portfolio_rebalance_interval_invalid",
+                    "portfolio.rules.rebalance.params.interval_days must be a positive integer",
+                    ["executable"],
+                )
+            )
+            continue
+        execution_interval = spec.execution.rebalance.interval_days
+        if getattr(spec.execution.rebalance, "_interval_days_explicit", False) and execution_interval != interval_days:
+            errors.append(
+                _err(
+                    "fatal",
+                    "rebalance_interval_conflict",
+                    "portfolio.rules.rebalance.params.interval_days conflicts with "
+                    "execution.rebalance.interval_days",
+                    ["executable"],
+                )
+            )
+    return errors
+
+
+def _effective_rebalance_interval_days(spec: StrategySpec) -> int:
+    rule_def = spec.portfolio.rules.get("rebalance")
+    if rule_def and rule_def.type == "RebalanceFrequencyRule":
+        interval_days = rule_def.params.get("interval_days")
+        if isinstance(interval_days, int) and not isinstance(interval_days, bool) and interval_days > 0:
+            return interval_days
+    return spec.execution.rebalance.interval_days
+
+
 def _validate_metrics(spec: StrategySpec) -> list[dict]:
     errors: list[dict] = []
     supported_profiles = frozenset({"open_xquant_default", "xquant_production"})
@@ -794,13 +863,15 @@ def validate(spec: StrategySpec) -> ValidationResult:
     if not isinstance(spec.execution.lot_size, int) or isinstance(spec.execution.lot_size, bool) or spec.execution.lot_size <= 0:
         errors.append(_err("fatal", "lot_size_invalid", "execution.lot_size must be a positive integer"))
     errors.extend(_validate_lot_size_config(spec))
+    errors.extend(_validate_portfolio_rules(spec))
     if (
         not isinstance(spec.execution.rebalance.interval_days, int)
         or isinstance(spec.execution.rebalance.interval_days, bool)
         or spec.execution.rebalance.interval_days <= 0
     ):
         errors.append(_err("fatal", "rebalance_interval_invalid", "execution.rebalance.interval_days must be a positive integer"))
-    if spec.execution.rebalance.frequency != "daily" and spec.execution.rebalance.interval_days <= 1:
+    effective_rebalance_interval_days = _effective_rebalance_interval_days(spec)
+    if spec.execution.rebalance.frequency != "daily" and effective_rebalance_interval_days <= 1:
         errors.append(
             _err(
                 "fatal",

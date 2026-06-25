@@ -99,10 +99,31 @@ def test_spec_hash_and_fields_are_deterministic(tmp_path) -> None:
     assert {"path": "execution.lot_size_config.default", "value": 1} in fields["fields"]
 
 
+def test_strategy_compile_writes_compile_preview(tmp_path) -> None:
+    spec = StrategySpec.template(strategy_id="compile_preview", hypothesis="compile preview should be auditable")
+    spec.portfolio.rules["rebalance"] = {
+        "type": "RebalanceFrequencyRule",
+        "params": {"interval_days": 10},
+    }
+    spec_path = tmp_path / "strategy_spec.yaml"
+    spec_path.write_text(yaml.dump(spec.to_dict(), sort_keys=False), encoding="utf-8")
+    out_dir = tmp_path / "compile_preview"
+
+    result = CliRunner().invoke(main, ["strategy", "compile", str(spec_path), "--out", str(out_dir)])
+
+    assert result.exit_code == 0, result.output
+    compiled_plan = json.loads((out_dir / "compiled_plan.json").read_text(encoding="utf-8"))
+    assert compiled_plan["execution"]["rebalance"]["interval_days"] == 10
+    assert compiled_plan["execution"]["rebalance"]["source"] == "portfolio.rules.rebalance"
+    assert (out_dir / "spec_hash.txt").read_text(encoding="utf-8").strip() == compiled_plan["spec_hash"]
+
+
 def test_spec_audit_validate_accepts_required_schema(tmp_path) -> None:
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "block",
+        "spec_provenance_pass": False,
+        "runtime_semantics_pass": False,
         "spec_hash": "sha256:" + "1" * 16,
         "conversation_hash": "sha256:" + "2" * 16,
         "catalog_hash": "sha256:" + "3" * 16,
@@ -157,12 +178,43 @@ def test_spec_audit_validate_rejects_missing_required_fields(tmp_path) -> None:
     assert payload["status"] == "fail"
     assert any(error["path"] == "spec_hash" for error in payload["errors"])
     assert any(error["path"] == "schema_version" for error in payload["errors"])
+    assert any(error["path"] == "spec_provenance_pass" for error in payload["errors"])
+    assert any(error["path"] == "runtime_semantics_pass" for error in payload["errors"])
+
+
+def test_spec_audit_validate_rejects_legacy_v1_after_gate_breaking_change(tmp_path) -> None:
+    audit = {
+        "schema_version": 1,
+        "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
+        "spec_hash": "sha256:" + "1" * 16,
+        "conversation_hash": "sha256:" + "2" * 16,
+        "catalog_hash": "sha256:" + "3" * 16,
+        "recipe_matches": [],
+        "field_audits": [],
+        "component_audits": [],
+        "missing_user_requirements": [],
+        "agent_added_fields": [],
+        "contradictions": [],
+        "blocking_findings": [],
+    }
+    path = tmp_path / "spec_audit.json"
+    path.write_text(json.dumps(audit), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["spec-audit", "validate", str(path), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert any(error["path"] == "schema_version" and "must be 2" in error["message"] for error in payload["errors"])
 
 
 def test_spec_audit_validate_rejects_malformed_entries(tmp_path) -> None:
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "blocked",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
         "spec_hash": "sha256:" + "1" * 16,
         "conversation_hash": "sha256:" + "2" * 16,
         "catalog_hash": "sha256:" + "3" * 16,
@@ -189,13 +241,252 @@ def test_spec_audit_validate_rejects_malformed_entries(tmp_path) -> None:
     assert any(error["path"] == "component_audits[0].status" for error in payload["errors"])
 
 
+def test_spec_audit_validate_rejects_confirmed_when_evidence_denies_user_confirmation(tmp_path) -> None:
+    audit = {
+        "schema_version": 2,
+        "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": False,
+        "spec_hash": "sha256:" + "1" * 16,
+        "conversation_hash": "sha256:" + "2" * 16,
+        "catalog_hash": "sha256:" + "3" * 16,
+        "recipe_matches": [],
+        "field_audits": [
+            {
+                "field_path": "validation.train_period",
+                "spec_value": ["2025-01-01", "2025-12-31"],
+                "status": "confirmed",
+                "evidence": ["用户只给了回测时间，未指定训练/测试期划分"],
+                "blocking": False,
+            }
+        ],
+        "component_audits": [],
+        "missing_user_requirements": [],
+        "agent_added_fields": [],
+        "contradictions": [],
+        "blocking_findings": [],
+    }
+    path = tmp_path / "spec_audit.json"
+    path.write_text(json.dumps(audit), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["spec-audit", "validate", str(path), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["status"] == "fail"
+    assert any(error["path"] == "field_audits[0].status" for error in payload["errors"])
+    assert any(error["path"] == "runtime_semantics_pass" for error in payload["errors"])
+
+
+def test_spec_audit_validate_rejects_confirmed_when_same_evidence_denies_field_confirmation(tmp_path) -> None:
+    audit = {
+        "schema_version": 2,
+        "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
+        "spec_hash": "sha256:" + "1" * 16,
+        "conversation_hash": "sha256:" + "2" * 16,
+        "catalog_hash": "sha256:" + "3" * 16,
+        "recipe_matches": [],
+        "field_audits": [
+            {
+                "field_path": "validation.train_period",
+                "spec_value": ["2025-01-01", "2025-12-31"],
+                "status": "confirmed",
+                "evidence": ["用户确认了完整回测区间，但未指定训练/测试期划分"],
+                "blocking": False,
+            }
+        ],
+        "component_audits": [],
+        "missing_user_requirements": [],
+        "agent_added_fields": [],
+        "contradictions": [],
+        "blocking_findings": [],
+    }
+    path = tmp_path / "spec_audit.json"
+    path.write_text(json.dumps(audit), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["spec-audit", "validate", str(path), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["status"] == "fail"
+    assert any(error["path"] == "field_audits[0].status" for error in payload["errors"])
+
+
+def test_spec_audit_validate_rejects_confirmation_for_other_field_before_denial(tmp_path) -> None:
+    audit = {
+        "schema_version": 2,
+        "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
+        "spec_hash": "sha256:" + "1" * 16,
+        "conversation_hash": "sha256:" + "2" * 16,
+        "catalog_hash": "sha256:" + "3" * 16,
+        "recipe_matches": [],
+        "field_audits": [
+            {
+                "field_path": "validation.train_period",
+                "spec_value": ["2025-01-01", "2025-12-31"],
+                "status": "confirmed",
+                "evidence": ["User confirmed the full backtest range in turn 5, but did not specify the train/test split."],
+                "blocking": False,
+            }
+        ],
+        "component_audits": [],
+        "missing_user_requirements": [],
+        "agent_added_fields": [],
+        "contradictions": [],
+        "blocking_findings": [],
+    }
+    path = tmp_path / "spec_audit.json"
+    path.write_text(json.dumps(audit), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["spec-audit", "validate", str(path), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["status"] == "fail"
+    assert any(error["path"] == "field_audits[0].status" for error in payload["errors"])
+
+
+def test_spec_audit_validate_allows_confirmed_after_later_confirmation(tmp_path) -> None:
+    audit = {
+        "schema_version": 2,
+        "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
+        "spec_hash": "sha256:" + "1" * 16,
+        "conversation_hash": "sha256:" + "2" * 16,
+        "catalog_hash": "sha256:" + "3" * 16,
+        "recipe_matches": [],
+        "field_audits": [
+            {
+                "field_path": "validation.train_period",
+                "spec_value": ["2025-01-01", "2025-12-31"],
+                "status": "confirmed",
+                "evidence": ["The split was initially not specified; user confirmed it in turn 5."],
+                "blocking": False,
+            }
+        ],
+        "component_audits": [],
+        "missing_user_requirements": [],
+        "agent_added_fields": [],
+        "contradictions": [],
+        "blocking_findings": [],
+    }
+    path = tmp_path / "spec_audit.json"
+    path.write_text(json.dumps(audit), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["spec-audit", "validate", str(path), "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["status"] == "pass"
+
+
+def test_spec_audit_validate_allows_later_confirmation_in_separate_evidence_entry(tmp_path) -> None:
+    audit = {
+        "schema_version": 2,
+        "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
+        "spec_hash": "sha256:" + "1" * 16,
+        "conversation_hash": "sha256:" + "2" * 16,
+        "catalog_hash": "sha256:" + "3" * 16,
+        "recipe_matches": [],
+        "field_audits": [
+            {
+                "field_path": "validation.train_period",
+                "spec_value": ["2025-01-01", "2025-12-31"],
+                "status": "confirmed",
+                "evidence": ["initially not specified", "user confirmed it in turn 5"],
+                "blocking": False,
+            }
+        ],
+        "component_audits": [],
+        "missing_user_requirements": [],
+        "agent_added_fields": [],
+        "contradictions": [],
+        "blocking_findings": [],
+    }
+    path = tmp_path / "spec_audit.json"
+    path.write_text(json.dumps(audit), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["spec-audit", "validate", str(path), "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["status"] == "pass"
+
+
+def test_spec_audit_validate_allows_confirmation_before_historical_negative_context(tmp_path) -> None:
+    audit = {
+        "schema_version": 2,
+        "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
+        "spec_hash": "sha256:" + "1" * 16,
+        "conversation_hash": "sha256:" + "2" * 16,
+        "catalog_hash": "sha256:" + "3" * 16,
+        "recipe_matches": [],
+        "field_audits": [
+            {
+                "field_path": "validation.train_period",
+                "spec_value": ["2025-01-01", "2025-12-31"],
+                "status": "confirmed",
+                "evidence": ["User confirmed in turn 5 after it was initially not specified."],
+                "blocking": False,
+            }
+        ],
+        "component_audits": [],
+        "missing_user_requirements": [],
+        "agent_added_fields": [],
+        "contradictions": [],
+        "blocking_findings": [],
+    }
+    path = tmp_path / "spec_audit.json"
+    path.write_text(json.dumps(audit), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["spec-audit", "validate", str(path), "--json"])
+
+    assert result.exit_code == 0, result.output
+
+
+def test_spec_audit_validate_rejects_pass_with_false_gate(tmp_path) -> None:
+    audit = {
+        "schema_version": 2,
+        "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": False,
+        "spec_hash": "sha256:" + "1" * 16,
+        "conversation_hash": "sha256:" + "2" * 16,
+        "catalog_hash": "sha256:" + "3" * 16,
+        "recipe_matches": [],
+        "field_audits": [],
+        "component_audits": [],
+        "missing_user_requirements": [],
+        "agent_added_fields": [],
+        "contradictions": [],
+        "blocking_findings": [],
+    }
+    path = tmp_path / "spec_audit.json"
+    path.write_text(json.dumps(audit), encoding="utf-8")
+
+    result = CliRunner().invoke(main, ["spec-audit", "validate", str(path), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert any(error["path"] == "runtime_semantics_pass" for error in payload["errors"])
+
+
 def test_backtest_attach_provenance_preserves_run_digest(tmp_path) -> None:
     run_dir = _write_minimal_cli_run(tmp_path)
     spec_hash = (run_dir / "spec_hash.txt").read_text(encoding="utf-8").strip()
     component_catalog, catalog = _write_component_catalog(tmp_path)
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
         "spec_hash": spec_hash,
         "conversation_hash": "sha256:" + "2" * 16,
         "catalog_hash": catalog["catalog_hash"],
@@ -249,8 +540,10 @@ def test_backtest_attach_provenance_rejects_blocking_audit(tmp_path) -> None:
     spec_hash = (run_dir / "spec_hash.txt").read_text(encoding="utf-8").strip()
     component_catalog, catalog = _write_component_catalog(tmp_path)
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "block",
+        "spec_provenance_pass": False,
+        "runtime_semantics_pass": False,
         "spec_hash": spec_hash,
         "conversation_hash": "sha256:" + "2" * 16,
         "catalog_hash": catalog["catalog_hash"],
@@ -294,8 +587,10 @@ def test_backtest_attach_provenance_rejects_hash_mismatch(tmp_path) -> None:
     spec_hash = (run_dir / "spec_hash.txt").read_text(encoding="utf-8").strip()
     component_catalog, catalog = _write_component_catalog(tmp_path)
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
         "spec_hash": "sha256:" + "1" * 16,
         "conversation_hash": "sha256:" + "2" * 16,
         "catalog_hash": catalog["catalog_hash"],
@@ -364,8 +659,10 @@ def test_backtest_attach_provenance_rejects_nested_blockers(tmp_path) -> None:
     spec_hash = (run_dir / "spec_hash.txt").read_text(encoding="utf-8").strip()
     component_catalog, catalog = _write_component_catalog(tmp_path)
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
         "spec_hash": spec_hash,
         "conversation_hash": "sha256:" + "2" * 16,
         "catalog_hash": catalog["catalog_hash"],
@@ -410,8 +707,10 @@ def test_backtest_attach_provenance_rejects_tampered_catalog_body(tmp_path) -> N
     spec_hash = (run_dir / "spec_hash.txt").read_text(encoding="utf-8").strip()
     component_catalog, catalog = _write_component_catalog(tmp_path)
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
         "spec_hash": spec_hash,
         "conversation_hash": "sha256:" + "2" * 16,
         "catalog_hash": catalog["catalog_hash"],
@@ -458,8 +757,10 @@ def test_backtest_attach_provenance_rejects_non_reproducible_run(tmp_path) -> No
     spec_hash = (run_dir / "spec_hash.txt").read_text(encoding="utf-8").strip()
     component_catalog, catalog = _write_component_catalog(tmp_path)
     audit = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "pass",
+        "spec_provenance_pass": True,
+        "runtime_semantics_pass": True,
         "spec_hash": spec_hash,
         "conversation_hash": "sha256:" + "2" * 16,
         "catalog_hash": catalog["catalog_hash"],

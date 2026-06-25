@@ -104,6 +104,31 @@ def _effective_lot_size(spec: StrategySpec) -> int:
     return spec.execution.lot_size
 
 
+def _effective_rebalance(spec: StrategySpec) -> tuple[int, str]:
+    """Return the runtime rebalance interval and the material source field."""
+    execution_interval = spec.execution.rebalance.interval_days
+    rebalance_rule = spec.portfolio.rules.get("rebalance")
+    if rebalance_rule is None:
+        return execution_interval, "execution.rebalance.interval_days"
+    if rebalance_rule.type != "RebalanceFrequencyRule":
+        raise ValueError("portfolio.rules.rebalance must use RebalanceFrequencyRule")
+    unsupported_params = sorted(set(rebalance_rule.params) - {"interval_days"})
+    if unsupported_params:
+        raise ValueError(
+            "portfolio.rules.rebalance.params contains unsupported keys: "
+            + ", ".join(unsupported_params)
+        )
+    interval = rebalance_rule.params.get("interval_days")
+    if not isinstance(interval, int) or isinstance(interval, bool) or interval <= 0:
+        raise ValueError("portfolio.rules.rebalance.params.interval_days must be a positive integer")
+    if getattr(spec.execution.rebalance, "_interval_days_explicit", False) and execution_interval != interval:
+        raise ValueError(
+            "portfolio.rules.rebalance.params.interval_days conflicts with "
+            "execution.rebalance.interval_days"
+        )
+    return interval, "portfolio.rules.rebalance"
+
+
 class _SignalFilteredEqualWeightOptimizer:
     """Equal weight among symbols with active signals.
 
@@ -273,7 +298,7 @@ def compile_run(
 
     # Build rules from spec
     rules: list = []
-    interval_days = spec.execution.rebalance.interval_days
+    interval_days, _rebalance_source = _effective_rebalance(spec)
     if interval_days > 1:
         rules.append(RebalanceFrequencyRule(interval_days=interval_days))
 
@@ -530,6 +555,7 @@ def _write_benchmark_curve_artifact(spec: StrategySpec, result: RunResult, run_d
 
 def _build_execution_assumptions(spec: StrategySpec) -> dict[str, Any]:
     semantics = derive_execution_semantics(spec.execution)
+    rebalance_interval, rebalance_source = _effective_rebalance(spec)
     return {
         "schema_version": 1,
         "calendar": spec.market.calendar,
@@ -545,6 +571,11 @@ def _build_execution_assumptions(spec: StrategySpec) -> dict[str, Any]:
             "default": spec.execution.lot_size_config.default,
             "by_symbol": dict(spec.execution.lot_size_config.by_symbol),
         },
+        "rebalance": {
+            "frequency": spec.execution.rebalance.frequency,
+            "interval_days": rebalance_interval,
+            "source": rebalance_source,
+        },
     }
 
 
@@ -557,6 +588,7 @@ def _build_compiled_plan(
     """Build a deterministic trace of how the spec maps to runtime objects."""
     strategy = strategy or compile_strategy(spec)
     semantics = derive_execution_semantics(spec.execution)
+    rebalance_interval, rebalance_source = _effective_rebalance(spec)
     assumptions = metric_assumptions(spec.metrics)
     signal_types = {name: rule.type for name, rule in sorted(spec.signal.rules.items())}
     terminal_signals: list[str] = []
@@ -627,6 +659,13 @@ def _build_compiled_plan(
             "runtime_type": portfolio_runtime_type,
             "class": _class_ref(type(strategy.portfolio)),
             "params": dict(spec.portfolio.params),
+            "rules": {
+                name: {
+                    "type": definition.type,
+                    "params": dict(definition.params),
+                }
+                for name, definition in sorted(spec.portfolio.rules.items())
+            },
         },
         "execution": {
             "trade_time": spec.execution.trade_time,
@@ -645,7 +684,8 @@ def _build_compiled_plan(
             },
             "rebalance": {
                 "frequency": spec.execution.rebalance.frequency,
-                "interval_days": spec.execution.rebalance.interval_days,
+                "interval_days": rebalance_interval,
+                "source": rebalance_source,
             },
         },
         "cost": {
@@ -673,6 +713,17 @@ def _build_compiled_plan(
             "evaluation_window": assumptions["evaluation_window"],
         },
     }
+
+
+def compile_plan(spec: StrategySpec, *, effective_data_dir: str | None = None) -> dict[str, Any]:
+    """Return the deterministic compiled runtime plan for a strategy spec."""
+    from oxq.spec.validator import validate
+
+    validation = validate(spec)
+    if validation.status == "fail":
+        messages = "; ".join(f"{error['check']}: {error['message']}" for error in validation.errors)
+        raise ValueError(f"spec cannot be compiled: {messages}")
+    return _build_compiled_plan(spec, effective_data_dir=effective_data_dir)
 
 
 def _build_strategy_py_artifact(
@@ -755,13 +806,14 @@ def _format_python_literal(value: Any) -> str:
 
 def _build_compiled_runtime_rules(spec: StrategySpec) -> list[dict[str, Any]]:
     rules: list[dict[str, Any]] = []
-    if spec.execution.rebalance.interval_days > 1:
+    rebalance_interval, rebalance_source = _effective_rebalance(spec)
+    if rebalance_interval > 1:
         rules.append(
             {
                 "type": "RebalanceFrequencyRule",
                 "class": f"{RebalanceFrequencyRule.__module__}.{RebalanceFrequencyRule.__qualname__}",
-                "params": {"interval_days": spec.execution.rebalance.interval_days},
-                "source": "execution.rebalance.interval_days",
+                "params": {"interval_days": rebalance_interval},
+                "source": rebalance_source,
             }
         )
     for signal_name, signal_def in sorted(spec.signal.rules.items()):
