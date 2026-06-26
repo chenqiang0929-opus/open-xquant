@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from decimal import Decimal
 from pathlib import Path
 
@@ -8,11 +10,14 @@ import pandas as pd
 import yaml
 
 from oxq.audit.reproducibility import audit_reproducibility
+from oxq.core.component_manifest import compute_component_bundle_hash
 from oxq.core.engine import Engine
+from oxq.core.registry import list_indicators
 from oxq.core.types import Portfolio
 from oxq.portfolio.analytics import RunResult
 from oxq.robustness.runner import (
     _clone_spec_with_cost_multiplier,
+    _copy_component_provenance,
     _read_curve_csv,
     _read_trade_date_counts,
     run_robustness,
@@ -35,6 +40,108 @@ def test_regime_analysis_request_is_not_reported_as_pass_when_unimplemented(tmp_
     regime = next(test for test in result["tests"] if test["name"] == "regime_analysis")
     assert regime["status"] == "warn"
     assert "equity_curve.csv" in regime["message"]
+
+
+def test_run_robustness_errors_when_run_component_manifest_cannot_load(tmp_path) -> None:
+    spec = StrategySpec.template(strategy_id="missing_component_manifest", hypothesis="custom component manifest is required")
+    _write_run_inputs(tmp_path, spec, {"sharpe_ratio": 1.0, "trade_count": 12, "max_drawdown": -0.1})
+    (tmp_path / "component_manifests.json").write_text(
+        json.dumps([{"manifest_path": "missing_component_manifest.json", "bundle_hash": "sha256:missing"}]),
+        encoding="utf-8",
+    )
+
+    result = run_robustness(tmp_path)
+
+    assert result["status"] == "error"
+    assert "recorded component manifest not found" in result["message"]
+
+
+def test_run_robustness_restores_workspace_component_registry(monkeypatch, tmp_path) -> None:
+    spec = StrategySpec.template(strategy_id="component_scope", hypothesis="robustness component loads are scoped")
+    _write_run_inputs(tmp_path, spec, {"sharpe_ratio": 1.0, "trade_count": 12, "max_drawdown": -0.1})
+    manifest = _write_robustness_component_manifest(tmp_path)
+    bundle_hash = compute_component_bundle_hash(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["bundle_hash"] = bundle_hash
+    manifest.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    archive_base = tmp_path / "component_extensions" / "00_custom_components"
+    shutil.copytree(tmp_path / "custom_components", archive_base / "custom_components")
+    shutil.copy2(manifest, archive_base / "component_manifest.json")
+    (tmp_path / "component_manifests.json").write_text(
+        json.dumps([
+            {
+                "manifest_path": str(manifest),
+                "archived_manifest_path": "component_extensions/00_custom_components/component_manifest.json",
+                "archived_extension_root": "component_extensions/00_custom_components/custom_components",
+                "bundle_hash": bundle_hash,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    (tmp_path / "component_bundle_hash.txt").write_text(bundle_hash + "\n", encoding="utf-8")
+
+    class FakeResult:
+        def sharpe_ratio(self) -> float:
+            return 0.8
+
+    def fake_compile_run(_spec, *, out_dir: str, data_dir=None):
+        del data_dir
+        out_path = Path(out_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        (out_path / "metrics.json").write_text(json.dumps({"sharpe_ratio": 0.8}), encoding="utf-8")
+        (out_path / "artifact_hashes.json").write_text(json.dumps({"metrics.json": "sha256:metrics"}), encoding="utf-8")
+        return FakeResult(), out_path
+
+    monkeypatch.setattr("oxq.robustness.runner.compile_run", fake_compile_run)
+
+    result = run_robustness(tmp_path)
+    child_run = tmp_path.parent / f"{tmp_path.name}_cost_x2"
+    child_hashes = json.loads((child_run / "artifact_hashes.json").read_text(encoding="utf-8"))
+
+    assert result["status"] in {"warn", "robust"}
+    assert "RobustnessWorkspaceIndicator" not in list_indicators()
+    assert (child_run / "component_manifests.json").exists()
+    assert (child_run / "component_bundle_hash.txt").exists()
+    assert (child_run / "component_extensions" / "00_custom_components" / "custom_components").exists()
+    assert "component_manifests.json" in child_hashes
+    assert "component_bundle_hash.txt" in child_hashes
+
+
+def test_copy_component_provenance_includes_legacy_component_root(tmp_path) -> None:
+    from oxq.core.component_manifest import load_component_manifests_from_run, scoped_component_registries
+
+    source_run = tmp_path / "source"
+    child_run = tmp_path / "child"
+    source_run.mkdir()
+    child_run.mkdir()
+    manifest = _write_robustness_component_manifest(source_run)
+    bundle_hash = compute_component_bundle_hash(manifest)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["bundle_hash"] = bundle_hash
+    manifest.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    (source_run / "component_manifests.json").write_text(
+        json.dumps([
+            {
+                "manifest_path": str(manifest),
+                "bundle_hash": bundle_hash,
+            }
+        ]),
+        encoding="utf-8",
+    )
+    (source_run / "component_bundle_hash.txt").write_text(bundle_hash + "\n", encoding="utf-8")
+    (child_run / "artifact_hashes.json").write_text(json.dumps({"metrics.json": "sha256:metrics"}), encoding="utf-8")
+
+    _copy_component_provenance(source_run, child_run)
+    shutil.rmtree(source_run / "custom_components")
+    manifest.unlink()
+    with scoped_component_registries():
+        loaded = load_component_manifests_from_run(child_run)
+    child_hashes = json.loads((child_run / "artifact_hashes.json").read_text(encoding="utf-8"))
+
+    assert loaded[0]["bundle_hash"] == bundle_hash
+    assert (child_run / "custom_components" / "oxq_components" / "indicators").exists()
+    assert "component_manifests.json" in child_hashes
+    assert "component_bundle_hash.txt" in child_hashes
 
 
 def test_read_curve_csv_handles_mixed_timezone_offsets(tmp_path) -> None:
@@ -884,6 +991,66 @@ def _write_run_inputs(tmp_path: Path, spec: StrategySpec, metrics: dict) -> None
     (tmp_path / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
     _write_equity_curve(tmp_path, [("2022-01-01", 100), ("2022-01-02", 101), ("2022-01-03", 102)])
     _write_trades(tmp_path, [])
+
+
+def _write_robustness_component_manifest(tmp_path: Path) -> Path:
+    root = tmp_path / "custom_components"
+    source_dir = root / "oxq_components" / "indicators"
+    tests_dir = root / "tests"
+    source_dir.mkdir(parents=True)
+    tests_dir.mkdir(parents=True)
+    (root / "oxq_components" / "__init__.py").write_text("", encoding="utf-8")
+    (source_dir / "__init__.py").write_text("", encoding="utf-8")
+    source = source_dir / "robustness_workspace_indicator.py"
+    source.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import pandas as pd",
+                "",
+                "",
+                "class RobustnessWorkspaceIndicator:",
+                "    name = 'RobustnessWorkspaceIndicator'",
+                "",
+                "    def compute(self, mktdata: pd.DataFrame, value: float = 1.0) -> pd.Series:",
+                "        return pd.Series(float(value), index=mktdata.index, name=self.name)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    test_file = tests_dir / "test_robustness_workspace_indicator.py"
+    test_file.write_text("def test_placeholder():\n    assert True\n", encoding="utf-8")
+    manifest = tmp_path / "component_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "extension_id": "custom_components",
+                "extension_root": "custom_components",
+                "bundle_hash": "",
+                "components": [
+                    {
+                        "name": "RobustnessWorkspaceIndicator",
+                        "kind": "Indicator",
+                        "source": "workspace_extension",
+                        "module": "oxq_components.indicators.robustness_workspace_indicator",
+                        "class": "RobustnessWorkspaceIndicator",
+                        "protocol": "Indicator",
+                        "tests": ["custom_components/tests/test_robustness_workspace_indicator.py"],
+                        "source_path": "oxq_components/indicators/robustness_workspace_indicator.py",
+                        "source_hash": "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest(),
+                        "test_hash": "sha256:" + hashlib.sha256(test_file.read_bytes()).hexdigest(),
+                    }
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return manifest
 
 
 def _write_equity_curve(tmp_path: Path, rows: list[tuple[str, float]]) -> None:
