@@ -443,6 +443,12 @@ def _backtest_artifact_paths(run_dir: Path) -> dict[str, str]:
     component_bundle_hash = run_dir / "component_bundle_hash.txt"
     if component_bundle_hash.exists():
         artifacts["component_bundle_hash_txt"] = str(component_bundle_hash)
+    spec_audit = run_dir / "spec_audit.json"
+    if spec_audit.exists():
+        artifacts["spec_audit_json"] = str(spec_audit)
+    runtime_audit = run_dir / "runtime_audit.json"
+    if runtime_audit.exists():
+        artifacts["runtime_audit_json"] = str(runtime_audit)
     return artifacts
 
 
@@ -460,6 +466,255 @@ def _backtest_json_failure(check: str, message: str, warnings: list[dict] | None
         "warnings": warnings or [],
         "errors": [{"severity": "fatal", "check": check, "message": message}],
     }
+
+
+def _load_run_json(run_dir: Path, name: str) -> dict:
+    path = run_dir / name
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"run comparison artifact is not valid JSON: {path}: {exc.msg}") from exc
+    return value if isinstance(value, dict) else {}
+
+
+def _load_run_text(run_dir: Path, name: str) -> str:
+    path = run_dir / name
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
+
+def _require_comparable_run_artifacts(run_dir: Path) -> None:
+    required = {
+        "strategy_spec.yaml",
+        "spec_hash.txt",
+        "compiled_plan.json",
+        "data_manifest.json",
+        "execution_assumptions.json",
+        "metrics.json",
+        "artifact_hashes.json",
+    }
+    missing = sorted(name for name in required if not (run_dir / name).exists())
+    if missing:
+        raise click.ClickException(f"run directory is missing required comparison artifacts: {missing}")
+    for name in ("compiled_plan.json", "data_manifest.json", "execution_assumptions.json", "metrics.json", "artifact_hashes.json"):
+        payload = _load_run_json(run_dir, name)
+        if not payload:
+            raise click.ClickException(f"run comparison artifact must be a JSON object: {run_dir / name}")
+    _require_run_artifact_hashes_current(run_dir)
+
+
+def _hash_run_artifact_for_comparison(run_dir: Path, name: str) -> str:
+    from oxq.spec.compiler import _hash_file, _hash_json_file
+
+    path = run_dir / name
+    if name == "strategy_spec.yaml":
+        return _hash_file(path)
+    if name == "metrics.json":
+        return _hash_json_file(path, exclude_keys={"run_id"})
+    if name in {
+        "compiled_plan.json",
+        "data_manifest.json",
+        "execution_assumptions.json",
+        "spec_audit.json",
+        "runtime_audit.json",
+        "component_manifest.json",
+        "component_manifests.json",
+    }:
+        try:
+            return _hash_json_file(path)
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(f"{name} is not valid JSON: {path}: {exc.msg}") from exc
+    return _hash_file(path)
+
+
+def _require_run_artifact_hashes_current(run_dir: Path) -> None:
+    artifact_hashes = _load_run_json(run_dir, "artifact_hashes.json")
+    required_hashes = {
+        "strategy_spec.yaml",
+        "compiled_plan.json",
+        "data_manifest.json",
+        "execution_assumptions.json",
+        "metrics.json",
+    }
+    provenance_hashes = {
+        "spec_audit.json",
+        "runtime_audit.json",
+        "conversation_hash.txt",
+        "component_catalog_hash.txt",
+        "recipe_catalog_hash.txt",
+        "component_manifest.json",
+        "component_manifests.json",
+        "component_bundle_hash.txt",
+    }
+    for name in provenance_hashes:
+        if name in artifact_hashes or (run_dir / name).exists():
+            required_hashes.add(name)
+    for name in required_hashes:
+        stored = artifact_hashes.get(name)
+        if not isinstance(stored, str) or not stored:
+            raise click.ClickException(f"artifact_hashes.json missing required hash for comparison artifact: {name}")
+        if not (run_dir / name).exists():
+            raise click.ClickException(f"artifact_hashes.json references missing comparison artifact: {name}")
+        actual = _hash_run_artifact_for_comparison(run_dir, name)
+        if stored != actual:
+            raise click.ClickException(f"artifact hash mismatch for {name}: stored={stored}, actual={actual}")
+    try:
+        actual_spec_hash = StrategySpec.from_yaml(run_dir / "strategy_spec.yaml").compute_hash()
+    except Exception as exc:
+        raise click.ClickException(f"strategy_spec.yaml cannot be parsed for comparison: {exc}") from exc
+    stored_spec_hash = _load_run_text(run_dir, "spec_hash.txt")
+    if stored_spec_hash != actual_spec_hash:
+        raise click.ClickException(
+            f"spec_hash.txt mismatch for strategy_spec.yaml: stored={stored_spec_hash}, actual={actual_spec_hash}"
+        )
+    _require_run_digest_current(run_dir)
+
+
+def _require_run_digest_current(run_dir: Path) -> None:
+    from oxq.spec.compiler import _hash_json_file
+
+    digest_path = run_dir.parent / "run_digests.jsonl"
+    if not digest_path.exists():
+        return
+    expected = None
+    try:
+        for line in digest_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if isinstance(entry, dict) and entry.get("run_id") == run_dir.name:
+                expected = entry.get("artifact_hashes")
+    except (json.JSONDecodeError, OSError) as exc:
+        raise click.ClickException(f"run_digests.jsonl is invalid: {digest_path}: {exc}") from exc
+    if not isinstance(expected, str) or not expected:
+        return
+    actual = _hash_json_file(run_dir / "artifact_hashes.json")
+    if actual != expected:
+        raise click.ClickException(f"run digest mismatch for artifact_hashes.json: stored={expected}, actual={actual}")
+
+
+def _run_comparability_signature(run_dir: Path) -> dict[str, object]:
+    _require_comparable_run_artifacts(run_dir)
+    compiled_plan = _load_run_json(run_dir, "compiled_plan.json")
+    data_manifest = _load_run_json(run_dir, "data_manifest.json")
+    execution_assumptions = _load_run_json(run_dir, "execution_assumptions.json")
+    artifact_hashes = _load_run_json(run_dir, "artifact_hashes.json")
+    return {
+        "spec_hash": _load_run_text(run_dir, "spec_hash.txt"),
+        "component_catalog_hash": _load_run_text(run_dir, "component_catalog_hash.txt"),
+        "recipe_catalog_hash": _load_run_text(run_dir, "recipe_catalog_hash.txt"),
+        "spec_audit_hash": (
+            _hash_run_artifact_for_comparison(run_dir, "spec_audit.json")
+            if (run_dir / "spec_audit.json").exists()
+            else artifact_hashes.get("spec_audit.json", "")
+        ),
+        "runtime_audit_hash": (
+            _hash_run_artifact_for_comparison(run_dir, "runtime_audit.json")
+            if (run_dir / "runtime_audit.json").exists()
+            else artifact_hashes.get("runtime_audit.json", "")
+        ),
+        "compiled_plan_hash": _hash_run_artifact_for_comparison(run_dir, "compiled_plan.json"),
+        "component_bundle_hashes": sorted(_run_component_bundle_hashes(run_dir)),
+        "data": {
+            "provider": data_manifest.get("provider", ""),
+            "symbols": data_manifest.get("symbols", []),
+            "calendar": data_manifest.get("calendar", ""),
+            "price_adjustment": data_manifest.get("price_adjustment", ""),
+            "start": data_manifest.get("start", ""),
+            "end": data_manifest.get("end", ""),
+            "min_start_date": data_manifest.get("min_start_date", ""),
+            "analysis_start": data_manifest.get("analysis_start", ""),
+            "warmup_policy": data_manifest.get("warmup_policy", ""),
+            "effective_data_dir": data_manifest.get("effective_data_dir", ""),
+            "data_fingerprints": data_manifest.get("data_fingerprints", {}),
+        },
+        "execution": compiled_plan.get("execution", {}),
+        "cost": compiled_plan.get("cost", {}),
+        "validation": compiled_plan.get("validation", {}),
+        "metrics": compiled_plan.get("metrics", {}),
+        "execution_assumptions": execution_assumptions,
+    }
+
+
+def _compare_run_signatures(left: dict[str, object], right: dict[str, object]) -> list[dict[str, object]]:
+    checks = [
+        ("spec_hash", "spec_hash"),
+        ("component_catalog_hash", "component_catalog_hash"),
+        ("recipe_catalog_hash", "recipe_catalog_hash"),
+        ("spec_audit_hash", "spec_audit_hash"),
+        ("runtime_audit_hash", "runtime_audit_hash"),
+        ("compiled_plan_hash", "compiled_plan_hash"),
+        ("component_bundle_hashes", "component_bundle_hashes"),
+        ("data", "data"),
+        ("execution", "execution"),
+        ("cost", "cost"),
+        ("validation", "validation"),
+        ("metrics", "metrics"),
+        ("execution_assumptions", "execution_assumptions"),
+    ]
+    differences: list[dict[str, object]] = []
+    for key, label in checks:
+        left_value = left.get(key)
+        right_value = right.get(key)
+        if left_value != right_value:
+            differences.append(
+                {
+                    "field": label,
+                    "left": left_value,
+                    "right": right_value,
+                    "severity": "blocking",
+                }
+            )
+    return differences
+
+
+@backtest.command(name="compare-runs")
+@click.argument("left_run_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("right_run_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON.")
+def compare_runs(left_run_dir: str, right_run_dir: str, as_json: bool):
+    """Check whether two run directories are comparable before judging returns."""
+    left_path = Path(left_run_dir)
+    right_path = Path(right_run_dir)
+    try:
+        left = _run_comparability_signature(left_path)
+        right = _run_comparability_signature(right_path)
+    except click.ClickException as exc:
+        check = "run_artifacts_missing" if "missing required comparison artifacts" in exc.message else "run_artifacts_invalid"
+        payload = {
+            "status": "fail",
+            "comparable": False,
+            "left_run_dir": str(left_path),
+            "right_run_dir": str(right_path),
+            "differences": [],
+            "errors": [{"severity": "fatal", "check": check, "message": exc.message}],
+        }
+        if as_json:
+            click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        else:
+            click.echo(f"Status: {payload['status'].upper()}")
+            click.echo(f"Comparable: false")
+            click.echo(f"  [fatal] {exc.message}")
+        raise SystemExit(1)
+    differences = _compare_run_signatures(left, right)
+    comparable = not any(item.get("severity") == "blocking" for item in differences)
+    payload = {
+        "status": "pass" if comparable else "fail",
+        "comparable": comparable,
+        "left_run_dir": str(left_path),
+        "right_run_dir": str(right_path),
+        "differences": differences,
+    }
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    else:
+        click.echo(f"Status: {payload['status'].upper()}")
+        click.echo(f"Comparable: {str(comparable).lower()}")
+        for item in differences:
+            click.echo(f"  [{item['severity']}] {item['field']}")
+    if not comparable:
+        raise SystemExit(1)
 
 
 @backtest.command()
@@ -486,11 +741,22 @@ def _backtest_json_failure(check: str, message: str, warnings: list[dict] | None
     help="Pre-run runtime_audit.json gate for formal audited backtests.",
 )
 @click.option(
+    "--component-catalog",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="component_catalog.json used by the audited spec gate.",
+)
+@click.option(
     "--component-manifest",
     "component_manifest",
     multiple=True,
     type=click.Path(exists=True, dir_okay=False),
     help="Workspace component manifest to load before validation, compile, and run.",
+)
+@click.option(
+    "--allow-unaudited",
+    is_flag=True,
+    help="Allow an exploratory run without spec_audit.json and runtime_audit.json.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output machine-readable JSON")
 def run(
@@ -499,7 +765,9 @@ def run(
     data_dir: str | None,
     spec_audit: str | None,
     runtime_audit: str | None,
+    component_catalog: str | None,
     component_manifest: tuple[str, ...],
+    allow_unaudited: bool,
     as_json: bool,
 ):
     """Run a backtest from a strategy spec file.
@@ -519,25 +787,27 @@ def run(
     try:
         component_manifest_payloads = _read_component_manifest_payloads(component_manifest)
         spec = StrategySpec.from_yaml(spec_file)
+        gate_spec = _normalize_spec_for_run(spec)
     except Exception as e:
         if as_json:
             click.echo(json.dumps(_backtest_json_failure("parse_error", str(e)), indent=2))
             raise SystemExit(1)
         raise
 
-    pre_run_audit_path = Path(spec_audit) if spec_audit is not None else _default_spec_audit_path(spec_path)
-    if pre_run_audit_path is not None:
-        try:
-            _require_pre_backtest_spec_audit(spec, pre_run_audit_path)
-        except click.ClickException as e:
-            if as_json:
-                click.echo(
-                    json.dumps(_backtest_json_failure("spec_audit_failed", e.message), indent=2)
-                )
-                raise SystemExit(1)
-            raise
+    pre_run_audit_path = (
+        Path(spec_audit)
+        if spec_audit is not None
+        else (None if allow_unaudited else _default_spec_audit_path(spec_path))
+    )
     pre_run_runtime_audit_path = (
-        Path(runtime_audit) if runtime_audit is not None else _default_runtime_audit_path(spec_path)
+        Path(runtime_audit)
+        if runtime_audit is not None
+        else (None if allow_unaudited else _default_runtime_audit_path(spec_path))
+    )
+    pre_run_component_catalog_path = (
+        Path(component_catalog)
+        if component_catalog is not None
+        else (None if allow_unaudited and pre_run_audit_path is None else _default_component_catalog_path(spec_path))
     )
     if pre_run_runtime_audit_path is not None and pre_run_audit_path is None:
         message = "spec_audit.json is required when a runtime audit gates a formal backtest"
@@ -551,11 +821,58 @@ def run(
             click.echo(json.dumps(_backtest_json_failure("runtime_audit_missing", message), indent=2))
             raise SystemExit(1)
         raise click.ClickException(message)
+    formal_gated_run = pre_run_audit_path is not None or pre_run_runtime_audit_path is not None
+    if not allow_unaudited or formal_gated_run:
+        missing_gates = []
+        if pre_run_audit_path is None:
+            missing_gates.append("spec_audit.json")
+        if pre_run_runtime_audit_path is None:
+            missing_gates.append("runtime_audit.json")
+        if pre_run_component_catalog_path is None:
+            missing_gates.append("component_catalog.json")
+        if missing_gates:
+            message = (
+                "formal backtest requires audited gate artifacts: "
+                f"{', '.join(missing_gates)}. Use --allow-unaudited only for exploratory runs."
+            )
+            check = "audit_artifacts_missing"
+            if pre_run_audit_path is None:
+                check = "spec_audit_missing"
+            elif pre_run_runtime_audit_path is None:
+                check = "runtime_audit_missing"
+            elif pre_run_component_catalog_path is None:
+                check = "component_catalog_missing"
+            if as_json:
+                click.echo(json.dumps(_backtest_json_failure(check, message), indent=2))
+                raise SystemExit(1)
+            raise click.ClickException(message)
+    if pre_run_audit_path is not None:
+        try:
+            _require_pre_backtest_spec_audit(gate_spec, pre_run_audit_path)
+        except click.ClickException as e:
+            if as_json:
+                click.echo(
+                    json.dumps(_backtest_json_failure("spec_audit_failed", e.message), indent=2)
+                )
+                raise SystemExit(1)
+            raise
     component_bundle_hashes = _component_bundle_hashes(component_manifest_payloads)
+    if pre_run_component_catalog_path is not None and pre_run_audit_path is not None:
+        try:
+            _require_component_catalog_before_import(
+                pre_run_component_catalog_path,
+                spec_audit_path=pre_run_audit_path,
+                component_bundle_hashes=component_bundle_hashes,
+            )
+        except click.ClickException as e:
+            if as_json:
+                click.echo(json.dumps(_backtest_json_failure("component_catalog_failed", e.message), indent=2))
+                raise SystemExit(1)
+            raise
     if pre_run_runtime_audit_path is not None:
         try:
             _require_component_bundles_authorized_before_import(
-                spec,
+                gate_spec,
                 pre_run_runtime_audit_path,
                 spec_audit_path=pre_run_audit_path,
                 component_bundle_hashes=component_bundle_hashes,
@@ -618,7 +935,7 @@ def run(
     if pre_run_runtime_audit_path is not None:
         try:
             _require_pre_backtest_runtime_audit(
-                spec,
+                gate_spec,
                 pre_run_runtime_audit_path,
                 spec_audit_path=pre_run_audit_path,
                 effective_data_dir=_resolve_effective_data_dir(spec, data_dir),
@@ -655,6 +972,24 @@ def run(
     run_dir = Path(run_dir)
     if loaded_component_manifests:
         _write_run_component_manifest_artifacts(run_dir, loaded_component_manifests)
+    if pre_run_audit_path is not None and pre_run_runtime_audit_path is not None:
+        try:
+            _attach_provenance_artifacts(
+                run_dir,
+                spec_audit_path=pre_run_audit_path,
+                runtime_audit_path=pre_run_runtime_audit_path,
+                component_catalog_path=pre_run_component_catalog_path,
+            )
+        except click.ClickException as e:
+            if as_json:
+                click.echo(
+                    json.dumps(
+                        _backtest_json_failure("runtime_audit_failed", e.message, warnings=validation.warnings),
+                        indent=2,
+                    )
+                )
+                raise SystemExit(1)
+            raise
 
     if as_json:
         click.echo(
@@ -967,6 +1302,45 @@ def _require_component_bundles_authorized_before_import(
     )
 
 
+def _require_component_catalog_before_import(
+    component_catalog_path: Path,
+    *,
+    spec_audit_path: Path,
+    component_bundle_hashes: set[str],
+) -> None:
+    from oxq.core.component_catalog import _catalog_hash, _stable_hash
+
+    try:
+        catalog_payload = json.loads(component_catalog_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"component catalog is not valid JSON: {component_catalog_path}: {exc.msg}") from exc
+    if not isinstance(catalog_payload, dict):
+        raise click.ClickException("component catalog must be an object")
+    catalog_hash = _require_json_str(catalog_payload, "catalog_hash")
+    computed_catalog_hash = _catalog_hash(catalog_payload)
+    if computed_catalog_hash != catalog_hash:
+        raise click.ClickException(f"component catalog hash mismatch: stored={catalog_hash}, actual={computed_catalog_hash}")
+    recipe_catalog_hash = _require_json_str(catalog_payload, "recipe_catalog_hash")
+    computed_recipe_catalog_hash = _stable_hash(catalog_payload.get("recipes", []))
+    if computed_recipe_catalog_hash != recipe_catalog_hash:
+        raise click.ClickException(
+            f"recipe catalog hash mismatch: stored={recipe_catalog_hash}, actual={computed_recipe_catalog_hash}"
+        )
+
+    audit_payload = json.loads(spec_audit_path.read_text(encoding="utf-8"))
+    audit_catalog_hash = _require_json_str(audit_payload, "catalog_hash")
+    if audit_catalog_hash != catalog_hash:
+        raise click.ClickException(f"catalog hash mismatch: audit={audit_catalog_hash}, catalog={catalog_hash}")
+
+    catalog_hashes = _catalog_component_bundle_hashes(catalog_payload)
+    missing = set(component_bundle_hashes).difference(catalog_hashes)
+    if missing:
+        raise click.ClickException(
+            "component bundle hash mismatch between authorized manifests and component catalog: "
+            f"missing={sorted(missing)}, manifest={sorted(component_bundle_hashes)}, catalog={sorted(catalog_hashes)}"
+        )
+
+
 def _require_runtime_audit_hashes(
     audit_payload: dict[str, object],
     *,
@@ -1019,6 +1393,94 @@ def _require_runtime_audit_hashes(
             )
 
 
+def _normalize_spec_for_run(spec: StrategySpec) -> StrategySpec:
+    """Normalize a spec with the same serialization boundary as run artifacts."""
+    return StrategySpec.from_dict(spec.to_dict())
+
+
+def _attach_provenance_artifacts(
+    run_path: Path,
+    *,
+    spec_audit_path: Path,
+    runtime_audit_path: Path,
+    component_catalog_path: Path | None,
+) -> None:
+    from oxq.core.component_catalog import _catalog_hash, _stable_hash
+    from oxq.spec.compiler import _append_run_digest, _hash_file, _hash_json_file
+    from oxq.spec.runtime_audit_schema import validate_runtime_audit_file
+
+    if component_catalog_path is None:
+        raise click.ClickException("component_catalog.json is required for formal run provenance")
+    artifact_hashes_path = run_path / "artifact_hashes.json"
+    if not artifact_hashes_path.exists():
+        raise click.ClickException(f"missing artifact_hashes.json in run directory: {run_path}")
+    artifact_hashes = json.loads(artifact_hashes_path.read_text(encoding="utf-8"))
+    if not isinstance(artifact_hashes, dict):
+        raise click.ClickException("artifact_hashes.json must be an object")
+
+    run_spec = StrategySpec.from_yaml(run_path / "strategy_spec.yaml")
+    _require_pre_backtest_spec_audit(run_spec, spec_audit_path)
+    runtime_validation = validate_runtime_audit_file(runtime_audit_path)
+    if runtime_validation["status"] == "fail":
+        raise click.ClickException(f"invalid runtime audit: {runtime_validation['errors']}")
+
+    audit_payload = json.loads(spec_audit_path.read_text(encoding="utf-8"))
+    runtime_payload = json.loads(runtime_audit_path.read_text(encoding="utf-8"))
+    runtime_status = _require_json_str(runtime_payload, "status")
+    if runtime_status != "pass":
+        raise click.ClickException(f"runtime audit status must be pass before attaching provenance: {runtime_status}")
+    catalog_payload = json.loads(component_catalog_path.read_text(encoding="utf-8"))
+    run_spec_hash = (run_path / "spec_hash.txt").read_text(encoding="utf-8").strip()
+    if run_spec.compute_hash() != run_spec_hash:
+        raise click.ClickException(
+            f"run spec hash mismatch: spec={run_spec.compute_hash()}, artifact={run_spec_hash}"
+        )
+    _require_runtime_audit_hashes(
+        runtime_payload,
+        spec_hash=run_spec_hash,
+        spec_audit_path=spec_audit_path,
+        compiled_plan_path=run_path / "compiled_plan.json",
+        component_bundle_hashes=_run_component_bundle_hashes(run_path),
+    )
+    if runtime_payload.get("runtime_semantics_pass") is not True:
+        raise click.ClickException("runtime audit runtime_semantics_pass must be true before attaching provenance")
+    _reject_blocking_runtime_audit_rows(runtime_payload)
+
+    catalog_hash = _require_json_str(catalog_payload, "catalog_hash")
+    computed_catalog_hash = _catalog_hash(catalog_payload)
+    if computed_catalog_hash != catalog_hash:
+        raise click.ClickException(f"component catalog hash mismatch: stored={catalog_hash}, actual={computed_catalog_hash}")
+    audit_catalog_hash = _require_json_str(audit_payload, "catalog_hash")
+    if audit_catalog_hash != catalog_hash:
+        raise click.ClickException(f"catalog hash mismatch: audit={audit_catalog_hash}, catalog={catalog_hash}")
+    recipe_catalog_hash = _require_json_str(catalog_payload, "recipe_catalog_hash")
+    computed_recipe_catalog_hash = _stable_hash(catalog_payload.get("recipes", []))
+    if computed_recipe_catalog_hash != recipe_catalog_hash:
+        raise click.ClickException(
+            f"recipe catalog hash mismatch: stored={recipe_catalog_hash}, actual={computed_recipe_catalog_hash}"
+        )
+    _require_run_component_bundles_in_catalog(run_path, catalog_payload)
+
+    conversation_hash = _require_json_str(audit_payload, "conversation_hash")
+    (run_path / "spec_audit.json").write_text(spec_audit_path.read_text(encoding="utf-8"), encoding="utf-8")
+    (run_path / "runtime_audit.json").write_text(runtime_audit_path.read_text(encoding="utf-8"), encoding="utf-8")
+    (run_path / "conversation_hash.txt").write_text(conversation_hash + "\n", encoding="utf-8")
+    (run_path / "component_catalog_hash.txt").write_text(catalog_hash + "\n", encoding="utf-8")
+    (run_path / "recipe_catalog_hash.txt").write_text(recipe_catalog_hash + "\n", encoding="utf-8")
+
+    artifact_hashes.update(
+        {
+            "spec_audit.json": _hash_json_file(run_path / "spec_audit.json"),
+            "runtime_audit.json": _hash_json_file(run_path / "runtime_audit.json"),
+            "conversation_hash.txt": _hash_file(run_path / "conversation_hash.txt"),
+            "component_catalog_hash.txt": _hash_file(run_path / "component_catalog_hash.txt"),
+            "recipe_catalog_hash.txt": _hash_file(run_path / "recipe_catalog_hash.txt"),
+        }
+    )
+    artifact_hashes_path.write_text(json.dumps(artifact_hashes, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _append_run_digest(run_path, _hash_json_file(artifact_hashes_path))
+
+
 def _hash_json_payload(payload: object) -> str:
     canonical = json.dumps(payload, sort_keys=True, default=str)
     return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()[:16]}"
@@ -1045,26 +1507,110 @@ def _require_run_component_bundles_in_catalog(run_path: Path, catalog_payload: o
 
 
 def _run_component_bundle_hashes(run_path: Path) -> set[str]:
+    from oxq.core.component_manifest import compute_component_bundle_hash
+
     hashes: set[str] = set()
     summary_path = run_path / "component_manifests.json"
     if summary_path.exists():
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(f"component_manifests.json is not valid JSON: {summary_path}: {exc.msg}") from exc
         if not isinstance(summary, list):
             raise click.ClickException("component_manifests.json must be a list")
-        for item in summary:
-            if isinstance(item, dict) and isinstance(item.get("bundle_hash"), str) and item["bundle_hash"]:
-                hashes.add(item["bundle_hash"])
+        for index, item in enumerate(summary):
+            if not isinstance(item, dict):
+                raise click.ClickException(f"component_manifests.json[{index}] must be an object")
+            recorded = item.get("bundle_hash")
+            if not isinstance(recorded, str) or not recorded:
+                raise click.ClickException(f"component_manifests.json[{index}].bundle_hash is required")
+            manifest_path = _resolve_run_component_manifest_path(run_path, item, len(summary))
+            if manifest_path is not None:
+                actual = _verified_component_bundle_hash(manifest_path, recorded)
+                if actual != recorded:
+                    raise click.ClickException(
+                        f"component bundle {index} hash mismatch: stored={recorded}, actual={actual}"
+                    )
+            hashes.add(recorded)
     manifest_path = run_path / "component_manifest.json"
     if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(f"component_manifest.json is not valid JSON: {manifest_path}: {exc.msg}") from exc
         if isinstance(manifest, dict) and isinstance(manifest.get("bundle_hash"), str) and manifest["bundle_hash"]:
-            hashes.add(manifest["bundle_hash"])
+            recorded = manifest["bundle_hash"]
+            try:
+                actual = compute_component_bundle_hash(manifest_path)
+            except ValueError as exc:
+                raise click.ClickException(f"component bundle could not be verified: {exc}") from exc
+            if actual != recorded:
+                raise click.ClickException(f"component bundle hash mismatch: stored={recorded}, actual={actual}")
+            hashes.add(recorded)
     bundle_hash_path = run_path / "component_bundle_hash.txt"
     if bundle_hash_path.exists():
         digest = bundle_hash_path.read_text(encoding="utf-8").strip()
         if digest:
+            if hashes and digest not in hashes:
+                raise click.ClickException(
+                    "component_bundle_hash.txt mismatch: "
+                    f"stored={digest}, verified_component_bundles={sorted(hashes)}"
+                )
             hashes.add(digest)
     return hashes
+
+
+def _resolve_run_component_manifest_path(run_path: Path, item: dict[str, object], summary_count: int) -> Path | None:
+    archived_path = item.get("archived_manifest_path")
+    if isinstance(archived_path, str) and archived_path:
+        return _safe_run_relative_component_manifest(run_path, archived_path)
+
+    legacy_manifest = run_path / "component_manifest.json"
+    if summary_count == 1 and legacy_manifest.exists():
+        return legacy_manifest
+
+    manifest_path = item.get("manifest_path")
+    if not isinstance(manifest_path, str) or not manifest_path:
+        return None
+    resolved = Path(manifest_path)
+    if not resolved.is_absolute():
+        resolved = run_path / resolved
+    return resolved if resolved.exists() else None
+
+
+def _safe_run_relative_component_manifest(run_path: Path, raw_path: str) -> Path:
+    path = Path(raw_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise click.ClickException(f"archived component manifest path is unsafe: {raw_path}")
+    candidate = run_path / path
+    if candidate.is_symlink():
+        raise click.ClickException(f"archived component manifest path must not be a symlink: {raw_path}")
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(run_path.resolve()):
+        raise click.ClickException(f"archived component manifest path escapes run directory: {raw_path}")
+    if not candidate.exists():
+        raise click.ClickException(f"archived component manifest not found: {candidate}")
+    return candidate
+
+
+def _verified_component_bundle_hash(manifest_path: Path, recorded: str) -> str:
+    from oxq.core.component_manifest import compute_component_bundle_hash
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"component manifest is not valid JSON: {manifest_path}: {exc.msg}") from exc
+    if not isinstance(manifest, dict):
+        raise click.ClickException(f"component manifest must be an object: {manifest_path}")
+    manifest_hash = manifest.get("bundle_hash")
+    if manifest_hash != recorded:
+        raise click.ClickException(
+            f"component bundle manifest hash mismatch: stored={recorded}, manifest={manifest_hash}"
+        )
+    try:
+        return compute_component_bundle_hash(manifest_path)
+    except ValueError as exc:
+        raise click.ClickException(f"component bundle could not be verified: {exc}") from exc
 
 
 def _component_bundle_hashes(manifests: list[dict]) -> set[str]:
@@ -1100,6 +1646,11 @@ def _default_spec_audit_path(spec_path: Path) -> Path | None:
 
 def _default_runtime_audit_path(spec_path: Path) -> Path | None:
     candidate = spec_path.parent / "runtime_audit.json"
+    return candidate if candidate.exists() else None
+
+
+def _default_component_catalog_path(spec_path: Path) -> Path | None:
+    candidate = spec_path.parent / "component_catalog.json"
     return candidate if candidate.exists() else None
 
 

@@ -41,6 +41,8 @@ def generate_report(run_dir: str | Path, lang: str = "zh") -> str:
     metrics = json.loads((run_path / "metrics.json").read_text(encoding="utf-8"))
     facts = build_report_facts(RunArtifacts.load(run_path))
     execution_assumptions = _load_execution_assumptions(run_path)
+    compiled_plan = _load_json_object(run_path / "compiled_plan.json") or {}
+    data_manifest = _load_json_object(run_path / "data_manifest.json") or {}
     repro_audit = audit_reproducibility(run_dir)
     robustness_result = _load_verified_robustness_result(run_path, repro_audit)
     bias_audit = audit_research(run_dir)
@@ -117,6 +119,21 @@ def generate_report(run_dir: str | Path, lang: str = "zh") -> str:
         lines.append(f"### {subheadings['execution_assumptions']}")
         lines.append("")
         lines.extend(_format_execution_assumption_lines(execution_assumptions))
+    runtime_disclosure = _format_runtime_disclosure_lines(
+        compiled_plan,
+        data_manifest,
+        lang,
+        artifacts_trusted=_runtime_artifacts_trusted(
+            repro_audit,
+            require_compiled_plan_hash=bool(compiled_plan),
+            require_data_manifest_hash=bool(data_manifest),
+        ),
+    )
+    if runtime_disclosure:
+        lines.append("")
+        lines.append(f"### {subheadings['runtime_disclosure']}")
+        lines.append("")
+        lines.extend(runtime_disclosure)
     lines.append("")
 
     # 5. Backtest Metrics
@@ -575,6 +592,38 @@ def _benchmark_artifact_trusted(repro_audit: dict) -> bool:
     return True
 
 
+def _runtime_artifacts_trusted(
+    repro_audit: dict,
+    *,
+    require_compiled_plan_hash: bool = False,
+    require_data_manifest_hash: bool = False,
+) -> bool:
+    checks = repro_audit.get("checks", [])
+    if not isinstance(checks, list):
+        return not (require_compiled_plan_hash or require_data_manifest_hash)
+    runtime_guard_ids = {
+        "artifact_hashes",
+        "compiled_plan_hash",
+        "data_manifest_hash",
+        "run_digest",
+    }
+    passed_check_ids: set[str] = set()
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        if check.get("id") not in runtime_guard_ids:
+            continue
+        if check.get("status") == "pass":
+            passed_check_ids.add(str(check.get("id")))
+        if check.get("severity") == "fatal" and check.get("status") == "fail":
+            return False
+    if require_compiled_plan_hash and "compiled_plan_hash" not in passed_check_ids:
+        return False
+    if require_data_manifest_hash and "data_manifest_hash" not in passed_check_ids:
+        return False
+    return True
+
+
 def _has_actionable_robustness_warning(robustness_result: dict | None) -> bool:
     if not robustness_result or robustness_result.get("status") != "warn":
         return False
@@ -1025,6 +1074,42 @@ def _format_execution_assumption_lines(assumptions: dict) -> list[str]:
         lines.append(f"- **rebalance.frequency**: {_format_assumption_value(rebalance.get('frequency'))}")
         lines.append(f"- **rebalance.interval_days**: {_format_assumption_value(rebalance.get('interval_days'))}")
         lines.append(f"- **rebalance.source**: {_format_assumption_value(rebalance.get('source'))}")
+    return lines
+
+
+def _format_runtime_disclosure_lines(
+    compiled_plan: dict,
+    data_manifest: dict,
+    lang: str,
+    *,
+    artifacts_trusted: bool = True,
+) -> list[str]:
+    if not compiled_plan and not data_manifest:
+        return []
+    labels = messages(lang)["runtime_disclosure"]
+    if not artifacts_trusted:
+        return [labels["runtime_artifacts_untrusted"], labels["non_comparable"]]
+    execution = compiled_plan.get("execution")
+    cost = compiled_plan.get("cost")
+    data = compiled_plan.get("data")
+    lines = [labels["compiled_plan_source"] if compiled_plan else labels["compiled_plan_missing"]]
+    if isinstance(execution, dict):
+        rebalance = execution.get("rebalance")
+        lines.append(f"- **runtime.fill_price_mode**: {_format_assumption_value(execution.get('fill_price_mode'))}")
+        if isinstance(rebalance, dict):
+            lines.append(f"- **runtime.rebalance.interval_days**: {_format_assumption_value(rebalance.get('interval_days'))}")
+    if isinstance(cost, dict):
+        lines.append(f"- **runtime.fee_rate**: {_format_percent(cost.get('fee_rate'))}")
+        lines.append(f"- **runtime.slippage_rate**: {_format_percent(cost.get('slippage_rate'))}")
+    data_source = data if isinstance(data, dict) else data_manifest
+    if isinstance(data_source, dict):
+        min_start = data_source.get("min_start_date") or data_manifest.get("min_start_date")
+        effective_dir = data_source.get("effective_data_dir") or data_manifest.get("effective_data_dir")
+        warmup_policy = data_manifest.get("warmup_policy") or ("preload_from_min_start_date" if min_start else "none_declared")
+        lines.append(f"- **data.warmup_policy**: {_format_assumption_value(warmup_policy)}")
+        lines.append(f"- **data.min_start_date**: {_format_assumption_value(min_start)}")
+        lines.append(f"- **data.effective_data_dir**: {_format_assumption_value(effective_dir)}")
+    lines.append(labels["non_comparable"])
     return lines
 
 

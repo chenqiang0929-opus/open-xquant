@@ -294,6 +294,11 @@ class StrategySpec:
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError(f"Invalid spec file: {path} — expected YAML dict")
+        return cls.from_dict(raw)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> StrategySpec:
+        """Load a StrategySpec from a parsed mapping."""
         return cls(
             schema_version=raw.get("schema_version", "0.1"),
             strategy_id=raw.get("strategy_id", ""),
@@ -666,11 +671,21 @@ def _dataclass_to_dict(obj: Any) -> Any:
                     (isinstance(obj, ExecutionSection) and f.name == "rebalance" and getattr(value, "_interval_days_explicit", False))
                     or (isinstance(obj, RebalanceDef) and f.name == "interval_days" and obj._interval_days_explicit)
                 )
-                if f.default is not MISSING and value == f.default and not preserve_explicit_rebalance:
+                preserve_explicit_fill_price_mode = (
+                    isinstance(obj, ExecutionSection)
+                    and f.name == "fill_price_mode"
+                    and obj._fill_price_mode_explicit
+                )
+                if (
+                    f.default is not MISSING
+                    and value == f.default
+                    and not preserve_explicit_rebalance
+                    and not preserve_explicit_fill_price_mode
+                ):
                     continue
                 if f.default_factory is not MISSING:
                     try:
-                        if value == f.default_factory() and not preserve_explicit_rebalance:
+                        if value == f.default_factory() and not preserve_explicit_rebalance and not preserve_explicit_fill_price_mode:
                             continue
                     except TypeError:
                         pass
