@@ -7,6 +7,7 @@ and live trading.  The difference is which providers you plug in.
 
 from __future__ import annotations
 
+import copy
 import logging
 import time as _time
 from decimal import Decimal
@@ -20,8 +21,13 @@ from oxq.data.providers import MarketDataProvider
 from oxq.observe.tracer import DefaultTracer
 from oxq.portfolio.analytics import RunResult
 from oxq.trade.order_generator import generate_orders
+from oxq.universe.base import UniverseProvider
 
 logger = logging.getLogger(__name__)
+
+
+def _clone_rules(rules: list[Rule] | None) -> list[Rule]:
+    return copy.deepcopy(list(rules or []))
 
 
 class Engine:
@@ -63,6 +69,7 @@ class Engine:
         run_through: Literal["indicator", "signal"] | None = None,
         tracer: DefaultTracer | None = None,
         rules: list[Rule] | None = None,
+        universe: UniverseProvider | None = None,
         lot_size: int = 1,
         cash_annual_return: float = 0.0,
         data_start: str | None = None,
@@ -85,6 +92,9 @@ class Engine:
             Stop after this phase: ``"indicator"`` or ``"signal"``.
         rules : list[Rule] | None
             Optional list of Rule instances for pre/post-trade evaluation.
+        universe : UniverseProvider | None
+            Tradable universe for this run. New SDK code should pass this
+            explicitly so the same Strategy can be reused across universes.
         lot_size : int
             Minimum trade unit (e.g. 100 for A-shares).
         cash_annual_return : float
@@ -96,7 +106,7 @@ class Engine:
         self._strategy = strategy
         self._broker = broker
         self._tracer = tracer
-        self._rules: list[Rule] = rules or []
+        self._rules: list[Rule] = _clone_rules(rules if rules is not None else getattr(strategy, "rules", []))
         self._lot_size = lot_size
         self._cash_annual_return = cash_annual_return
         reset_optimizer = getattr(strategy.portfolio, "reset", None)
@@ -109,7 +119,11 @@ class Engine:
             )
 
         # -- Phase 0: Universe ------------------------------------------------
-        self._universe = strategy.universe.get_universe(as_of_date=end)
+        run_universe = universe if universe is not None else getattr(strategy, "_legacy_universe", None)
+        if run_universe is None:
+            msg = "Engine.run requires a universe; pass universe=... for this run"
+            raise ValueError(msg)
+        self._universe = run_universe.get_universe(as_of_date=end)
 
         self._mktdata: dict[str, pd.DataFrame] = {}
         for symbol in self._universe.symbols:
@@ -172,8 +186,8 @@ class Engine:
             if ind_name not in all_indicators:
                 all_indicators[ind_name] = ind_spec
 
-        # From universe
-        for ind_name, ind_spec in getattr(strategy.universe, "required_indicators", {}).items():
+        # From the run universe
+        for ind_name, ind_spec in getattr(run_universe, "required_indicators", {}).items():
             if ind_name not in all_indicators:
                 all_indicators[ind_name] = ind_spec
 
@@ -618,6 +632,7 @@ class Engine:
         run_through: Literal["indicator", "signal"] | None = None,
         tracer: DefaultTracer | None = None,
         rules: list[Rule] | None = None,
+        universe: UniverseProvider | None = None,
         lot_size: int = 1,
         cash_annual_return: float = 0.0,
         data_start: str | None = None,
@@ -641,6 +656,9 @@ class Engine:
             ``None`` runs the full pipeline including rules.
         rules : list[Rule] | None
             Optional list of Rule instances.
+        universe : UniverseProvider | None
+            Tradable universe for this run. New SDK code should pass this
+            explicitly so the same Strategy can be reused across universes.
         lot_size : int
             Minimum trade unit (e.g. 100 for A-shares).
         cash_annual_return : float
@@ -653,6 +671,7 @@ class Engine:
             strategy=strategy, market=market, broker=broker,
             start=start, end=end, initial_cash=initial_cash,
             run_through=run_through, tracer=tracer, rules=rules,
+            universe=universe,
             lot_size=lot_size, cash_annual_return=cash_annual_return,
             data_start=data_start,
         )

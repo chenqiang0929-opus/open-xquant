@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import pickle
+
 import pytest
 
 from oxq.core.registry import list_indicators, list_rules
+from oxq.core.strategy import Strategy
 from oxq.tools import session
 from oxq.tools.strategy import (
     indicator_describe,
@@ -39,6 +42,7 @@ def test_strategy_create() -> None:
     assert result["objectives"] == {"total_return": {"min": 0.05}}
     assert result["benchmarks"] == ["SPY"]
     assert "test" in session._strategies
+    assert getattr(session._strategies["test"], "_legacy_universe", None) is None
 
 
 def test_strategy_create_missing_hypothesis() -> None:
@@ -157,6 +161,7 @@ def test_strategy_inspect() -> None:
 
     result = strategy_inspect("s1")
     assert result["name"] == "s1"
+    assert result["universe_binding"] == "none"
     assert "cross" in result["signals"]
     assert "indicators" in result["signals"]["cross"]
     assert "sma_10" in result["signals"]["cross"]["indicators"]
@@ -166,6 +171,74 @@ def test_strategy_inspect() -> None:
 def test_strategy_inspect_not_found() -> None:
     result = strategy_inspect("missing")
     assert "error" in result
+
+
+def test_strategy_set_universe_sets_run_default_not_strategy_body() -> None:
+    from oxq.tools.strategy import strategy_set_universe
+
+    strategy_create(name="s1", hypothesis="h", objectives={"r": {"min": 0.0}})
+    result = strategy_set_universe(strategy="s1", type="static", symbols=["AAPL", "MSFT"])
+
+    assert "error" not in result
+    assert getattr(session._strategies["s1"], "_legacy_universe", None) is None
+    assert tuple(session._strategy_universes["s1"].symbols) == ("AAPL", "MSFT")
+    inspect = strategy_inspect("s1")
+    assert inspect["universe"] == ["AAPL", "MSFT"]
+    assert inspect["universe_binding"] == "run_default"
+
+
+def test_strategy_create_clears_existing_run_default_universe() -> None:
+    from oxq.tools.strategy import strategy_set_universe
+
+    strategy_create(name="s1", hypothesis="old", objectives={"r": {"min": 0.0}})
+    strategy_set_universe(strategy="s1", type="static", symbols=["AAPL"])
+
+    result = strategy_create(name="s1", hypothesis="new", objectives={"r": {"min": 0.0}})
+
+    assert "error" not in result
+    assert "s1" not in session._strategy_universes
+    inspect = strategy_inspect("s1")
+    assert inspect["universe_binding"] == "none"
+
+
+def test_session_load_migrates_legacy_strategy_universe(tmp_path, monkeypatch) -> None:
+    from oxq.portfolio.optimizers import EqualWeightOptimizer
+    from oxq.universe.static import StaticUniverse
+
+    universe = StaticUniverse(("AAPL", "MSFT"))
+    strategy = Strategy(name="legacy", signals={}, portfolio=EqualWeightOptimizer())
+    strategy.__dict__["universe"] = universe
+    strategy.__dict__.pop("_legacy_universe", None)
+
+    session_file = tmp_path / "legacy_session.pkl"
+    with open(session_file, "wb") as f:
+        pickle.dump({"strategies": {"legacy": strategy}}, f)
+
+    monkeypatch.setattr(session, "_SESSION_FILE", session_file)
+    session._load()
+
+    assert "legacy" in session._strategies
+    assert tuple(session._strategy_universes["legacy"].symbols) == ("AAPL", "MSFT")
+
+
+def test_session_load_migrates_legacy_pending_rules(tmp_path, monkeypatch) -> None:
+    from oxq.portfolio.optimizers import EqualWeightOptimizer
+    from oxq.rules.constraint import RebalanceFrequencyRule
+
+    strategy = Strategy(name="legacy", signals={}, portfolio=EqualWeightOptimizer())
+    strategy.__dict__["_pending_rules"] = [RebalanceFrequencyRule(interval_days=5)]
+    strategy.__dict__.pop("rules", None)
+
+    session_file = tmp_path / "legacy_rules_session.pkl"
+    with open(session_file, "wb") as f:
+        pickle.dump({"strategies": {"legacy": strategy}}, f)
+
+    monkeypatch.setattr(session, "_SESSION_FILE", session_file)
+    session._load()
+
+    assert len(session._strategies["legacy"].rules) == 1
+    assert session._strategies["legacy"].rules[0].name == "RebalanceFrequencyRule"
+    assert session._strategies["legacy"].rules[0].interval_days == 5
 
 
 # ---------------------------------------------------------------------------

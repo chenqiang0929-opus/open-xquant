@@ -25,12 +25,14 @@ if TYPE_CHECKING:
     from oxq.optimize.walk_forward import WalkForwardResult
     from oxq.portfolio.analytics import RunResult
     from oxq.trade.live_broker import LiveBroker
+    from oxq.universe.base import UniverseProvider
 
 logger = logging.getLogger(__name__)
 
 _SESSION_FILE = Path(tempfile.gettempdir()) / "oxq_session.pkl"
 
 _strategies: dict[str, Strategy] = {}
+_strategy_universes: dict[str, UniverseProvider] = {}
 _run_results: dict[str, RunResult] = {}
 _paramsets: dict[str, ParameterSet] = {}
 _search_results: dict[str, SearchResult] = {}
@@ -53,6 +55,7 @@ def _save() -> None:
             pickle.dump(
                 {
                     "strategies": _strategies,
+                    "strategy_universes": _strategy_universes,
                     "run_results": _run_results,
                     "paramsets": _paramsets,
                     "search_results": _search_results,
@@ -77,6 +80,13 @@ def _load() -> None:
         with open(_SESSION_FILE, "rb") as f:
             data = pickle.load(f)  # noqa: S301
         _strategies.update(data.get("strategies", {}))
+        _strategy_universes.update(data.get("strategy_universes", {}))
+        for name, strategy in _strategies.items():
+            _migrate_legacy_strategy_rules(strategy)
+            if name not in _strategy_universes:
+                legacy_universe = _legacy_strategy_universe(strategy)
+                if legacy_universe is not None:
+                    _strategy_universes[name] = legacy_universe
         _run_results.update(data.get("run_results", {}))
         _paramsets.update(data.get("paramsets", {}))
         _search_results.update(data.get("search_results", {}))
@@ -90,10 +100,35 @@ def _load() -> None:
         logger.warning("Failed to load session state", exc_info=True)
 
 
+def _migrate_legacy_strategy_rules(strategy: object) -> None:
+    try:
+        vars_dict = vars(strategy)
+    except TypeError:
+        return
+    if "rules" in vars_dict:
+        return
+    pending_rules = vars_dict.get("_pending_rules", [])
+    setattr(strategy, "rules", list(pending_rules or []))
+
+
+def _legacy_strategy_universe(strategy: object) -> UniverseProvider | None:
+    try:
+        universe = getattr(strategy, "_legacy_universe", None)
+    except Exception:
+        universe = None
+    if universe is None:
+        try:
+            universe = vars(strategy).get("universe")
+        except TypeError:
+            universe = None
+    return universe if universe is not None and callable(getattr(universe, "get_universe", None)) else None
+
+
 def clear() -> None:
     """Reset session state (for testing and Clear Chat)."""
     global _live_broker, _live_market
     _strategies.clear()
+    _strategy_universes.clear()
     _run_results.clear()
     _paramsets.clear()
     _search_results.clear()

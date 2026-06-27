@@ -154,7 +154,35 @@ def test_signal_protocol_per_symbol():
     assert isinstance(MySignal(), Signal)
 
 
-def test_strategy_new_shape():
+def test_strategy_new_shape_excludes_universe():
+    from oxq.core.strategy import Strategy
+
+    class FakeOptimizer:
+        name = "fake"
+        def optimize(self, signals, indicators):
+            return {"CASH": 1.0}
+
+    class FakeRule:
+        name = "rule"
+        def evaluate(self, symbol, row, portfolio, prices=None):
+            return RuleResult(reason="test")
+
+    s = Strategy(
+        name="test",
+        signals={},
+        portfolio=FakeOptimizer(),
+        rules=[FakeRule()],
+    )
+    assert s.name == "test"
+    assert s.portfolio.name == "fake"
+    assert len(s.rules) == 1
+    assert "universe" not in s.__dataclass_fields__
+    assert "_legacy_universe" not in s.__dataclass_fields__
+    assert not hasattr(s, "entry_rules")
+    assert not hasattr(s, "indicators")
+
+
+def test_strategy_legacy_universe_adapter():
     from oxq.core.strategy import Strategy
     from oxq.universe.static import StaticUniverse
 
@@ -163,13 +191,45 @@ def test_strategy_new_shape():
         def optimize(self, signals, indicators):
             return {"CASH": 1.0}
 
+    universe = StaticUniverse(("AAPL",))
     s = Strategy(
         name="test",
-        universe=StaticUniverse(("AAPL",)),
+        universe=universe,
         signals={},
         portfolio=FakeOptimizer(),
     )
-    assert s.name == "test"
-    assert s.portfolio.name == "fake"
-    assert not hasattr(s, "entry_rules")
-    assert not hasattr(s, "indicators")
+    assert s.universe is universe
+
+
+def test_strategy_legacy_positional_constructor_preserves_universe_shape():
+    from oxq.core.strategy import Strategy
+    from oxq.universe.static import StaticUniverse
+
+    class FakeOptimizer:
+        name = "fake"
+
+        def optimize(self, signals, indicators):
+            return {"CASH": 1.0}
+
+    universe = StaticUniverse(("AAPL",))
+    optimizer = FakeOptimizer()
+
+    s = Strategy(
+        "legacy",
+        universe,
+        {},
+        optimizer,
+        "old positional hypothesis",
+        {"total_return": {"min": 0.05}},
+        ["SPY"],
+    )
+
+    assert s.name == "legacy"
+    assert s.universe is universe
+    assert s.signals == {}
+    assert s.portfolio is optimizer
+    assert s.rules == []
+    assert s.hypothesis == "old positional hypothesis"
+    assert s.objectives == {"total_return": {"min": 0.05}}
+    assert s.benchmarks == ["SPY"]
+    assert "universe" not in s.__dataclass_fields__
