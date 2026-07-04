@@ -24,21 +24,45 @@ If the Agent recognizes that this skill applies and starts to think "I can just
 write the report directly", stop. Continue from this skill and follow its input,
 structure, fact, and red-line rules before writing the report.
 
+## Language Parameter Gate
+
+Before drafting or deciding whether to block for chart generation, set a
+`report_language` parameter from the user request, coordinator input, or report
+task metadata. Resolve this gate before the Chart Decision Gate so every
+blocked `writer_result.json` can hand the intended language to the chart phase.
+
+- If the user does not explicitly request another language, set
+  `report_language` to `中文`.
+- Write the report in `report_language`, including headings, the executive
+  decision explanation, evidence interpretation, risks, captions, and next
+  actions.
+- Do not localize the canonical executive decision token. The token itself must
+  remain exactly one of `REJECT`, `NO EVIDENCE`, `WATCHLIST`, or
+  `PAPER TRADING CANDIDATE`; localize only the surrounding explanation.
+- Do not switch the whole report to English because artifact keys, chart labels,
+  or prior reports are in English.
+- Pass the same language to chart generation and HTML rendering. Derive the
+  renderer `lang` from `report_language` instead of hardcoding one locale.
+- Record the resolved value in `writer_result.json` as `"language": "中文"` when
+  the default is used.
+
 ## Chart Decision Gate
 
-Before drafting the final report, inspect `report_assets/manifest.json` if it
+After resolving `report_language`, inspect `report_assets/manifest.json` if it
 exists and inspect the invoking task inputs for an explicit chart decision.
 
 - If the task explicitly requests charts and registered chart assets are
-  missing or stale, stop report writing and write `report_writer_result.json`
-  with `status: blocked`, `next_required_phase: chart_building`, and
+  missing or stale, stop report writing and write `writer_result.json`
+  with `status: blocked`, `language`: `report_language`,
+  `next_required_phase: chart_building`, and
   `next_skill: build-report-charts`.
 - If the task explicitly says no charts are needed, continue and state in the
   report that no chart assets were requested.
 - If registered chart assets already exist and the task does not request a
   refresh, continue with the registered assets.
 - If the chart decision is missing, do not ask the user directly from this
-  skill. Write `report_writer_result.json` with `status: blocked` and
+  skill. Write `writer_result.json` with `status: blocked`,
+  `language`: `report_language`, and
   `blocking_reason: missing_chart_decision`.
 
 ## Inputs
@@ -85,7 +109,8 @@ The report must make the decision easy to audit:
 5. Separate strengths from blocking risks.
 6. Explain what must happen before capital allocation.
 
-Default language is Chinese unless the user asks otherwise.
+Default language is controlled by `report_language`; the fallback value is
+`中文`.
 
 ## Institutional Report Standard
 
@@ -181,14 +206,48 @@ Write `research_report.md` with:
 
 After writing final Markdown, render HTML from that same Markdown:
 
+Do not fall back to `zh` for an explicitly requested non-Chinese language. Map
+known language names to valid HTML language tags, preserve explicit language
+codes, and use `und` only when the requested language cannot be expressed as a
+safe language tag.
+
 ```bash
 uv run python - <<'PY'
 from pathlib import Path
 from oxq.report.html import render_markdown_html_report
 
 run_dir = Path("runs/<run_id>")
+report_language = "中文"  # Use the resolved report_language value from this phase.
+
+def language_to_html_lang(language: str) -> str:
+    normalized = language.strip().lower().replace("_", "-")
+    html_lang_map = {
+        "中文": "zh",
+        "chinese": "zh",
+        "zh": "zh",
+        "zh-cn": "zh",
+        "english": "en",
+        "en": "en",
+        "en-us": "en",
+        "japanese": "ja",
+        "日本語": "ja",
+        "ja": "ja",
+        "français": "fr",
+        "french": "fr",
+        "fr": "fr",
+        "spanish": "es",
+        "español": "es",
+        "es": "es",
+    }
+    if normalized in html_lang_map:
+        return html_lang_map[normalized]
+    if normalized and all(ch.isalnum() or ch == "-" for ch in normalized):
+        return normalized
+    return "und"
+
 markdown = (run_dir / "research_report.md").read_text(encoding="utf-8")
-html = render_markdown_html_report(markdown, lang="zh")
+html_lang = language_to_html_lang(report_language)
+html = render_markdown_html_report(markdown, lang=html_lang)
 (run_dir / "research_report.html").write_text(html, encoding="utf-8")
 PY
 ```
@@ -216,16 +275,17 @@ report narrative from templates.
 - Do not bypass this skill after recognizing it applies, even when all data is
   already in context.
 - Do not ask the user questions directly from this skill. When required inputs
-  are missing, write `report_writer_result.json` with `status: blocked` for the
+  are missing, write `writer_result.json` with `status: blocked` for the
   upstream orchestrator.
 
 ## Phase Result
 
-Write `report_writer_result.json` after this phase:
+Write `writer_result.json` after this phase:
 
 ```json
 {
   "status": "pass | blocked | fail",
+  "language": "中文",
   "report_markdown": "research_report.md",
   "report_html": "research_report.html",
   "blocking_reason": "",

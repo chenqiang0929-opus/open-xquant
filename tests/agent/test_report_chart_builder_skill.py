@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -26,8 +27,6 @@ def test_report_chart_builder_skill_documents_chart_asset_workflow() -> None:
     assert "report_evidence.md" not in text
     assert "Do not modify metrics" in text
     assert "Do not modify audit" in text
-    assert "Prefer English chart labels" in text
-    assert "default to English labels" in text
     assert "non-empty" in text
     assert "dimensions" in text
     assert "manifest" in text
@@ -36,14 +35,38 @@ def test_report_chart_builder_skill_documents_chart_asset_workflow() -> None:
     assert "Pair Plot" in text
     assert "scan the run directory" in text
     assert "recommended chart set" in text
-    assert "trade curve as the first/default recommendation" in text
-    assert "Prefer `seaborn`" in text
-    assert "fall back to direct `matplotlib`" in text
+    assert "Canonical Report Chart Order" in text
+    assert "Require `seaborn`" in text
+    assert "do not silently downgrade" in text
+    assert "uv run --extra chart python" in text
     assert "import seaborn as sns" in text
-    assert "except ImportError" in text
     assert 'matplotlib.use("Agg")' in text
     assert "Numeric claim review is semantic/advisory" in text
     assert "treating the CLI command as proof" in text
+
+
+def test_report_chart_builder_skill_defines_unified_visual_style_defaults() -> None:
+    skill = Path("agent/skills/build-report-charts/SKILL.md")
+
+    text = skill.read_text(encoding="utf-8")
+
+    assert "OpenXQuant Report Chart Style" in text
+    assert "OXQ_REPORT_STYLE" in text
+    assert "figure.figsize" in text
+    assert "(12, 6.75)" in text
+    assert "figure.dpi" in text
+    assert "savefig.dpi" in text
+    assert "axes.facecolor" in text
+    assert "grid.color" in text
+    assert "font.sans-serif" in text
+    assert "PingFang SC" in text
+    assert "Noto Sans CJK SC" in text
+    assert "axes.unicode_minus" in text
+    assert "sns.set_theme" in text
+    assert 'market_region == "cn"' in text
+    assert "market.region == cn" not in text
+    assert "red-up / green-down" in text
+    assert "custom chart" in text
 
 
 def test_report_chart_builder_skill_requires_professional_chart_pack() -> None:
@@ -72,8 +95,71 @@ def test_report_chart_builder_skill_requires_professional_chart_pack() -> None:
     default_pack = text[
         text.index("## Default Professional Chart Pack"): text.index("## Chart Applicability Matrix")
     ]
-    assert default_pack.index("- trade curve") < default_pack.index("- equity curve vs benchmark")
-    assert "The trade curve is the default choice" in default_pack
+    assert default_pack.index("- equity curve vs benchmark") < default_pack.index("- drawdown")
+    assert default_pack.index("- drawdown") < default_pack.index("- trade curve")
+    assert "Use this order unless the user explicitly requests a different order" in default_pack
+
+
+def test_report_chart_builder_skill_uses_canonical_report_chart_order() -> None:
+    skill = Path("agent/skills/build-report-charts/SKILL.md")
+
+    text = skill.read_text(encoding="utf-8")
+    order = text[text.index("## Canonical Report Chart Order"): text.index("## Default Professional Chart Pack")]
+
+    expected_order = [
+        "equity_curve",
+        "drawdown",
+        "trade_curve",
+        "position_exposure",
+        "monthly_returns",
+        "cost_sensitivity",
+        "is_oos_comparison",
+        "parameter_perturbation",
+        "regime_analysis",
+        "trade_pnl_distribution",
+    ]
+    positions = [order.index(chart_id) for chart_id in expected_order]
+    assert positions == sorted(positions)
+
+
+def test_report_chart_builder_skill_batch_example_sorts_in_canonical_order() -> None:
+    skill = Path("agent/skills/build-report-charts/SKILL.md")
+
+    text = skill.read_text(encoding="utf-8")
+    batch_json = text.split("```json", 1)[1].split("```", 1)[0]
+    assets = json.loads(batch_json)
+    canonical_core = ["equity_curve", "drawdown", "trade_curve"]
+    core_assets = [asset for asset in assets if asset["id"] in canonical_core]
+
+    assert [asset["id"] for asset in core_assets] == canonical_core
+    sorted_ids = [
+        asset["id"]
+        for asset in sorted(
+            core_assets,
+            key=lambda asset: (asset["section"], asset["order"], asset["id"]),
+        )
+    ]
+    assert sorted_ids == canonical_core
+
+
+def test_report_chart_builder_skill_localizes_manifest_titles_and_captions() -> None:
+    skill = Path("agent/skills/build-report-charts/SKILL.md")
+
+    text = skill.read_text(encoding="utf-8")
+    batch_json = text.split("```json", 1)[1].split("```", 1)[0]
+    assets = json.loads(batch_json)
+
+    assert "manifest `title` and `caption`" in text
+    assert "report_language" in text
+    assert "Equity curve vs benchmark" not in batch_json
+    assert "Drawdown curve" not in batch_json
+    assert "Trade curve" not in batch_json
+    assert "Generated from" not in batch_json
+    for asset in assets:
+        assert asset["title"]
+        assert asset["caption"]
+        assert any("\u4e00" <= char <= "\u9fff" for char in asset["title"])
+        assert any("\u4e00" <= char <= "\u9fff" for char in asset["caption"])
 
 
 def test_report_chart_builder_skill_defines_trade_curve_requirements() -> None:
@@ -127,10 +213,63 @@ def test_research_report_writer_skill_requires_agent_authored_final_report() -> 
     assert "write the report directly" in text
     assert "Chart Decision Gate" in text
     assert "Do not ask the user questions directly from this skill" in text
-    assert "report_writer_result.json" in text
+    assert "writer_result.json" in text
+    assert "report_writer_result.json" not in text
     assert "missing_chart_decision" in text
     assert "build-report-charts" in text
     assert "Evidence is generated by the framework; the narrative is authored by the Agent" in text
+
+
+def test_research_report_writer_skill_defines_default_language_parameter() -> None:
+    skill = Path("agent/skills/write-research-report/SKILL.md")
+
+    text = skill.read_text(encoding="utf-8")
+
+    assert "Language Parameter Gate" in text
+    assert "report_language" in text
+    assert "中文" in text
+    assert "If the user does not explicitly request another language" in text
+    assert '"language": "中文"' in text
+    assert "language_to_html_lang" in text
+    assert "html_lang = language_to_html_lang(report_language)" in text
+    assert "render_markdown_html_report(markdown, lang=html_lang)" in text
+    assert "render_markdown_html_report(markdown, lang=\"zh\")" not in text
+    assert "Do not switch the whole report to English" in text
+
+
+def test_research_report_writer_skill_resolves_language_before_chart_gate() -> None:
+    skill = Path("agent/skills/write-research-report/SKILL.md")
+
+    text = skill.read_text(encoding="utf-8")
+
+    assert text.index("## Language Parameter Gate") < text.index("## Chart Decision Gate")
+    chart_gate = text[text.index("## Chart Decision Gate"): text.index("## Inputs")]
+    assert "`language`: `report_language`" in chart_gate
+    assert "blocked" in chart_gate
+
+
+def test_research_report_writer_skill_preserves_canonical_decision_tokens() -> None:
+    skill = Path("agent/skills/write-research-report/SKILL.md")
+
+    text = skill.read_text(encoding="utf-8")
+
+    language_gate = text[text.index("## Language Parameter Gate"): text.index("## Inputs")]
+    assert "Do not localize the canonical executive decision token" in language_gate
+    assert "REJECT" in language_gate
+    assert "NO EVIDENCE" in language_gate
+    assert "WATCHLIST" in language_gate
+    assert "PAPER TRADING CANDIDATE" in language_gate
+
+
+def test_research_report_writer_skill_preserves_unknown_html_language_codes() -> None:
+    skill = Path("agent/skills/write-research-report/SKILL.md")
+
+    text = skill.read_text(encoding="utf-8")
+
+    html_output = text[text.index("## HTML Output"): text.index("## Red Lines")]
+    assert "Do not fall back to `zh` for an explicitly requested non-Chinese language" in html_output
+    assert "return normalized" in html_output
+    assert 'return "und"' in html_output
 
 
 def test_research_report_writer_skill_requires_institutional_report_structure() -> None:
@@ -327,9 +466,22 @@ def test_research_report_reviewer_skill_covers_semantic_report_qa() -> None:
     assert "numeric_claim_unverified" in text
     assert "optional/advisory numeric QA output" in text
     assert "facts registry" in text
-    assert "local-language labels" in text
+    assert "writer_result.json" in text
+    assert "Canonical Report Chart Order" in text
+    assert "style is consistent" in text
+    assert "unexpectedly switch to an all-English report" in text
+    assert "local-language chart labels" in text
     assert "chart" in text
     assert "do not rewrite" in text.lower()
+
+
+def test_report_reviewer_worker_receives_writer_result() -> None:
+    role = Path("agent/roles/oxq-report-reviewer-worker.md")
+
+    text = role.read_text(encoding="utf-8")
+
+    assert "writer_result.json" in text
+    assert text.index("writer_result.json") < text.index("## Outputs")
 
 
 def test_opencode_legacy_agent_command_bundle_is_removed() -> None:
