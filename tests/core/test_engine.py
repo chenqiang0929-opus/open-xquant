@@ -1,15 +1,22 @@
 """Tests for Engine — new pipeline integration."""
 
 from decimal import Decimal
+from unittest.mock import patch
 
 import pandas as pd
+import pytest
 
-from oxq.core.engine import Engine, _apply_fill
+from oxq.core.engine import Engine, _apply_fill, _apply_limit_trade_policies, _cancel_managed_market_order
 from oxq.core.strategy import Strategy
 from oxq.core.types import Fill, Order, Portfolio, Position, RuleResult
+from oxq.indicators.rps import RPS
 from oxq.indicators.sma import SMA
 from oxq.portfolio.optimizers import EqualWeightOptimizer, SignalToPositionOptimizer
+from oxq.portfolio.orderbook import ManagedOrder
+from oxq.rules.constraint import MaxHoldingsRule
 from oxq.signals.crossover import Crossover
+from oxq.spec.schema import DataFilterSection
+from oxq.trade.live_broker import LiveBroker
 from oxq.trade.sim_broker import FillPriceMode, SimBroker
 from oxq.universe.static import StaticUniverse
 
@@ -116,6 +123,159 @@ def test_engine_run_accepts_universe_separate_from_strategy() -> None:
     )
 
     assert set(result.mktdata) == {"MSFT"}
+
+
+def test_engine_computes_cross_sectional_rps_indicator() -> None:
+    dates = pd.bdate_range("2024-01-01", periods=4, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [1, 1, 1, 1],
+                "high": [1, 1, 1, 1],
+                "low": [1, 1, 1, 1],
+                "close": [100.0, 100.0, 121.0, 133.1],
+                "volume": [1, 1, 1, 1],
+            },
+            index=dates,
+        ),
+        "BBB": pd.DataFrame(
+            {"open": [1, 1, 1, 1], "high": [1, 1, 1, 1], "low": [1, 1, 1, 1], "close": [100.0, 100.0, 90.0, 81.0], "volume": [1, 1, 1, 1]},
+            index=dates,
+        ),
+        "CCC": pd.DataFrame(
+            {
+                "open": [1, 1, 1, 1],
+                "high": [1, 1, 1, 1],
+                "low": [1, 1, 1, 1],
+                "close": [100.0, 100.0, 110.0, 121.0],
+                "volume": [1, 1, 1, 1],
+            },
+            index=dates,
+        ),
+    }
+    optimizer = EqualWeightOptimizer()
+    optimizer.required_indicators = {"rps_2": (RPS(), {"column": "close", "period": 2})}  # type: ignore[attr-defined]
+    strategy = Strategy(
+        name="rps_engine",
+        universe=StaticUniverse(("AAA", "BBB", "CCC")),
+        signals={},
+        portfolio=optimizer,
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(),
+        start="2024-01-01",
+        end="2024-01-04",
+        run_through="indicator",
+    )
+
+    assert result.mktdata["AAA"]["rps_2"].iloc[2] == 100.0
+    assert result.mktdata["CCC"]["rps_2"].iloc[2] == pytest.approx(200.0 / 3.0)
+    assert result.mktdata["BBB"]["rps_2"].iloc[2] == pytest.approx(100.0 / 3.0)
+
+
+def test_tradability_policy_preserves_suspended_existing_position_weight() -> None:
+    portfolio = Portfolio(cash=Decimal("0"), positions={"AAA": Position("AAA", shares=10, avg_cost=Decimal("10"))})
+    prices = {"AAA": Decimal("10")}
+    date = pd.Timestamp("2024-01-02", tz="UTC")
+    mktdata = {"AAA": pd.DataFrame({"is_suspended": [True]}, index=[date])}
+    filters = DataFilterSection(exclude_suspended=True, suspension_policy="hold_existing")
+
+    result = _apply_limit_trade_policies(
+        {"AAA": 0.0, "CASH": 1.0},
+        filters=filters,
+        mktdata=mktdata,
+        date=date,
+        portfolio=portfolio,
+        prices=prices,
+    )
+
+    assert result["AAA"] == 1.0
+    assert result["CASH"] == 0.0
+
+
+def test_tradability_policy_scales_new_targets_around_locked_positions() -> None:
+    portfolio = Portfolio(cash=Decimal("20"), positions={"AAA": Position("AAA", shares=80, avg_cost=Decimal("1"))})
+    prices = {"AAA": Decimal("1"), "BBB": Decimal("1")}
+    date = pd.Timestamp("2024-01-02", tz="UTC")
+    mktdata = {
+        "AAA": pd.DataFrame({"is_suspended": [True]}, index=[date]),
+        "BBB": pd.DataFrame({"is_suspended": [False]}, index=[date]),
+    }
+    filters = DataFilterSection(exclude_suspended=True, suspension_policy="hold_existing")
+
+    result = _apply_limit_trade_policies(
+        {"AAA": 0.8, "BBB": 1.0},
+        filters=filters,
+        mktdata=mktdata,
+        date=date,
+        portfolio=portfolio,
+        prices=prices,
+    )
+
+    assert result["AAA"] == 0.8
+    assert result["BBB"] == pytest.approx(0.2)
+    assert result["CASH"] == pytest.approx(0.0)
+
+
+def test_tradability_policy_locks_missing_bar_existing_position() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0],
+                "high": [10.0],
+                "low": [10.0],
+                "close": [10.0],
+                "volume": [1_000_000],
+            },
+            index=[dates[0]],
+        ),
+        "BBB": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+            },
+            index=dates,
+        ),
+    }
+
+    class RotateWhenAAAMissing:
+        name = "RotateWhenAAAMissing"
+
+        def optimize(self, signals, indicators):
+            if "AAA" in indicators:
+                return {"AAA": 1.0}
+            if "BBB" in indicators:
+                return {"BBB": 1.0}
+            return {"CASH": 1.0}
+
+    strategy = Strategy(
+        name="missing_bar_lock",
+        universe=StaticUniverse(("AAA", "BBB")),
+        signals={},
+        portfolio=RotateWhenAAAMissing(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(),
+        start="2024-01-02",
+        end="2024-01-03",
+        data_filters=DataFilterSection(suspension_policy="hold_existing"),
+    )
+
+    assert result.snapshots[1].target_weights == {"BBB": 1.0}
+    assert result.snapshots[1].adjusted_weights["AAA"] == pytest.approx(1.0)
+    assert result.snapshots[1].adjusted_weights.get("BBB", 0.0) == pytest.approx(0.0)
+    assert not any(managed.order.symbol == "AAA" and managed.order.side == "SELL" for managed in result.orders)
+    assert not any(managed.order.symbol == "BBB" for managed in result.orders)
 
 
 def test_engine_run_uses_strategy_rules_by_default() -> None:
@@ -511,6 +671,132 @@ class NeverBuyOptimizer:
         return {"CASH": 1.0}
 
 
+class RotatingOptimizer:
+    """Allocate to one symbol per bar in signal iteration order."""
+
+    def optimize(
+        self, signals: dict[str, pd.DataFrame], indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]:
+        symbol = "AAA" if len(next(iter(signals.values()))) == 1 else "BBB"
+        return {symbol: 1.0}
+
+
+class HalfWeightRotatingOptimizer:
+    """Leave cash available while rotating to expose pending-buy capacity."""
+
+    def optimize(
+        self, signals: dict[str, pd.DataFrame], indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]:
+        symbol = "AAA" if len(next(iter(signals.values()))) == 1 else "BBB"
+        return {symbol: 0.5, "CASH": 0.5}
+
+
+class NonFillingBroker(SimBroker):
+    """Keep submitted market orders open across bars."""
+
+    def fill_due_market_orders(self, mktdata, date) -> None:
+        return None
+
+    def on_bar_open(self, mktdata, date) -> None:
+        return None
+
+    def on_bar_close(self, mktdata, date) -> None:
+        return None
+
+
+def _two_symbol_flat_data(periods: int = 2) -> dict[str, pd.DataFrame]:
+    dates = pd.bdate_range("2024-01-02", periods=periods, tz="UTC")
+    return {
+        symbol: pd.DataFrame(
+            {
+                "open": [10.0] * periods,
+                "high": [10.0] * periods,
+                "low": [10.0] * periods,
+                "close": [10.0] * periods,
+                "volume": [1_000_000] * periods,
+            },
+            index=dates,
+        )
+        for symbol in ("AAA", "BBB")
+    }
+
+
+def test_engine_max_holdings_caps_simultaneous_direct_buy_batch() -> None:
+    data = _two_symbol_flat_data()
+    strategy = Strategy(
+        name="direct_max_holdings_batch",
+        universe=StaticUniverse(("AAA", "BBB")),
+        signals={},
+        portfolio=EqualWeightOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(fill_price_mode=FillPriceMode.CLOSE),
+        start="2024-01-02",
+        end="2024-01-03",
+        rules=[MaxHoldingsRule(1)],
+    )
+
+    assert [fill.order.symbol for fill in result.trades if fill.order.side == "BUY"] == ["AAA"]
+    assert set(result.portfolio.positions) == {"AAA"}
+    assert result.snapshots[0].adjusted_weights == {"AAA": 0.5, "CASH": 0.5}
+
+
+def test_engine_max_holdings_allows_exit_before_replacement() -> None:
+    data = _two_symbol_flat_data()
+    strategy = Strategy(
+        name="direct_max_holdings_rotation",
+        universe=StaticUniverse(("AAA", "BBB")),
+        signals={},
+        portfolio=RotatingOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(fill_price_mode=FillPriceMode.CLOSE),
+        start="2024-01-02",
+        end="2024-01-03",
+        rules=[MaxHoldingsRule(1)],
+    )
+
+    assert [(fill.order.symbol, fill.order.side) for fill in result.trades] == [
+        ("AAA", "BUY"),
+        ("AAA", "SELL"),
+        ("BBB", "BUY"),
+    ]
+    assert set(result.portfolio.positions) == {"BBB"}
+
+
+def test_engine_max_holdings_counts_pending_buy_symbols() -> None:
+    data = _two_symbol_flat_data()
+    strategy = Strategy(
+        name="direct_max_holdings_pending",
+        universe=StaticUniverse(("AAA", "BBB")),
+        signals={},
+        portfolio=HalfWeightRotatingOptimizer(),
+    )
+    broker = NonFillingBroker(fill_price_mode=FillPriceMode.CLOSE)
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=broker,
+        start="2024-01-02",
+        end="2024-01-03",
+        rules=[MaxHoldingsRule(2), MaxHoldingsRule(1)],
+    )
+
+    open_buys = [
+        managed.order.symbol
+        for managed in result.orders
+        if managed.status == "open" and managed.order.side == "BUY"
+    ]
+    assert open_buys == ["AAA"]
+
+
 class AlwaysExitRule:
     """Rule that exits any open position."""
 
@@ -577,6 +863,49 @@ class DroppingBroker(SimBroker):
     def submit_order(self, order: Order) -> str:
         self.submitted_orders.append(order)
         return f"dropped-{len(self.submitted_orders)}"
+
+
+def test_engine_max_holdings_retries_dropped_selected_buy_on_hold() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=2, tz="UTC")
+    data = {
+        symbol: pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+                "timing_input": ["BUY", "HOLD"],
+            },
+            index=dates,
+        )
+        for symbol in ("AAA", "BBB")
+    }
+
+    class TimingInputSignal:
+        name = "TimingInputSignal"
+
+        def compute(self, mktdata: pd.DataFrame) -> pd.Series:
+            return mktdata["timing_input"]
+
+    broker = DroppingBroker()
+    strategy = Strategy(
+        name="max_holdings_retry_dropped_selected_buy",
+        universe=StaticUniverse(("AAA", "BBB")),
+        signals={"timing": (TimingInputSignal(), {})},
+        portfolio=SignalToPositionOptimizer(signal="timing"),
+    )
+
+    Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=broker,
+        start="2024-01-02",
+        end="2024-01-03",
+        rules=[MaxHoldingsRule(1)],
+    )
+
+    assert [order.symbol for order in broker.submitted_orders] == ["AAA", "AAA"]
 
 
 class DroppingSellBroker(SimBroker):
@@ -1023,6 +1352,112 @@ def test_signal_to_position_hold_rule_override_buy_uses_cash_budget() -> None:
 
     assert ccc_orders == []
     assert result.snapshots[1].rule_reasons == {"CCC": "add_ccc"}
+
+
+def test_tradability_policy_blocks_pre_trade_rule_weight_sell() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+                "is_suspended": [False, True],
+            },
+            index=dates,
+        ),
+    }
+
+    class SellSecondBarRule:
+        name = "SellSecondBar"
+
+        def evaluate(
+            self,
+            symbol: str,
+            row: pd.Series,
+            portfolio: Portfolio,
+            prices: dict[str, Decimal] | None = None,
+        ) -> RuleResult:
+            if row.name == dates[1]:
+                return RuleResult(weights={symbol: 0.0}, reason="rule_sell")
+            return RuleResult()
+
+    strategy = Strategy(
+        name="tradability_blocks_pre_trade_rule_sell",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=AlwaysBuyOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(),
+        start="2024-01-02",
+        end="2024-01-03",
+        data_filters=DataFilterSection(exclude_suspended=True, suspension_policy="hold_existing"),
+        rules=[SellSecondBarRule()],
+    )
+
+    assert [trade.order.side for trade in result.trades] == ["BUY"]
+    assert "AAA" in result.snapshots[1].positions
+    assert result.snapshots[1].adjusted_weights["AAA"] == pytest.approx(1.0)
+    assert result.snapshots[1].rule_reasons == {"AAA": "rule_sell; tradability_suspended_hold_existing"}
+
+
+def test_tradability_policy_blocks_post_trade_exit_sell() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+                "is_limit_down": [False, True],
+            },
+            index=dates,
+        ),
+    }
+
+    class ExitSecondBarRule:
+        name = "ExitSecondBar"
+
+        def evaluate(
+            self,
+            symbol: str,
+            row: pd.Series,
+            portfolio: Portfolio,
+            prices: dict[str, Decimal] | None = None,
+        ) -> RuleResult:
+            if row.name == dates[1] and symbol in portfolio.positions:
+                return RuleResult(target_positions={symbol: 0.0}, reason="exit_sell")
+            return RuleResult()
+
+    strategy = Strategy(
+        name="tradability_blocks_post_trade_exit_sell",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=AlwaysBuyOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(),
+        start="2024-01-02",
+        end="2024-01-03",
+        data_filters=DataFilterSection(limit_down_policy="exclude_sell"),
+        rules=[ExitSecondBarRule()],
+    )
+
+    assert [trade.order.side for trade in result.trades] == ["BUY"]
+    assert "AAA" in result.snapshots[1].positions
+    assert result.snapshots[1].adjusted_weights["AAA"] == pytest.approx(1.0)
+    assert result.snapshots[1].rule_reasons == {"AAA": "exit_sell; tradability_limit_down_sell_blocked"}
 
 
 def test_signal_to_position_mixed_hold_does_not_rebalance_held_symbol() -> None:
@@ -1603,6 +2038,243 @@ def test_engine_rejects_next_open_buy_when_gap_up_exceeds_cash() -> None:
     assert len(rejected_orders) == 1
     assert rejected_orders[0].status_reason == "insufficient_cash"
     assert rejected_orders[0].order.symbol == "AAA"
+
+
+def test_engine_cancels_pending_next_open_buy_when_limit_up() -> None:
+    dates = pd.bdate_range("2024-01-01", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+                "is_limit_up": [False, True],
+            },
+            index=dates,
+        ),
+    }
+    strategy = Strategy(
+        name="next_open_limit_up",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=AlwaysBuyOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(fill_price_mode=FillPriceMode.NEXT_OPEN, market_calendar="XNYS"),
+        start="2024-01-01",
+        end="2024-01-02",
+        data_filters=DataFilterSection(limit_up_policy="exclude_buy"),
+    )
+
+    assert result.trades == []
+    canceled_orders = [order for order in result.orders if order.status == "canceled"]
+    assert len(canceled_orders) == 1
+    assert canceled_orders[0].order.side == "BUY"
+    assert canceled_orders[0].status_reason == "tradability_limit_up_pending_buy_blocked"
+
+
+def test_engine_uses_broker_cancel_api_for_blocked_pending_market_order() -> None:
+    dates = pd.bdate_range("2024-01-01", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+                "is_limit_up": [False, True],
+            },
+            index=dates,
+        ),
+    }
+
+    class RecordingCancelBroker(SimBroker):
+        def __init__(self) -> None:
+            super().__init__(fill_price_mode=FillPriceMode.NEXT_OPEN, market_calendar="XNYS")
+            self.cancel_calls: list[tuple[str, str | None, str, str]] = []
+
+        def cancel_market_order(
+            self,
+            managed: ManagedOrder,
+            reason: str = "canceled",
+        ) -> ManagedOrder | None:
+            self.cancel_calls.append((managed.order.symbol, managed.order.side, reason, managed.id))
+            return super().cancel_market_order(managed, reason)
+
+    broker = RecordingCancelBroker()
+    strategy = Strategy(
+        name="next_open_limit_up_uses_cancel_api",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=AlwaysBuyOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=broker,
+        start="2024-01-01",
+        end="2024-01-02",
+        data_filters=DataFilterSection(limit_up_policy="exclude_buy"),
+    )
+
+    assert result.trades == []
+    assert len(broker.cancel_calls) == 1
+    assert broker.cancel_calls[0][:3] == ("AAA", "BUY", "tradability_limit_up_pending_buy_blocked")
+
+
+def test_engine_cancel_helper_only_cancels_target_market_order() -> None:
+    broker = SimBroker(fill_price_mode=FillPriceMode.NEXT_OPEN, market_calendar="XNYS")
+    first_date = pd.Timestamp("2024-01-01", tz="UTC")
+    broker.set_current_date(first_date)
+    broker.submit_order(Order(symbol="AAA", side="BUY", shares=10, order_type="market"))
+    broker.submit_order(Order(symbol="AAA", side="BUY", shares=20, order_type="market"))
+    due_order, future_order = broker.get_open_orders("AAA")
+    due_order.due_at = pd.Timestamp("2024-01-02", tz="UTC").isoformat()
+    future_order.due_at = pd.Timestamp("2024-01-03", tz="UTC").isoformat()
+
+    _cancel_managed_market_order(broker, due_order, "tradability_limit_up_pending_buy_blocked")
+
+    assert due_order.status == "canceled"
+    assert due_order.status_reason == "tradability_limit_up_pending_buy_blocked"
+    assert future_order.status == "open"
+    assert future_order.status_reason == ""
+
+
+def test_engine_live_broker_cancels_blocked_prior_bar_market_order_via_client() -> None:
+    dates = pd.bdate_range("2024-01-01", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+                "is_limit_up": [False, True],
+            },
+            index=dates,
+        ),
+    }
+    strategy = Strategy(
+        name="live_broker_limit_up_cancel",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=AlwaysBuyOptimizer(),
+    )
+
+    with patch("oxq.trade.live_broker.AlpacaClient") as mock_cls:
+        client = mock_cls.return_value
+        client.start_trade_stream.return_value = None
+        client.submit_order.return_value = {"id": "live-buy-1", "status": "accepted"}
+        broker = LiveBroker(api_key="k", secret_key="s")
+
+        result = Engine().run(
+            strategy,
+            market=FakeMarketDataProvider(data),
+            broker=broker,
+            start="2024-01-01",
+            end="2024-01-02",
+            data_filters=DataFilterSection(limit_up_policy="exclude_buy"),
+        )
+
+    assert result.trades == []
+    client.cancel_order.assert_called_once_with("live-buy-1")
+    canceled_orders = [order for order in result.orders if order.status == "canceled"]
+    assert len(canceled_orders) == 1
+    assert canceled_orders[0].status_reason == "tradability_limit_up_pending_buy_blocked"
+
+
+def test_engine_cancels_pending_next_close_buy_when_suspended() -> None:
+    dates = pd.bdate_range("2024-01-01", periods=2, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0],
+                "high": [10.0, 10.0],
+                "low": [10.0, 10.0],
+                "close": [10.0, 10.0],
+                "volume": [1_000_000, 1_000_000],
+                "is_suspended": [False, True],
+            },
+            index=dates,
+        ),
+    }
+    strategy = Strategy(
+        name="next_close_suspended",
+        universe=StaticUniverse(("AAA",)),
+        signals={},
+        portfolio=AlwaysBuyOptimizer(),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(fill_price_mode=FillPriceMode.NEXT_CLOSE, market_calendar="XNYS"),
+        start="2024-01-01",
+        end="2024-01-02",
+        data_filters=DataFilterSection(exclude_suspended=True),
+    )
+
+    assert result.trades == []
+    canceled_orders = [order for order in result.orders if order.status == "canceled"]
+    assert len(canceled_orders) == 1
+    assert canceled_orders[0].order.side == "BUY"
+    assert canceled_orders[0].status_reason == "tradability_suspended_pending_order_blocked"
+
+
+def test_engine_cancels_pending_next_open_sell_when_limit_down() -> None:
+    dates = pd.bdate_range("2024-01-01", periods=3, tz="UTC")
+    data = {
+        "AAA": pd.DataFrame(
+            {
+                "open": [10.0, 10.0, 10.0],
+                "high": [10.0, 10.0, 10.0],
+                "low": [10.0, 10.0, 10.0],
+                "close": [10.0, 10.0, 10.0],
+                "volume": [1_000_000, 1_000_000, 1_000_000],
+                "timing_input": ["BUY", "SELL", "HOLD"],
+                "is_limit_down": [False, False, True],
+            },
+            index=dates,
+        ),
+    }
+
+    class ColumnSignal:
+        name = "ColumnSignal"
+
+        def compute(self, mktdata: pd.DataFrame) -> pd.Series:
+            return mktdata["timing_input"]
+
+    strategy = Strategy(
+        name="next_open_limit_down_sell",
+        universe=StaticUniverse(("AAA",)),
+        signals={"timing": (ColumnSignal(), {})},
+        portfolio=SignalToPositionOptimizer(signal="timing"),
+    )
+
+    result = Engine().run(
+        strategy,
+        market=FakeMarketDataProvider(data),
+        broker=SimBroker(fill_price_mode=FillPriceMode.NEXT_OPEN, market_calendar="XNYS"),
+        start="2024-01-01",
+        end="2024-01-03",
+        data_filters=DataFilterSection(limit_down_policy="exclude_sell"),
+    )
+
+    assert [trade.order.side for trade in result.trades] == ["BUY"]
+    assert "AAA" in result.portfolio.positions
+    canceled_sells = [
+        order for order in result.orders if order.status == "canceled" and order.order.side == "SELL"
+    ]
+    assert len(canceled_sells) == 1
+    assert canceled_sells[0].status_reason == "tradability_limit_down_pending_sell_blocked"
 
 
 def test_engine_cancels_pending_next_open_buy_before_exit_sell() -> None:

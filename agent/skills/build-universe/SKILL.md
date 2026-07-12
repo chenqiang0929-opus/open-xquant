@@ -22,15 +22,36 @@ universe:
   survivorship_bias_policy: warn
 ```
 
-Treat `index` and `filter` universe as SDK or future/extended paths unless you
-verify a specific runtime path supports them.
+It also supports an `index` universe only when the constituent snapshot is
+materialized locally in `symbols`:
+
+```yaml
+universe:
+  type: index
+  index_key: csi300
+  index_code: "000300"
+  symbols: ["600519.SH", "000001.SZ"]
+  point_in_time: true
+  survivorship_bias_policy: snapshot
+```
+
+This is not remote index membership resolution. The runtime still compiles the
+listed snapshot into `StaticUniverse`; `index_key` and `index_code` are audit
+metadata for provenance. Treat `filter` universe as SDK or future/extended
+paths unless you verify a specific runtime path supports it.
 
 ## Required Checks
 
 Before validating or backtesting:
 
 - ensure `symbols` is not empty
-- reject unsafe symbols containing `/`, `\`, `.`, `..`, or absolute paths
+- for `index`, require `index_key` or `index_code` and a local `symbols`
+  snapshot; do not let the Agent invent the constituents
+- permit dots within normal symbols, including exchange suffixes such as
+  `600519.SH` and `000001.SZ`; do not reject a symbol merely because it contains
+  a dot
+- reject empty symbols, path separators (`/` or `\`), absolute paths, and
+  literal `.` or `..` path components
 - make sure local parquet data exists for every symbol
 - make benchmark symbols available in the same data directory
 - explain survivorship risk when `point_in_time: false`

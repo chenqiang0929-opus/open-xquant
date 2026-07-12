@@ -37,6 +37,7 @@ class LiveBroker:
         self._fills: list[Fill] = []
         self._lock = threading.Lock()
         self._id_map: dict[str, ManagedOrder] = {}
+        self._current_date: pd.Timestamp | None = None
         self._client.start_trade_stream(self._on_ws_message)
 
     # -- Account & Positions ---------------------------------------------------
@@ -71,10 +72,15 @@ class LiveBroker:
         params = _order_to_alpaca(order)
         resp = self._client.submit_order(params)
         alpaca_id = resp["id"]
-        managed = self._order_book.add(order, created_at="")
+        created_at = self._current_date.isoformat() if self._current_date is not None else ""
+        managed = self._order_book.add(order, created_at=created_at)
         managed.id = alpaca_id
         self._id_map[alpaca_id] = managed
         return alpaca_id
+
+    def set_current_date(self, date: pd.Timestamp) -> None:
+        """Set the engine bar date used to timestamp newly submitted orders."""
+        self._current_date = pd.Timestamp(date)
 
     # -- FillReceiver ----------------------------------------------------------
 
@@ -116,6 +122,10 @@ class LiveBroker:
         """
         return self._order_book.get_open_orders(symbol)
 
+    def get_all_orders(self) -> list[ManagedOrder]:
+        """Return all locally tracked orders with their lifecycle status."""
+        return self._order_book.get_all_orders()
+
     def cancel_orders(self, symbol: str, side: str | None = None) -> list[ManagedOrder]:
         """Cancel open orders for a symbol via Alpaca, then update local book.
 
@@ -151,6 +161,15 @@ class LiveBroker:
             managed.status_reason = reason
             canceled.append(managed)
         return canceled
+
+    def cancel_market_order(self, managed: ManagedOrder, reason: str = "canceled") -> ManagedOrder | None:
+        """Cancel one open market order via Alpaca."""
+        if managed.status != "open" or managed.order.order_type != "market":
+            return None
+        self._client.cancel_order(managed.id)
+        managed.status = "canceled"
+        managed.status_reason = reason
+        return managed
 
     def cap_pending_sells(self, symbol: str, max_shares: int) -> None:
         """Cap pending sell orders to at most *max_shares*.

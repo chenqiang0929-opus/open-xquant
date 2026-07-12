@@ -10,9 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import platform
 import sys
+from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -23,7 +23,7 @@ import pandas as pd
 import yaml
 
 from oxq.core.engine import Engine
-from oxq.core.registry import _INDICATOR_REGISTRY, _PORTFOLIO_OPTIMIZER_REGISTRY, _SIGNAL_REGISTRY
+from oxq.core.registry import _INDICATOR_REGISTRY, _PORTFOLIO_OPTIMIZER_REGISTRY, _RULE_REGISTRY, _SIGNAL_REGISTRY
 from oxq.core.strategy import Strategy
 from oxq.core.types import Fill, PortfolioOptimizer, Signal
 from oxq.data.loaders import resolve_data_dir
@@ -31,10 +31,11 @@ from oxq.data.market import LocalMarketDataProvider
 from oxq.market_calendar import normalize_exchange_calendar
 from oxq.portfolio.analytics import RunResult
 from oxq.portfolio.metrics_profile import compute_equity_curve_metrics, compute_profile_metrics, metric_assumptions
-from oxq.rules.constraint import RebalanceFrequencyRule
+from oxq.rules.constraint import CalendarRebalanceRule, RebalanceFrequencyRule, select_max_holdings_items
+from oxq.run_digests import replace_run_digest_entry
 from oxq.spec.execution import derive_execution_semantics
-from oxq.spec.schema import StrategySpec
-from oxq.trade.fees import PercentageFee
+from oxq.spec.schema import StrategySpec, effective_portfolio_params
+from oxq.trade.fees import PercentageFee, SideAwarePercentageFee
 from oxq.trade.sim_broker import FillPriceMode, SimBroker
 from oxq.trade.slippage import PercentageSlippage
 from oxq.universe.static import StaticUniverse
@@ -82,6 +83,14 @@ def _resolve_portfolio_optimizer(name: str) -> type:
     return cls
 
 
+def _resolve_rule(name: str) -> type:
+    """Look up a Rule class by name from the registry."""
+    cls = _RULE_REGISTRY.get(name)
+    if cls is None:
+        raise ValueError(f"Unknown rule: '{name}'. Available: {sorted(_RULE_REGISTRY.keys())}")
+    return cls
+
+
 def _build_optimizer(spec: StrategySpec) -> PortfolioOptimizer:
     """Build a portfolio optimizer from spec, using signal-filtered equal weight when appropriate."""
     opt_cls = _resolve_portfolio_optimizer(spec.portfolio.type)
@@ -91,9 +100,165 @@ def _build_optimizer(spec: StrategySpec) -> PortfolioOptimizer:
     if spec.portfolio.type == "EqualWeight" and spec.signal.rules:
         signal_names = _terminal_signal_names(spec)
         signal_types = {name: _effective_signal_type(spec, name) for name in spec.signal.rules}
-        return _SignalFilteredEqualWeightOptimizer(signal_names=signal_names, signal_types=signal_types)
+        optimizer = _SignalFilteredEqualWeightOptimizer(signal_names=signal_names, signal_types=signal_types)
+        return _apply_portfolio_constraints(spec, optimizer)
 
-    return opt_cls(**spec.portfolio.params)
+    return _apply_portfolio_constraints(spec, opt_cls(**effective_portfolio_params(spec.portfolio.type, spec.portfolio.params)))
+
+
+class _LaggedIndicator:
+    """Apply a deterministic bar lag to indicator output."""
+
+    def __init__(self, base: Any, lag_bars: int) -> None:
+        self._base = base
+        self._lag_bars = int(lag_bars)
+        self.name = getattr(base, "name", type(base).__name__)
+        self.formula = getattr(base, "formula", "")
+        self.depends_on = getattr(base, "depends_on", ())
+
+    def compute(self, mktdata: pd.DataFrame, **params: Any) -> pd.Series:
+        return self._base.compute(mktdata, **params).shift(self._lag_bars)
+
+    def compute_cross_section(self, mktdata: dict[str, pd.DataFrame], **params: Any) -> dict[str, pd.Series]:
+        compute_cross_section = getattr(self._base, "compute_cross_section", None)
+        if not callable(compute_cross_section):
+            return {
+                symbol: self._base.compute(frame, **params).shift(self._lag_bars)
+                for symbol, frame in mktdata.items()
+            }
+        outputs = compute_cross_section(mktdata, **params)
+        return {symbol: series.shift(self._lag_bars) for symbol, series in outputs.items()}
+
+
+def _apply_indicator_lag(indicator: Any, lag_bars: int) -> Any:
+    if lag_bars <= 0:
+        return indicator
+    return _LaggedIndicator(indicator, lag_bars)
+
+
+def _apply_portfolio_constraints(spec: StrategySpec, optimizer: PortfolioOptimizer) -> PortfolioOptimizer:
+    constraints = _effective_portfolio_constraints(spec)
+    runtime_max_holdings = _runtime_max_holdings(spec)
+    if constraints.min_position_value is not None:
+        raise ValueError("portfolio.constraints.min_position_value is not executable by the audited runtime")
+    if (
+        constraints.max_weight is None
+        and constraints.min_weight is None
+        and constraints.max_holdings is None
+        and constraints.min_position_value is None
+        and constraints.cash_reserve == 0.0
+    ):
+        return optimizer
+    return _ConstrainedPortfolioOptimizer(
+        optimizer,
+        constraints,
+        preserve_existing_holdings=runtime_max_holdings is not None,
+    )
+
+
+def _runtime_max_holdings(spec: StrategySpec) -> int | None:
+    caps = [
+        rule.params.get("max_holdings")
+        for rule in spec.portfolio.rules.values()
+        if rule.type == "MaxHoldingsRule"
+    ]
+    valid_caps = [cap for cap in caps if isinstance(cap, int) and not isinstance(cap, bool) and cap > 0]
+    return min(valid_caps) if valid_caps else None
+
+
+def _effective_portfolio_constraints(spec: StrategySpec) -> Any:
+    constraints = deepcopy(spec.portfolio.constraints)
+    runtime_max_holdings = _runtime_max_holdings(spec)
+    if runtime_max_holdings is not None:
+        constraints.max_holdings = (
+            runtime_max_holdings
+            if constraints.max_holdings is None
+            else min(constraints.max_holdings, runtime_max_holdings)
+        )
+    return constraints
+
+
+class _ConstrainedPortfolioOptimizer:
+    """Apply SPEC-level target-weight constraints after base optimization."""
+
+    name = "ConstrainedPortfolioOptimizer"
+
+    def __init__(
+        self,
+        base: PortfolioOptimizer,
+        constraints: Any,
+        *,
+        preserve_existing_holdings: bool = False,
+    ) -> None:
+        self._base = base
+        self._constraints = constraints
+        self._preserve_existing_holdings = preserve_existing_holdings
+        self._held_symbols: set[str] = set()
+        self._pending_buy_symbols: set[str] = set()
+        self.required_indicators = getattr(base, "required_indicators", {})
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
+
+    def set_held_symbols(self, symbols: list[str]) -> None:
+        self._held_symbols = set(symbols)
+        setter = getattr(self._base, "set_held_symbols", None)
+        if callable(setter):
+            setter(symbols)
+
+    def set_pending_buy_symbols(self, symbols: list[str]) -> None:
+        self._pending_buy_symbols = set(symbols)
+        setter = getattr(self._base, "set_pending_buy_symbols", None)
+        if callable(setter):
+            setter(symbols)
+
+    def optimize(
+        self,
+        signals: dict[str, pd.DataFrame],
+        indicators: dict[str, pd.DataFrame],
+    ) -> dict[str, float]:
+        raw = dict(self._base.optimize(signals, indicators))
+        cash = max(0.0, float(raw.pop("CASH", 0.0)))
+        items = [(symbol, float(weight)) for symbol, weight in raw.items() if float(weight) > 0.0]
+        if self._constraints.max_holdings is not None:
+            max_holdings = self._constraints.max_holdings
+            items = select_max_holdings_items(
+                items,
+                max_holdings,
+                held_symbols=self._held_symbols,
+                pending_buy_symbols=self._pending_buy_symbols,
+                preserve_existing_holdings=self._preserve_existing_holdings,
+            )
+        constrained: dict[str, float] = {}
+        for symbol, weight in items:
+            if self._constraints.min_weight is not None and _below_min_weight(
+                weight, self._constraints.min_weight
+            ):
+                cash += weight
+                continue
+            if self._constraints.max_weight is not None and weight > self._constraints.max_weight:
+                cash += weight - self._constraints.max_weight
+                weight = self._constraints.max_weight
+            constrained[symbol] = weight
+        reserve = float(self._constraints.cash_reserve)
+        if reserve > 0.0:
+            invested = sum(constrained.values())
+            max_invested = max(0.0, 1.0 - reserve)
+            if invested > max_invested and invested > 0.0:
+                scale = max_invested / invested
+                constrained = {symbol: weight * scale for symbol, weight in constrained.items()}
+        if self._constraints.min_weight is not None:
+            for symbol, weight in list(constrained.items()):
+                if _below_min_weight(weight, self._constraints.min_weight):
+                    cash += weight
+                    del constrained[symbol]
+        invested = sum(constrained.values())
+        constrained["CASH"] = max(cash, 1.0 - invested)
+        return constrained
+
+
+def _below_min_weight(weight: float, minimum: float) -> bool:
+    return weight < minimum and not math.isclose(weight, minimum, rel_tol=1e-12, abs_tol=1e-12)
 
 
 def _effective_lot_size(spec: StrategySpec) -> int:
@@ -103,12 +268,41 @@ def _effective_lot_size(spec: StrategySpec) -> int:
     return spec.execution.lot_size
 
 
+def _effective_sell_tax_rate(spec: StrategySpec) -> float:
+    if spec.cost.sell_tax_rate > 0.0:
+        return spec.cost.sell_tax_rate
+    return spec.cost.stamp_tax
+
+
+def _uses_side_aware_cost(spec: StrategySpec) -> bool:
+    return (
+        spec.cost.buy_fee_rate is not None
+        or spec.cost.sell_fee_rate is not None
+        or spec.cost.sell_tax_rate > 0.0
+        or spec.cost.stamp_tax > 0.0
+    )
+
+
+def _build_fee_model(spec: StrategySpec) -> PercentageFee | SideAwarePercentageFee:
+    if _uses_side_aware_cost(spec):
+        return SideAwarePercentageFee(
+            buy_rate=Decimal(str(spec.cost.buy_fee_rate if spec.cost.buy_fee_rate is not None else spec.cost.fee_rate)),
+            sell_rate=Decimal(str(spec.cost.sell_fee_rate if spec.cost.sell_fee_rate is not None else spec.cost.fee_rate)),
+            sell_tax_rate=Decimal(str(_effective_sell_tax_rate(spec))),
+            min_fee=Decimal(str(spec.cost.fee_min)),
+        )
+    return PercentageFee(rate=Decimal(str(spec.cost.fee_rate)), min_fee=Decimal(str(spec.cost.fee_min)))
+
+
 def _effective_rebalance(spec: StrategySpec) -> tuple[int, str]:
     """Return the runtime rebalance interval and the material source field."""
     execution_interval = spec.execution.rebalance.interval_days
     rebalance_rule = spec.portfolio.rules.get("rebalance")
     if rebalance_rule is None:
-        return execution_interval, "execution.rebalance.interval_days"
+        interval, source = execution_interval, "execution.rebalance.interval_days"
+        if spec.execution.rebalance.schedule and interval > 1:
+            raise ValueError("calendar schedule cannot be combined with interval_days > 1")
+        return interval, source
     if rebalance_rule.type != "RebalanceFrequencyRule":
         raise ValueError("portfolio.rules.rebalance must use RebalanceFrequencyRule")
     unsupported_params = sorted(set(rebalance_rule.params) - {"interval_days"})
@@ -125,6 +319,8 @@ def _effective_rebalance(spec: StrategySpec) -> tuple[int, str]:
             "portfolio.rules.rebalance.params.interval_days conflicts with "
             "execution.rebalance.interval_days"
         )
+    if spec.execution.rebalance.schedule and interval > 1:
+        raise ValueError("calendar schedule cannot be combined with interval_days > 1")
     return interval, "portfolio.rules.rebalance"
 
 
@@ -213,7 +409,7 @@ def compile_strategy(spec: StrategySpec) -> Strategy:
     required: dict[str, tuple[Any, dict[str, Any]]] = {}
     for ind_name, ind_def in spec.signal.indicators.items():
         ind_cls = _resolve_indicator(ind_def.type)
-        ind_instance = ind_cls()
+        ind_instance = _apply_indicator_lag(ind_cls(), getattr(ind_def, "lag_bars", 0))
         required[ind_name] = (ind_instance, ind_def.params)
 
     for signal_name, signal_def in spec.signal.rules.items():
@@ -246,9 +442,21 @@ def compile_strategy(spec: StrategySpec) -> Strategy:
 
 def compile_universe(spec: StrategySpec) -> StaticUniverse:
     """Compile the run universe from a StrategySpec."""
-    if spec.universe.type != "static":
-        raise ValueError(f"Unsupported universe.type '{spec.universe.type}'. Only 'static' is available.")
+    if spec.universe.type not in {"static", "index"}:
+        raise ValueError(f"Unsupported universe.type '{spec.universe.type}'. Only 'static' and 'index' are available.")
     return StaticUniverse(tuple(spec.universe.symbols))
+
+
+_SUPPORTED_RUNTIME_RULES = frozenset(
+    {
+        "StopLossRule",
+        "TakeProfitRule",
+        "TrailingStopRule",
+        "MaxDrawdownRisk",
+        "DailyLossLimitRisk",
+        "MaxHoldingsRule",
+    }
+)
 
 
 def _build_runtime_rules(spec: StrategySpec) -> list[Any]:
@@ -257,6 +465,15 @@ def _build_runtime_rules(spec: StrategySpec) -> list[Any]:
     interval_days, _rebalance_source = _effective_rebalance(spec)
     if interval_days > 1:
         rules.append(RebalanceFrequencyRule(interval_days=interval_days))
+    if spec.execution.rebalance.frequency != "daily" and spec.execution.rebalance.schedule:
+        rules.append(CalendarRebalanceRule(schedule=spec.execution.rebalance.schedule))
+    for rule_name, rule_def in sorted(spec.portfolio.rules.items()):
+        if rule_name == "rebalance":
+            continue
+        if rule_def.type not in _SUPPORTED_RUNTIME_RULES:
+            raise ValueError(f"portfolio_rule_unsupported: {rule_def.type}")
+        rule_cls = _resolve_rule(rule_def.type)
+        rules.append(rule_cls(**rule_def.params))
 
     # Auto-add ExitRule for Crossover signals so positions close on reverse cross.
     for _sig_name, sig_def in spec.signal.rules.items():
@@ -297,7 +514,7 @@ def compile_run(
     market = LocalMarketDataProvider(data_dir=data_path, currency=spec.market.currency, calendar=runtime_calendar)
 
     # Broker with fee/slippage from spec
-    fee_model = PercentageFee(rate=Decimal(str(spec.cost.fee_rate)), min_fee=Decimal(str(spec.cost.fee_min)))
+    fee_model = _build_fee_model(spec)
     slippage_model = PercentageSlippage(rate=Decimal(str(spec.cost.slippage_rate)))
     fill_mode_str = derive_execution_semantics(spec.execution).fill_price_mode
     fill_mode = FILL_PRICE_MODE_MAP.get(fill_mode_str)
@@ -330,6 +547,7 @@ def compile_run(
         lot_size=_effective_lot_size(spec),
         cash_annual_return=spec.execution.cash_annual_return,
         data_start=spec.data.min_start_date or None,
+        data_filters=spec.data.filters,
     )
 
     # Write artifacts — include microseconds to avoid collisions on same-second runs
@@ -593,8 +811,79 @@ def _build_execution_assumptions(spec: StrategySpec) -> dict[str, Any]:
         "rebalance": {
             "frequency": spec.execution.rebalance.frequency,
             "interval_days": rebalance_interval,
+            "schedule": spec.execution.rebalance.schedule,
             "source": rebalance_source,
         },
+    }
+
+
+def _data_filters_dict(spec: StrategySpec) -> dict[str, Any]:
+    filters = spec.data.filters
+    return {
+        "exclude_st": filters.exclude_st,
+        "exclude_suspended": filters.exclude_suspended,
+        "exclude_new_listed_days": filters.exclude_new_listed_days,
+        "limit_up_policy": filters.limit_up_policy,
+        "limit_down_policy": filters.limit_down_policy,
+        "suspension_policy": _effective_suspension_policy(filters),
+        "lookahead_policy": filters.lookahead_policy,
+    }
+
+
+def _effective_suspension_policy(filters: Any) -> str:
+    if filters.suspension_policy != "none":
+        return filters.suspension_policy
+    if filters.exclude_suspended:
+        return "hold_existing"
+    return "none"
+
+
+def _portfolio_constraints_dict(spec: StrategySpec) -> dict[str, Any]:
+    constraints = _effective_portfolio_constraints(spec)
+    return {
+        "max_weight": constraints.max_weight,
+        "min_weight": constraints.min_weight,
+        "max_holdings": constraints.max_holdings,
+        "min_position_value": constraints.min_position_value,
+        "cash_reserve": constraints.cash_reserve,
+    }
+
+
+def _portfolio_constraints_are_active(spec: StrategySpec) -> bool:
+    constraints = _effective_portfolio_constraints(spec)
+    return (
+        constraints.max_weight is not None
+        or constraints.min_weight is not None
+        or constraints.max_holdings is not None
+        or constraints.min_position_value is not None
+        or constraints.cash_reserve != 0.0
+    )
+
+
+def _cost_plan(spec: StrategySpec) -> dict[str, Any]:
+    return {
+        "fee_model": "SideAwarePercentageFee" if _uses_side_aware_cost(spec) else "PercentageFee",
+        "fee_rate": spec.cost.fee_rate,
+        "fee_min": spec.cost.fee_min,
+        "buy_fee_rate": spec.cost.buy_fee_rate,
+        "sell_fee_rate": spec.cost.sell_fee_rate,
+        "sell_tax_rate": spec.cost.sell_tax_rate,
+        "stamp_tax": spec.cost.stamp_tax,
+        "effective_sell_tax_rate": _effective_sell_tax_rate(spec),
+        "slippage_model": "PercentageSlippage",
+        "slippage_rate": spec.cost.slippage_rate,
+    }
+
+
+def _universe_plan(spec: StrategySpec, universe: Any, runtime_class: type | None = None) -> dict[str, Any]:
+    return {
+        "type": spec.universe.type,
+        "runtime_class": _class_ref(runtime_class or type(universe)),
+        "symbols": list(getattr(universe, "symbols", spec.universe.symbols)),
+        "index_key": spec.universe.index_key,
+        "index_code": spec.universe.index_code,
+        "point_in_time": spec.universe.point_in_time,
+        "survivorship_bias_policy": spec.universe.survivorship_bias_policy,
     }
 
 
@@ -621,6 +910,7 @@ def _build_compiled_plan(
     return {
         "schema_version": 1,
         "compilation_mode": "direct_runtime",
+        "open_xquant_version": _get_version(),
         "spec_hash": spec.compute_hash(),
         "strategy": {
             "strategy_id": spec.strategy_id,
@@ -635,13 +925,7 @@ def _build_compiled_plan(
             "calendar": spec.market.calendar,
             "runtime_calendar": normalize_exchange_calendar(spec.market.calendar),
         },
-        "universe": {
-            "type": spec.universe.type,
-            "runtime_class": _class_ref(type(universe)),
-            "symbols": list(getattr(universe, "symbols", spec.universe.symbols)),
-            "point_in_time": spec.universe.point_in_time,
-            "survivorship_bias_policy": spec.universe.survivorship_bias_policy,
-        },
+        "universe": _universe_plan(spec, universe),
         "data": {
             "provider": spec.data.provider,
             "data_dir": effective_data_dir or spec.data.data_dir,
@@ -650,6 +934,7 @@ def _build_compiled_plan(
             "price_adjustment": spec.data.price_adjustment,
             "required_columns": list(spec.data.required_columns),
             "min_start_date": spec.data.min_start_date,
+            "filters": _data_filters_dict(spec),
         },
         "signals": {
             "signal_time": spec.signal.signal_time,
@@ -658,6 +943,7 @@ def _build_compiled_plan(
                     "type": definition.type,
                     "class": _class_ref(_resolve_indicator(definition.type)),
                     "params": dict(definition.params),
+                    "lag_bars": definition.lag_bars,
                 }
                 for name, definition in sorted(spec.signal.indicators.items())
             },
@@ -678,7 +964,7 @@ def _build_compiled_plan(
             "type": spec.portfolio.type,
             "runtime_type": portfolio_runtime_type,
             "class": _class_ref(type(strategy.portfolio)),
-            "params": dict(spec.portfolio.params),
+            "params": effective_portfolio_params(spec.portfolio.type, spec.portfolio.params),
             "rules": {
                 name: {
                     "type": definition.type,
@@ -686,6 +972,7 @@ def _build_compiled_plan(
                 }
                 for name, definition in sorted(spec.portfolio.rules.items())
             },
+            "constraints": _portfolio_constraints_dict(spec),
         },
         "execution": {
             "trade_time": spec.execution.trade_time,
@@ -705,16 +992,11 @@ def _build_compiled_plan(
             "rebalance": {
                 "frequency": spec.execution.rebalance.frequency,
                 "interval_days": rebalance_interval,
+                "schedule": spec.execution.rebalance.schedule,
                 "source": rebalance_source,
             },
         },
-        "cost": {
-            "fee_model": "PercentageFee",
-            "fee_rate": spec.cost.fee_rate,
-            "fee_min": spec.cost.fee_min,
-            "slippage_model": "PercentageSlippage",
-            "slippage_rate": spec.cost.slippage_rate,
-        },
+        "cost": _cost_plan(spec),
         "runtime_rules": _build_compiled_runtime_rules(spec),
         "benchmark": {
             "symbols": list(strategy.benchmarks),
@@ -754,10 +1036,13 @@ def _build_compiled_plan_from_spec_metadata(
         signal_types = {name: _effective_signal_type(spec, name) for name in sorted(spec.signal.rules)}
         portfolio_runtime_type = "SignalFilteredEqualWeight"
         portfolio_class = _class_ref(_SignalFilteredEqualWeightOptimizer)
+    if _portfolio_constraints_are_active(spec):
+        portfolio_class = _class_ref(_ConstrainedPortfolioOptimizer)
 
     return {
         "schema_version": 1,
         "compilation_mode": "direct_runtime",
+        "open_xquant_version": _get_version(),
         "spec_hash": spec.compute_hash(),
         "strategy": {
             "strategy_id": spec.strategy_id,
@@ -772,13 +1057,7 @@ def _build_compiled_plan_from_spec_metadata(
             "calendar": spec.market.calendar,
             "runtime_calendar": normalize_exchange_calendar(spec.market.calendar),
         },
-        "universe": {
-            "type": spec.universe.type,
-            "runtime_class": _class_ref(StaticUniverse),
-            "symbols": list(spec.universe.symbols),
-            "point_in_time": spec.universe.point_in_time,
-            "survivorship_bias_policy": spec.universe.survivorship_bias_policy,
-        },
+        "universe": _universe_plan(spec, StaticUniverse(tuple(spec.universe.symbols)), runtime_class=StaticUniverse),
         "data": {
             "provider": spec.data.provider,
             "data_dir": effective_data_dir or spec.data.data_dir,
@@ -787,6 +1066,7 @@ def _build_compiled_plan_from_spec_metadata(
             "price_adjustment": spec.data.price_adjustment,
             "required_columns": list(spec.data.required_columns),
             "min_start_date": spec.data.min_start_date,
+            "filters": _data_filters_dict(spec),
         },
         "signals": {
             "signal_time": spec.signal.signal_time,
@@ -795,6 +1075,7 @@ def _build_compiled_plan_from_spec_metadata(
                     "type": definition.type,
                     "class": _component_class_ref("Indicator", definition.type, component_manifests),
                     "params": dict(definition.params),
+                    "lag_bars": definition.lag_bars,
                 }
                 for name, definition in sorted(spec.signal.indicators.items())
             },
@@ -815,7 +1096,7 @@ def _build_compiled_plan_from_spec_metadata(
             "type": spec.portfolio.type,
             "runtime_type": portfolio_runtime_type,
             "class": portfolio_class,
-            "params": dict(spec.portfolio.params),
+            "params": effective_portfolio_params(spec.portfolio.type, spec.portfolio.params),
             "rules": {
                 name: {
                     "type": definition.type,
@@ -823,6 +1104,7 @@ def _build_compiled_plan_from_spec_metadata(
                 }
                 for name, definition in sorted(spec.portfolio.rules.items())
             },
+            "constraints": _portfolio_constraints_dict(spec),
         },
         "execution": {
             "trade_time": spec.execution.trade_time,
@@ -842,16 +1124,11 @@ def _build_compiled_plan_from_spec_metadata(
             "rebalance": {
                 "frequency": spec.execution.rebalance.frequency,
                 "interval_days": rebalance_interval,
+                "schedule": spec.execution.rebalance.schedule,
                 "source": rebalance_source,
             },
         },
-        "cost": {
-            "fee_model": "PercentageFee",
-            "fee_rate": spec.cost.fee_rate,
-            "fee_min": spec.cost.fee_min,
-            "slippage_model": "PercentageSlippage",
-            "slippage_rate": spec.cost.slippage_rate,
-        },
+        "cost": _cost_plan(spec),
         "runtime_rules": _build_compiled_runtime_rules(spec),
         "benchmark": {
             "symbols": list(spec.benchmark.symbols),
@@ -889,6 +1166,8 @@ def _component_class_ref(
         return _class_ref(_resolve_signal(name))
     if kind == "PortfolioOptimizer":
         return _class_ref(_resolve_portfolio_optimizer(name))
+    if kind == "Rule":
+        return _class_ref(_resolve_rule(name))
     raise ValueError(f"Unknown component kind: {kind}")
 
 
@@ -899,6 +1178,8 @@ def _builtin_component_class(kind: str, name: str) -> type | None:
         return _SIGNAL_REGISTRY.get(name)
     if kind == "PortfolioOptimizer":
         return _PORTFOLIO_OPTIMIZER_REGISTRY.get(name)
+    if kind == "Rule":
+        return _RULE_REGISTRY.get(name)
     return None
 
 
@@ -931,6 +1212,7 @@ def _manifest_component_class_ref(component_manifests: list[dict[str, Any]], kin
 _COMPILED_PLAN_MATERIAL_KEYS = {
     "schema_version",
     "compilation_mode",
+    "open_xquant_version",
     "spec_hash",
     "strategy",
     "market",
@@ -948,13 +1230,38 @@ _COMPILED_PLAN_MATERIAL_KEYS = {
 
 
 def _compiled_plan_material_sections(plan: dict[str, Any]) -> dict[str, Any]:
-    return {key: plan.get(key) for key in sorted(_COMPILED_PLAN_MATERIAL_KEYS)}
+    normalized = _normalize_compiled_plan_material_fields(plan)
+    return {key: normalized.get(key) for key in sorted(_COMPILED_PLAN_MATERIAL_KEYS)}
 
 
-def _compiled_plan_material_differences(actual_plan: dict[str, Any], expected_plan: dict[str, Any]) -> list[str]:
+def _compiled_plan_material_differences(
+    actual_plan: dict[str, Any],
+    expected_plan: dict[str, Any],
+    *,
+    required_oxq_version: str | None = None,
+) -> list[str]:
     actual = _compiled_plan_material_sections(actual_plan)
     expected = _compiled_plan_material_sections(expected_plan)
+    if required_oxq_version is not None:
+        expected["open_xquant_version"] = required_oxq_version
     return sorted(key for key in set(actual) | set(expected) if actual.get(key) != expected.get(key))
+
+
+def _normalize_compiled_plan_material_fields(plan: dict[str, Any]) -> dict[str, Any]:
+    normalized = deepcopy(plan)
+    data = normalized.get("data")
+    if isinstance(data, dict):
+        filters = data.get("filters")
+        if isinstance(filters, dict):
+            filters.setdefault("suspension_policy", "none")
+    signals = normalized.get("signals")
+    if isinstance(signals, dict):
+        indicators = signals.get("indicators")
+        if isinstance(indicators, dict):
+            for definition in indicators.values():
+                if isinstance(definition, dict):
+                    definition.setdefault("lag_bars", 0)
+    return normalized
 
 
 def compile_plan(spec: StrategySpec, *, effective_data_dir: str | None = None) -> dict[str, Any]:
@@ -1011,13 +1318,13 @@ def _build_strategy_py_artifact(
         "from oxq.data.market import LocalMarketDataProvider",
         "from oxq.portfolio.analytics import RunResult",
         "from oxq.spec.compiler import (",
+        "    _build_fee_model,",
         "    _build_compiled_plan,",
         "    _compiled_plan_material_differences,",
         "    compile_strategy,",
         "    compile_universe,",
         ")",
         "from oxq.spec.schema import StrategySpec",
-        "from oxq.trade.fees import PercentageFee",
         "from oxq.trade.sim_broker import FillPriceMode, SimBroker",
         "from oxq.trade.slippage import PercentageSlippage",
         "",
@@ -1032,22 +1339,28 @@ def _build_strategy_py_artifact(
         "    return json.loads(path.read_text(encoding='utf-8'))",
         "",
         "",
+        "def load_optional_json(filename: str) -> dict[str, Any]:",
+        '    """Load an optional adjacent JSON artifact, returning an empty object when absent."""',
+        "    path = Path(__file__).parent / filename",
+        "    if not path.exists():",
+        "        return {}",
+        "    payload = json.loads(path.read_text(encoding='utf-8'))",
+        "    return payload if isinstance(payload, dict) else {}",
+        "",
+        "",
         "def load_metrics() -> dict[str, Any]:",
         '    """Load recorded metrics produced by the audited run."""',
-        '    path = Path(__file__).parent / "metrics.json"',
-        "    return json.loads(path.read_text(encoding='utf-8'))",
+        "    return load_optional_json('metrics.json')",
         "",
         "",
         "def load_environment() -> dict[str, Any]:",
         '    """Load environment metadata recorded with the run."""',
-        '    path = Path(__file__).parent / "environment.json"',
-        "    return json.loads(path.read_text(encoding='utf-8'))",
+        "    return load_optional_json('environment.json')",
         "",
         "",
         "def load_data_manifest() -> dict[str, Any]:",
         '    """Load data provenance metadata recorded with the run."""',
-        '    path = Path(__file__).parent / "data_manifest.json"',
-        "    return json.loads(path.read_text(encoding='utf-8'))",
+        "    return load_optional_json('data_manifest.json')",
         "",
         "",
         "def trusted_effective_data_dir() -> str | None:",
@@ -1059,6 +1372,11 @@ def _build_strategy_py_artifact(
         "    manifest = load_data_manifest()",
         "    for key in ('effective_data_dir', 'data_dir'):",
         "        data_dir = manifest.get(key)",
+        "        if isinstance(data_dir, str) and data_dir:",
+        "            return data_dir",
+        "    data = load_compiled_plan().get('data', {})",
+        "    for key in ('effective_data_dir', 'data_dir'):",
+        "        data_dir = data.get(key)",
         "        if isinstance(data_dir, str) and data_dir:",
         "            return data_dir",
         "    return None",
@@ -1082,7 +1400,11 @@ def _build_strategy_py_artifact(
         '        if (run_dir / "component_manifests.json").exists():',
         "            load_component_manifests_from_run(run_dir)",
         "        expected_plan = _build_compiled_plan(spec, effective_data_dir=trusted_effective_data_dir())",
-        "    differences = _compiled_plan_material_differences(compiled_plan, expected_plan)",
+        "    differences = _compiled_plan_material_differences(",
+        "        compiled_plan,",
+        "        expected_plan,",
+        "        required_oxq_version=spec.required_oxq_version,",
+        "    )",
         "    if differences:",
         "        raise ValueError(",
         "            'compiled_plan.json material fields differ from strategy_spec.yaml: '",
@@ -1197,15 +1519,13 @@ def _build_strategy_py_artifact(
         "",
         "def define_broker() -> SimBroker:",
         '    """Define the broker, fill timing, transaction costs, and slippage."""',
+        "    spec = define_strategy()",
         "    plan = load_compiled_plan()",
         "    execution = plan.get('execution', {})",
         "    cost = plan.get('cost', {})",
         "    market = plan.get('market', {})",
         "    return SimBroker(",
-        "        fee_model=PercentageFee(",
-        "            rate=Decimal(str(cost.get('fee_rate', 0.0))),",
-        "            min_fee=Decimal(str(cost.get('fee_min', 0.0))),",
-        "        ),",
+        "        fee_model=_build_fee_model(spec),",
         "        slippage_model=PercentageSlippage(",
         "            rate=Decimal(str(cost.get('slippage_rate', 0.0))),",
         "        ),",
@@ -1227,6 +1547,11 @@ def _build_strategy_py_artifact(
         "        'fee_model': cost.get('fee_model'),",
         "        'fee_rate': cost.get('fee_rate'),",
         "        'fee_min': cost.get('fee_min'),",
+        "        'buy_fee_rate': cost.get('buy_fee_rate'),",
+        "        'sell_fee_rate': cost.get('sell_fee_rate'),",
+        "        'sell_tax_rate': cost.get('sell_tax_rate'),",
+        "        'stamp_tax': cost.get('stamp_tax'),",
+        "        'effective_sell_tax_rate': cost.get('effective_sell_tax_rate'),",
         "        'slippage_model': cost.get('slippage_model'),",
         "        'slippage_rate': cost.get('slippage_rate'),",
         "    }",
@@ -1266,6 +1591,7 @@ def _build_strategy_py_artifact(
         "        lot_size=execution.get('effective_lot_size', spec.execution.lot_size),",
         "        cash_annual_return=execution.get('cash_annual_return', spec.execution.cash_annual_return),",
         "        data_start=data.get('min_start_date') or None,",
+        "        data_filters=spec.data.filters,",
         "    )",
         "",
         "",
@@ -1349,15 +1675,16 @@ def _build_strategy_py_artifact(
         "    spec = define_strategy()",
         "    plan = load_compiled_plan()",
         "    validate_compiled_plan_hash(spec, plan)",
-        "    strategy = build_strategy(spec)",
-        "    universe = define_universe(spec)",
-        "    market = prepare_data(spec)",
-        "    broker = define_broker()",
         "",
         "    if dry_run:",
         "        plan = describe()",
         "        plan['status'] = 'dry_run'",
         "        return plan",
+        "",
+        "    strategy = build_strategy(spec)",
+        "    universe = define_universe(spec)",
+        "    market = prepare_data(spec)",
+        "    broker = define_broker()",
         "",
         "    result = run_backtest(spec, strategy, universe, market, broker)",
         "    print_metrics(result)",
@@ -1378,9 +1705,32 @@ def _build_compiled_runtime_rules(spec: StrategySpec) -> list[dict[str, Any]]:
         rules.append(
             {
                 "type": "RebalanceFrequencyRule",
-                "class": f"{RebalanceFrequencyRule.__module__}.{RebalanceFrequencyRule.__qualname__}",
+                "class": _class_ref(RebalanceFrequencyRule),
                 "params": {"interval_days": rebalance_interval},
                 "source": rebalance_source,
+            }
+        )
+    if spec.execution.rebalance.frequency != "daily" and spec.execution.rebalance.schedule:
+        rules.append(
+            {
+                "type": "CalendarRebalanceRule",
+                "class": _class_ref(CalendarRebalanceRule),
+                "params": {"schedule": spec.execution.rebalance.schedule},
+                "source": "execution.rebalance.schedule",
+            }
+        )
+    for rule_name, rule_def in sorted(spec.portfolio.rules.items()):
+        if rule_name == "rebalance":
+            continue
+        if rule_def.type not in _SUPPORTED_RUNTIME_RULES:
+            raise ValueError(f"portfolio_rule_unsupported: {rule_def.type}")
+        rule_cls = _resolve_rule(rule_def.type)
+        rules.append(
+            {
+                "type": rule_def.type,
+                "class": _class_ref(rule_cls),
+                "params": dict(rule_def.params),
+                "source": f"portfolio.rules.{rule_name}",
             }
         )
     for signal_name, signal_def in sorted(spec.signal.rules.items()):
@@ -1670,11 +2020,14 @@ def _build_target_weight_rows(result: RunResult) -> list[dict[str, Any]]:
                 current_adjusted[symbol] = adjusted_weight
             reason = rule_reasons.get(symbol) or rule_reasons.get("__all__")
             if not reason:
-                reason = (
-                    "target_changed"
-                    if adjusted_weight != previous_adjusted.get(symbol, 0.0)
-                    else "target_unchanged"
-                )
+                if raw_weight != adjusted_weight:
+                    reason = "target_adjusted_by_runtime_policy"
+                else:
+                    reason = (
+                        "target_changed"
+                        if adjusted_weight != previous_adjusted.get(symbol, 0.0)
+                        else "target_unchanged"
+                    )
             rows.append(
                 {
                     "date": str(snapshot.date),
@@ -1723,39 +2076,8 @@ def _hash_json_file(path: Path, exclude_keys: set[str] | None = None) -> str:
 
 
 def _append_run_digest(run_dir: Path, artifact_hashes_hash: str) -> None:
-    digest_path = run_dir.parent / "run_digests.jsonl"
-    lock_path = digest_path.with_suffix(digest_path.suffix + ".lock")
-    entry = {
-        "run_id": run_dir.name,
-        "artifact_hashes": artifact_hashes_hash,
-        "created_at": datetime.now(UTC).isoformat(),
-    }
-    with _FileLock(lock_path):
-        with open(digest_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-
-
-class _FileLock:
-    def __init__(self, path: Path) -> None:
-        self._path = path
-        self._fh: Any = None
-
-    def __enter__(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self._path, "a+")
-        import fcntl
-
-        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        if self._fh is None:
-            return
-        import fcntl
-
-        fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        self._fh.close()
+    """Compatibility wrapper for callers that used the former append helper."""
+    replace_run_digest_entry(run_dir, artifact_hashes_hash)
 
 
 def _sanitize_json(value: Any) -> Any:

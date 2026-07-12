@@ -1,7 +1,14 @@
 import pandas as pd
 import pytest
+
 from oxq.core.types import PortfolioOptimizer
-from oxq.portfolio.optimizers import EqualWeightOptimizer, RiskParityOptimizer, KellyOptimizer, PctEquityOptimizer, TopNRankingOptimizer
+from oxq.portfolio.optimizers import (
+    EqualWeightOptimizer,
+    KellyOptimizer,
+    PctEquityOptimizer,
+    RiskParityOptimizer,
+    TopNRankingOptimizer,
+)
 
 
 def test_equal_weight_protocol():
@@ -166,3 +173,37 @@ class TestTopNRankingOptimizerRedistribution:
         result = opt.optimize({}, indicators)
         assert "CASH" not in result
         assert sum(result.values()) == pytest.approx(1.0)
+
+    def test_score_weighting_does_not_emit_negative_target_weights(self):
+        opt = TopNRankingOptimizer(score_col="score", n=2, weighting="score", filter_negative=False)
+        indicators = {
+            "A": pd.DataFrame({"score": [1.0]}),
+            "B": pd.DataFrame({"score": [-1.0]}),
+        }
+
+        result = opt.optimize({}, indicators)
+
+        assert result == {"CASH": 1.0}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"score_col": ""},
+        {"n": 0},
+        {"n": True},
+        {"max_weight": -0.5},
+        {"max_weight": 1.5},
+        {"max_weight": float("nan")},
+        {"pre_filter_signal": 1},
+        {"filter_negative": "yes"},
+        {"ascending": "no"},
+        {"weighting": 1},
+        {"weighting": "invalid"},
+    ],
+)
+def test_top_n_ranking_rejects_invalid_constructor_params(kwargs: dict[str, object]) -> None:
+    params = {"score_col": "score", **kwargs}
+
+    with pytest.raises(ValueError):
+        TopNRankingOptimizer(**params)

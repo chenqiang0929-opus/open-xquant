@@ -468,6 +468,43 @@ def test_write_artifacts_persists_target_weights(tmp_path) -> None:
     assert "target_weights.csv" in hashes
 
 
+def test_target_weights_mark_runtime_policy_adjustment_when_adjusted_weight_is_unchanged() -> None:
+    from oxq.core.types import BarSnapshot
+
+    dates = pd.bdate_range("2024-01-02", periods=2, tz="UTC")
+    result = RunResult(
+        portfolio=Portfolio(cash=Decimal("0")),
+        trades=[],
+        equity_curve=[(dates[0], 100000.0), (dates[1], 100000.0)],
+        mktdata={},
+        snapshots=[
+            BarSnapshot(
+                date=dates[0],
+                target_weights={"AAA": 1.0},
+                adjusted_weights={"AAA": 1.0},
+                positions={},
+                cash=0.0,
+                total_value=100000.0,
+            ),
+            BarSnapshot(
+                date=dates[1],
+                target_weights={"BBB": 1.0},
+                adjusted_weights={"AAA": 1.0, "BBB": 0.0},
+                positions={},
+                cash=0.0,
+                total_value=100000.0,
+            ),
+        ],
+    )
+
+    rows = compiler._build_target_weight_rows(result)
+
+    bbb_row = next(row for row in rows if row["date"] == str(dates[1]) and row["symbol"] == "BBB")
+    assert bbb_row["raw_target_weight"] == 1.0
+    assert bbb_row["adjusted_target_weight"] == 0.0
+    assert bbb_row["reason"] == "target_adjusted_by_runtime_policy"
+
+
 def test_write_artifacts_persists_compiled_plan(tmp_path) -> None:
     spec = StrategySpec.template(strategy_id="compiled_plan", hypothesis="compiled plans should be auditable")
     spec.universe.symbols = ["SPY"]
@@ -515,6 +552,7 @@ def test_write_artifacts_persists_compiled_plan(tmp_path) -> None:
     hashes = json.loads((run_dir / "artifact_hashes.json").read_text(encoding="utf-8"))
     assert plan["schema_version"] == 1
     assert plan["compilation_mode"] == "direct_runtime"
+    assert plan["open_xquant_version"] == compiler._get_version()
     assert plan["spec_hash"] == spec.compute_hash()
     assert plan["signals"]["indicators"]["roc_1"]["type"] == "ROC"
     assert plan["signals"]["rules"]["positive"]["effective_type"] == "Threshold"
@@ -680,6 +718,83 @@ def test_strategy_py_rejects_materially_tampered_compiled_plan(tmp_path) -> None
     module_spec.loader.exec_module(module)
 
     with pytest.raises(ValueError, match="compiled_plan.json material fields differ"):
+        module.main(dry_run=True)
+
+
+def test_strategy_py_rejects_tampered_open_xquant_version(tmp_path) -> None:
+    spec = StrategySpec.template(
+        strategy_id="version_plan_guard",
+        hypothesis="strategy.py should reject a tampered runtime version",
+    )
+    dates = pd.bdate_range("2024-01-02", periods=2, tz="UTC")
+    result = RunResult(
+        portfolio=Portfolio(cash=Decimal("100000")),
+        trades=[],
+        equity_curve=[(dates[0], 100000.0), (dates[1], 100001.0)],
+        mktdata={
+            "SPY": pd.DataFrame(
+                {
+                    "open": [1.0, 1.0],
+                    "high": [1.0, 1.0],
+                    "low": [1.0, 1.0],
+                    "close": [1.0, 1.0],
+                    "volume": [1, 1],
+                },
+                index=dates,
+            )
+        },
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_artifacts(spec, result, run_dir, Engine())
+    plan_path = run_dir / "compiled_plan.json"
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan["open_xquant_version"] = "999.0.0"
+    plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    module_spec = importlib.util.spec_from_file_location("generated_strategy_version_plan", run_dir / "strategy.py")
+    assert module_spec is not None
+    assert module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    with pytest.raises(ValueError, match="compiled_plan.json material fields differ.*open_xquant_version"):
+        module.main(dry_run=True)
+
+
+def test_strategy_py_rejects_open_xquant_version_that_differs_from_spec_requirement(tmp_path) -> None:
+    spec = StrategySpec.template(
+        strategy_id="required_version_guard",
+        hypothesis="strategy.py should enforce required runtime version provenance",
+    )
+    spec.required_oxq_version = "999.0.0"
+    dates = pd.bdate_range("2024-01-02", periods=2, tz="UTC")
+    result = RunResult(
+        portfolio=Portfolio(cash=Decimal("100000")),
+        trades=[],
+        equity_curve=[(dates[0], 100000.0), (dates[1], 100001.0)],
+        mktdata={
+            "SPY": pd.DataFrame(
+                {
+                    "open": [1.0, 1.0],
+                    "high": [1.0, 1.0],
+                    "low": [1.0, 1.0],
+                    "close": [1.0, 1.0],
+                    "volume": [1, 1],
+                },
+                index=dates,
+            )
+        },
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_artifacts(spec, result, run_dir, Engine())
+    module_spec = importlib.util.spec_from_file_location("generated_strategy_required_version", run_dir / "strategy.py")
+    assert module_spec is not None
+    assert module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    with pytest.raises(ValueError, match="compiled_plan.json material fields differ.*open_xquant_version"):
         module.main(dry_run=True)
 
 
@@ -1632,6 +1747,7 @@ def test_compile_run_writes_execution_assumptions_artifact(tmp_path) -> None:
         "rebalance": {
             "frequency": "daily",
             "interval_days": 1,
+            "schedule": "",
             "source": "execution.rebalance.interval_days",
         },
     }
@@ -1710,12 +1826,55 @@ def test_compile_run_preserves_portfolio_rebalance_rule_in_runtime_artifacts(tmp
     assert compiled_plan["execution"]["rebalance"] == {
         "frequency": "daily",
         "interval_days": 3,
+        "schedule": "",
         "source": "portfolio.rules.rebalance",
     }
     assert compiled_plan["runtime_rules"][0]["type"] == "RebalanceFrequencyRule"
     assert compiled_plan["runtime_rules"][0]["params"]["interval_days"] == 3
     assert compiled_plan["runtime_rules"][0]["source"] == "portfolio.rules.rebalance"
     assert rows["reason"].str.contains("rebalance interval").any()
+
+
+def test_compile_run_max_holdings_caps_simultaneous_equal_weight_buy_batch(tmp_path) -> None:
+    spec = StrategySpec.template(
+        strategy_id="simultaneous_max_holdings",
+        hypothesis="a simultaneous buy batch must respect its declared holdings cap",
+    )
+    spec.universe.symbols = ["AAA", "BBB"]
+    spec.universe.point_in_time = True
+    spec.benchmark.symbols = []
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-04"]
+    spec.validation.required_oos = False
+    spec.portfolio.rules["max_holdings"] = PortfolioRuleDef(
+        type="MaxHoldingsRule",
+        params={"max_holdings": 1},
+    )
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    dates = pd.bdate_range("2024-01-02", periods=3, tz="UTC")
+    for symbol in spec.universe.symbols:
+        pd.DataFrame(
+            {
+                "open": [100.0, 100.0, 100.0],
+                "high": [100.0, 100.0, 100.0],
+                "low": [100.0, 100.0, 100.0],
+                "close": [100.0, 100.0, 100.0],
+                "volume": [1000, 1000, 1000],
+            },
+            index=dates,
+        ).to_parquet(data_dir / f"{symbol}.parquet")
+
+    result, _run_dir = compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+    buy_symbols = [fill.order.symbol for fill in result.trades if fill.order.side == "BUY"]
+    assert buy_symbols == ["AAA"]
+    assert set(result.portfolio.positions) == {"AAA"}
+    assert max(
+        sum(position.shares > 0 for position in snapshot.positions.values())
+        for snapshot in result.snapshots
+    ) == 1
 
 
 def test_compile_plan_rejects_unsupported_rebalance_rule_params() -> None:
@@ -1737,13 +1896,264 @@ def test_compile_plan_rejects_unsupported_portfolio_rules() -> None:
         strategy_id="compile_plan_bad_rule",
         hypothesis="compile previews must not drop unsupported portfolio rules",
     )
-    spec.portfolio.rules["stop_loss"] = PortfolioRuleDef(
-        type="StopLossRule",
-        params={"threshold": 0.05},
+    spec.portfolio.rules["custom_rule"] = PortfolioRuleDef(
+        type="WeeklyCalendarRule",
+        params={"weekday": 0},
     )
 
     with pytest.raises(ValueError, match="portfolio_rule_unsupported"):
         compile_plan(spec)
+
+
+def test_compile_plan_records_supported_extensions() -> None:
+    spec = StrategySpec.template(
+        strategy_id="second_batch_extensions",
+        hypothesis="second batch schema fields must survive compile plan",
+    )
+    spec.universe.type = "index"
+    spec.universe.index_key = "csi300"
+    spec.universe.index_code = "000300"
+    spec.universe.symbols = ["600519.SH", "000001.SZ"]
+    spec.universe.point_in_time = True
+    spec.data.required_columns.extend(["is_st", "is_suspended", "listed_days"])
+    spec.data.filters.exclude_st = True
+    spec.data.filters.exclude_suspended = True
+    spec.data.filters.exclude_new_listed_days = 60
+    spec.cost.buy_fee_rate = 0.0003
+    spec.cost.sell_fee_rate = 0.0003
+    spec.cost.sell_tax_rate = 0.001
+    spec.cost.stamp_tax = 0.001
+    spec.portfolio.constraints.max_weight = 0.4
+    spec.portfolio.constraints.max_holdings = 3
+    spec.portfolio.constraints.cash_reserve = 0.1
+    spec.execution.rebalance.frequency = "monthly"
+    spec.execution.rebalance.schedule = "month_start"
+    spec.portfolio.rules["stop_loss"] = PortfolioRuleDef(type="StopLossRule", params={"threshold": 0.05})
+
+    plan = compile_plan(spec)
+
+    assert plan["universe"]["type"] == "index"
+    assert plan["universe"]["index_key"] == "csi300"
+    assert plan["data"]["filters"]["exclude_st"] is True
+    assert plan["cost"]["fee_model"] == "SideAwarePercentageFee"
+    assert plan["cost"]["sell_tax_rate"] == 0.001
+    assert plan["portfolio"]["constraints"]["cash_reserve"] == 0.1
+    assert plan["open_xquant_version"] == compiler._get_version()
+    assert plan["execution"]["rebalance"]["frequency"] == "monthly"
+    assert plan["execution"]["rebalance"]["schedule"] == "month_start"
+    assert any(rule["type"] == "StopLossRule" for rule in plan["runtime_rules"])
+
+
+def test_compile_plan_uses_side_aware_fee_for_explicit_zero_side_rate() -> None:
+    spec = StrategySpec.template(
+        strategy_id="explicit_zero_side_rate",
+        hypothesis="explicit zero side rates must not be treated as missing",
+    )
+    spec.cost.fee_rate = 0.001
+    spec.cost.fee_min = 0.0
+    spec.cost.buy_fee_rate = 0.0
+
+    plan = compile_plan(spec)
+    fee_model = compiler._build_fee_model(spec)
+
+    assert plan["cost"]["fee_model"] == "SideAwarePercentageFee"
+    assert fee_model.calculate(Order(symbol="AAA", side="BUY", shares=100), Decimal("100")) == Decimal("0.0")
+    assert fee_model.calculate(Order(symbol="AAA", side="SELL", shares=100), Decimal("100")) == Decimal("10.000")
+
+
+def test_compile_run_applies_side_aware_sell_fee_to_sell_fills(tmp_path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    frame = pd.DataFrame(
+        {
+            "open": [100, 90, 89, 94, 110, 111, 105, 104],
+            "high": [101, 91, 90, 95, 111, 112, 106, 105],
+            "low": [99, 89, 88, 93, 109, 110, 104, 103],
+            "close": [100, 90, 89, 94, 110, 111, 105, 104],
+            "volume": [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+        },
+        index=pd.date_range("2024-01-02", periods=8, freq="B", tz="UTC"),
+    )
+    frame.to_parquet(data_dir / "CSI300.parquet")
+
+    spec = StrategySpec.template(
+        strategy_id="side_aware_sell_fee_e2e",
+        hypothesis="compiled backtests must apply sell-side taxes to SELL fills",
+    )
+    spec.universe.symbols = ["CSI300"]
+    spec.signal.indicators = {
+        "roc_1": IndicatorDef(type="ROC", params={"column": "close", "period": 1})
+    }
+    spec.signal.rules = {
+        "timing": SignalRuleDef(
+            type="ROCTiming",
+            params={"column": "roc_1", "mode": "fixed", "bottom": -5.0, "top": 10.0},
+        )
+    }
+    spec.portfolio.type = "SignalToPosition"
+    spec.portfolio.params = {"signal": "timing"}
+    spec.validation.train_period = ["2024-01-02", "2024-01-05"]
+    spec.validation.test_period = ["2024-01-08", "2024-01-11"]
+    spec.benchmark.symbols = ["CSI300"]
+    spec.cost.fee_min = 0.0
+    spec.cost.buy_fee_rate = 0.0
+    spec.cost.sell_fee_rate = 0.0
+    spec.cost.sell_tax_rate = 0.01
+
+    _, run_dir = compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+    plan = json.loads((run_dir / "compiled_plan.json").read_text(encoding="utf-8"))
+    trades = pd.read_csv(run_dir / "trades.csv")
+
+    assert plan["cost"]["fee_model"] == "SideAwarePercentageFee"
+    assert trades["side"].tolist() == ["BUY", "SELL", "BUY"]
+    assert trades.loc[trades["side"] == "BUY", "fee"].tolist() == [0.0, 0.0]
+    assert trades.loc[trades["side"] == "SELL", "fee"].iloc[0] > 0.0
+
+
+def test_compile_plan_records_effective_top_n_defaults() -> None:
+    spec = StrategySpec.template(
+        strategy_id="top_n_effective_defaults",
+        hypothesis="runtime plans must expose material optimizer defaults",
+    )
+    spec.data.required_columns.append("score")
+    spec.portfolio.type = "TopNRanking"
+    spec.portfolio.params = {"score_col": "score", "n": 3}
+
+    plan = compile_plan(spec)
+
+    assert plan["portfolio"]["params"] == {
+        "score_col": "score",
+        "n": 3,
+        "filter_negative": True,
+        "max_weight": 1.0,
+        "pre_filter_signal": "",
+        "weighting": "score",
+        "ascending": False,
+    }
+    assert spec.to_effective_dict()["portfolio"]["params"] == plan["portfolio"]["params"]
+
+
+def test_metadata_compiled_plan_matches_constrained_portfolio_runtime_class() -> None:
+    spec = StrategySpec.template(
+        strategy_id="constrained_metadata_plan",
+        hypothesis="compile preview metadata must preserve portfolio constraint wrappers",
+    )
+    spec.portfolio.constraints.max_weight = 0.4
+
+    actual = compile_plan(spec)
+    expected = compiler._build_compiled_plan_from_spec_metadata(spec)
+
+    assert "_ConstrainedPortfolioOptimizer" in actual["portfolio"]["class"]
+    assert expected["portfolio"]["class"] == actual["portfolio"]["class"]
+    assert compiler._compiled_plan_material_differences(actual, expected) == []
+
+
+def test_compile_plan_records_indicator_lag_and_tradability_policy() -> None:
+    spec = StrategySpec.template(
+        strategy_id="lag_and_tradability",
+        hypothesis="indicator lags and tradability policies must survive compile plan",
+    )
+    spec.signal.indicators = {
+        "mom_20": IndicatorDef(type="NdayReturn", params={"column": "close", "period": 20}, lag_bars=1)
+    }
+    spec.portfolio.type = "TopNRanking"
+    spec.portfolio.params = {"score_col": "mom_20", "n": 1}
+    spec.data.required_columns.append("is_suspended")
+    spec.data.filters.exclude_suspended = True
+    spec.data.filters.suspension_policy = "hold_existing"
+
+    plan = compile_plan(spec)
+
+    assert plan["signals"]["indicators"]["mom_20"]["lag_bars"] == 1
+    assert plan["data"]["filters"]["suspension_policy"] == "hold_existing"
+
+
+def test_compile_plan_records_effective_suspension_policy_for_exclude_suspended() -> None:
+    spec = StrategySpec.template(
+        strategy_id="effective_suspension_policy",
+        hypothesis="compiled plan should show runtime suspension behavior",
+    )
+    spec.data.required_columns.append("is_suspended")
+    spec.data.filters.exclude_suspended = True
+
+    plan = compile_plan(spec)
+
+    assert spec.data.filters.suspension_policy == "none"
+    assert plan["data"]["filters"]["exclude_suspended"] is True
+    assert plan["data"]["filters"]["suspension_policy"] == "hold_existing"
+
+
+def test_compile_run_applies_indicator_lag_bars(tmp_path) -> None:
+    spec = StrategySpec.template(
+        strategy_id="runtime_indicator_lag",
+        hypothesis="indicator lag bars should shift computed factor values",
+    )
+    spec.universe.symbols = ["AAA"]
+    spec.universe.point_in_time = True
+    spec.benchmark.symbols = []
+    spec.signal.indicators = {
+        "mom_1": IndicatorDef(type="NdayReturn", params={"column": "close", "period": 1}, lag_bars=1)
+    }
+    spec.portfolio.type = "TopNRanking"
+    spec.portfolio.params = {"score_col": "mom_1", "n": 1, "filter_negative": False}
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-04"]
+    spec.validation.required_oos = False
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    dates = pd.bdate_range("2024-01-02", periods=3, tz="UTC")
+    pd.DataFrame(
+        {
+            "open": [100.0, 110.0, 121.0],
+            "high": [100.0, 110.0, 121.0],
+            "low": [100.0, 110.0, 121.0],
+            "close": [100.0, 110.0, 121.0],
+            "volume": [1000, 1000, 1000],
+        },
+        index=dates,
+    ).to_parquet(data_dir / "AAA.parquet")
+
+    result, _run_dir = compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+    assert pd.isna(result.mktdata["AAA"]["mom_1"].iloc[1])
+    assert result.mktdata["AAA"]["mom_1"].iloc[2] == pytest.approx(np.log(110.0) - np.log(100.0))
+
+
+def test_compile_run_applies_data_filters_before_optimization(tmp_path) -> None:
+    spec = StrategySpec.template(
+        strategy_id="runtime_data_filters",
+        hypothesis="data filters should constrain the tradable bar set before optimization",
+    )
+    spec.universe.symbols = ["AAA", "BBB"]
+    spec.universe.point_in_time = True
+    spec.benchmark.symbols = []
+    spec.data.required_columns.append("is_st")
+    spec.data.filters.exclude_st = True
+    spec.validation.train_period = []
+    spec.validation.test_period = ["2024-01-02", "2024-01-05"]
+    spec.validation.required_oos = False
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    dates = pd.bdate_range("2024-01-02", periods=4, tz="UTC")
+    for symbol, is_st in (("AAA", False), ("BBB", True)):
+        pd.DataFrame(
+            {
+                "open": [100.0, 101.0, 102.0, 103.0],
+                "high": [101.0, 102.0, 103.0, 104.0],
+                "low": [99.0, 100.0, 101.0, 102.0],
+                "close": [100.0, 101.0, 102.0, 103.0],
+                "volume": [1000, 1000, 1000, 1000],
+                "is_st": [is_st, is_st, is_st, is_st],
+            },
+            index=dates,
+        ).to_parquet(data_dir / f"{symbol}.parquet")
+
+    result, _run_dir = compile_run(spec, data_dir=str(data_dir), out_dir=tmp_path / "runs")
+
+    assert result.snapshots[0].target_weights == {"AAA": 1.0}
 
 
 def test_compile_run_records_resolved_default_data_dir(tmp_path, monkeypatch) -> None:
@@ -3063,6 +3473,171 @@ def test_compile_universe_rejects_unsupported_universe_type() -> None:
 
     with pytest.raises(ValueError, match="Unsupported universe.type 'filter'"):
         compile_universe(spec)
+
+
+def test_compile_universe_uses_index_constituent_snapshot() -> None:
+    spec = StrategySpec.template(strategy_id="index_universe_compile", hypothesis="index snapshots compile locally")
+    spec.universe.type = "index"
+    spec.universe.index_key = "csi300"
+    spec.universe.symbols = ["600519.SH", "000001.SZ"]
+
+    universe = compile_universe(spec)
+
+    assert tuple(universe.symbols) == ("600519.SH", "000001.SZ")
+
+
+def test_build_optimizer_wraps_portfolio_constraints() -> None:
+    spec = StrategySpec.template(strategy_id="constraint_wrapper", hypothesis="constraints adjust optimizer weights")
+    spec.signal.indicators = {"score": IndicatorDef(type="SMA", params={"period": 2})}
+    spec.portfolio.type = "TopNRanking"
+    spec.portfolio.params = {"score_col": "score", "n": 2, "filter_negative": False}
+    spec.portfolio.constraints.max_weight = 0.4
+    spec.portfolio.constraints.cash_reserve = 0.2
+    optimizer = _build_optimizer(spec)
+    dates = pd.date_range("2024-01-01", periods=2, tz="UTC")
+
+    weights = optimizer.optimize(
+        signals={},
+        indicators={
+            "AAA": pd.DataFrame({"score": [1.0, 9.0]}, index=dates),
+            "BBB": pd.DataFrame({"score": [1.0, 1.0]}, index=dates),
+        },
+    )
+
+    assert weights["AAA"] == pytest.approx(0.4)
+    assert weights["BBB"] == pytest.approx(0.1)
+    assert weights["CASH"] == pytest.approx(0.5)
+
+
+def test_max_holdings_rule_batch_cap_preserves_active_existing_holding() -> None:
+    spec = StrategySpec.template(
+        strategy_id="preserve_existing_holding",
+        hypothesis="active holdings consume batch slots before new candidates",
+    )
+    spec.portfolio.rules["max_holdings"] = PortfolioRuleDef(
+        type="MaxHoldingsRule",
+        params={"max_holdings": 1},
+    )
+    optimizer = _build_optimizer(spec)
+    set_held_symbols = getattr(optimizer, "set_held_symbols", None)
+    if callable(set_held_symbols):
+        set_held_symbols(["BBB"])
+    bar = pd.DataFrame({"close": [100.0]})
+
+    weights = optimizer.optimize(
+        signals={"AAA": bar, "BBB": bar},
+        indicators={},
+    )
+
+    assert weights == {"BBB": 0.5, "CASH": 0.5}
+
+
+def test_max_holdings_rule_batch_cap_allows_held_symbol_exit() -> None:
+    spec = StrategySpec.template(
+        strategy_id="allow_held_exit",
+        hypothesis="holdings absent from the target remain eligible to exit",
+    )
+    spec.portfolio.rules["max_holdings"] = PortfolioRuleDef(
+        type="MaxHoldingsRule",
+        params={"max_holdings": 1},
+    )
+    optimizer = _build_optimizer(spec)
+    set_held_symbols = getattr(optimizer, "set_held_symbols", None)
+    if callable(set_held_symbols):
+        set_held_symbols(["BBB"])
+    bar = pd.DataFrame({"close": [100.0]})
+
+    weights = optimizer.optimize(signals={"AAA": bar}, indicators={})
+
+    assert weights == {"AAA": 1.0, "CASH": 0.0}
+
+
+def test_max_holdings_equal_weight_tie_break_is_symbol_deterministic() -> None:
+    spec = StrategySpec.template(
+        strategy_id="deterministic_max_holdings",
+        hypothesis="equal weight cap selection must not depend on input mapping order",
+    )
+    spec.portfolio.constraints.max_holdings = 1
+    bar = pd.DataFrame({"close": [100.0]})
+
+    forward = _build_optimizer(spec).optimize(
+        signals={"AAA": bar, "BBB": bar},
+        indicators={},
+    )
+    reversed_order = _build_optimizer(spec).optimize(
+        signals={"BBB": bar, "AAA": bar},
+        indicators={},
+    )
+
+    assert forward == reversed_order == {"AAA": 0.5, "CASH": 0.5}
+
+
+def test_build_runtime_rules_rejects_combined_calendar_and_interval_rebalance_controls() -> None:
+    spec = StrategySpec.template(
+        strategy_id="conflicting_runtime_rebalance",
+        hypothesis="runtime must not combine calendar and interval hold rules",
+    )
+    spec.execution.rebalance.frequency = "weekly"
+    spec.execution.rebalance.schedule = "week_start"
+    spec.execution.rebalance.interval_days = 5
+
+    with pytest.raises(ValueError, match="calendar schedule cannot be combined"):
+        compiler._build_runtime_rules(spec)
+
+
+def test_weekly_calendar_rebalance_allows_once_in_holiday_shortened_week() -> None:
+    spec = StrategySpec.template(
+        strategy_id="holiday_shortened_week",
+        hypothesis="weekly calendar rebalance uses the first observed session",
+    )
+    spec.execution.rebalance.frequency = "weekly"
+    spec.execution.rebalance.schedule = "week_start"
+    rules = compiler._build_runtime_rules(spec)
+    portfolio = Portfolio(cash=Decimal("100000"))
+
+    assert [rule.name for rule in rules] == ["CalendarRebalanceRule"]
+    rule = rules[0]
+    tuesday = pd.Series({"close": 100.0}, name=pd.Timestamp("2024-01-02"))
+    friday = pd.Series({"close": 101.0}, name=pd.Timestamp("2024-01-05"))
+    next_monday = pd.Series({"close": 102.0}, name=pd.Timestamp("2024-01-08"))
+
+    assert rule.evaluate("SPY", tuesday, portfolio).hold is False
+    assert rule.evaluate("SPY", friday, portfolio).hold is True
+    assert rule.evaluate("SPY", next_monday, portfolio).hold is False
+
+
+def test_portfolio_min_weight_is_enforced_after_cash_reserve_scaling() -> None:
+    spec = StrategySpec.template(
+        strategy_id="minimum_after_reserve",
+        hypothesis="cash reserve must not create positions below the declared minimum",
+    )
+    spec.portfolio.constraints.min_weight = 0.2
+    spec.portfolio.constraints.cash_reserve = 0.5
+    optimizer = _build_optimizer(spec)
+    bar = pd.DataFrame({"close": [1.0]})
+
+    weights = optimizer.optimize(
+        signals={symbol: bar for symbol in ("AAA", "BBB", "CCC", "DDD")},
+        indicators={},
+    )
+
+    assert weights == {"CASH": 1.0}
+
+
+def test_portfolio_min_weight_includes_float_equal_boundary_after_cash_reserve_scaling() -> None:
+    spec = StrategySpec.template(
+        strategy_id="minimum_float_boundary",
+        hypothesis="an inclusive minimum survives floating point reserve scaling",
+    )
+    spec.portfolio.constraints.min_weight = 0.2
+    spec.portfolio.constraints.cash_reserve = 0.8
+    optimizer = _build_optimizer(spec)
+    bar = pd.DataFrame({"close": [1.0]})
+
+    weights = optimizer.optimize(signals={"AAA": bar}, indicators={})
+
+    assert weights["AAA"] == pytest.approx(0.2)
+    assert weights["CASH"] == pytest.approx(0.8)
 
 
 def test_compile_strategy_excludes_universe_from_strategy_body() -> None:

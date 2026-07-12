@@ -11,7 +11,7 @@ import copy
 import logging
 import time as _time
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -73,6 +73,7 @@ class Engine:
         lot_size: int = 1,
         cash_annual_return: float = 0.0,
         data_start: str | None = None,
+        data_filters: Any | None = None,
     ) -> None:
         """Initialize engine state and run vectorized phases.
 
@@ -102,6 +103,8 @@ class Engine:
         data_start : str | None
             Start date for loading market data (for indicator warmup).
             If None, uses ``start``.
+        data_filters : object | None
+            Optional SPEC data filters applied before portfolio optimization.
         """
         self._strategy = strategy
         self._broker = broker
@@ -109,6 +112,7 @@ class Engine:
         self._rules: list[Rule] = _clone_rules(rules if rules is not None else getattr(strategy, "rules", []))
         self._lot_size = lot_size
         self._cash_annual_return = cash_annual_return
+        self._data_filters = data_filters
         reset_optimizer = getattr(strategy.portfolio, "reset", None)
         if callable(reset_optimizer):
             reset_optimizer()
@@ -199,19 +203,25 @@ class Engine:
 
         for ind_name, (indicator, params) in all_indicators.items():
             t0 = _time.perf_counter()
-            for symbol in self._universe.symbols:
-                for dep_col in getattr(indicator, "depends_on", ()):
-                    if dep_col not in self._mktdata[symbol].columns:
-                        logger.warning(
-                            "Indicator '%s' depends on column '%s' which does "
-                            "not yet exist in mktdata. Ensure the producing "
-                            "indicator is registered first.",
-                            ind_name,
-                            dep_col,
-                        )
-                self._mktdata[symbol][ind_name] = indicator.compute(
-                    self._mktdata[symbol], **params,
-                )
+            compute_cross_section = getattr(indicator, "compute_cross_section", None)
+            if callable(compute_cross_section):
+                outputs = compute_cross_section(self._mktdata, **params)
+                for symbol in self._universe.symbols:
+                    self._mktdata[symbol][ind_name] = outputs[symbol]
+            else:
+                for symbol in self._universe.symbols:
+                    for dep_col in getattr(indicator, "depends_on", ()):
+                        if dep_col not in self._mktdata[symbol].columns:
+                            logger.warning(
+                                "Indicator '%s' depends on column '%s' which does "
+                                "not yet exist in mktdata. Ensure the producing "
+                                "indicator is registered first.",
+                                ind_name,
+                                dep_col,
+                            )
+                    self._mktdata[symbol][ind_name] = indicator.compute(
+                        self._mktdata[symbol], **params,
+                    )
             elapsed = (_time.perf_counter() - t0) * 1000
             if tracer:
                 sample = self._mktdata[self._universe.symbols[0]][ind_name]
@@ -298,6 +308,12 @@ class Engine:
         fill_due_market_orders = getattr(broker, "fill_due_market_orders", None)
         if callable(fill_due_market_orders):
             _sync_broker_cash(broker, portfolio)
+            _cancel_tradability_blocked_market_orders(
+                broker=broker,
+                mktdata=mktdata,
+                date=date,
+                filters=self._data_filters,
+            )
             fill_due_market_orders(mktdata, date)
         _apply_fills(portfolio, broker.get_fills(), self._trades, strategy.portfolio)
 
@@ -307,6 +323,13 @@ class Engine:
         for s in universe.symbols:
             if date in mktdata[s].index:
                 sliced = mktdata[s].loc[:date]
+                if _row_filtered_from_optimization(
+                    symbol=s,
+                    row=sliced.iloc[-1],
+                    portfolio=portfolio,
+                    filters=self._data_filters,
+                ):
+                    continue
                 signals_data[s] = sliced
                 indicators_data[s] = sliced
 
@@ -322,14 +345,25 @@ class Engine:
             ]
             set_pending_buy_symbols(pending_buy_symbols)
         target_weights = strategy.portfolio.optimize(signals_data, indicators_data)
-        optimizer_hold = bool(getattr(strategy.portfolio, "skip_rebalance", False))
         raw_target_weights = dict(target_weights)
+        policy_reasons: dict[str, list[str]] = {}
+        target_weights = _apply_limit_trade_policies(
+            target_weights,
+            filters=self._data_filters,
+            mktdata=mktdata,
+            date=date,
+            portfolio=portfolio,
+            prices=bar_prices,
+            reasons=policy_reasons,
+        )
+        optimizer_hold = bool(getattr(strategy.portfolio, "skip_rebalance", False))
 
         # ── Step 3: Pre-trade rules ───────────────────────────────────
         rule_hold = False
         rule_weight_override = False
         rule_weight_overrides: dict[str, float] = {}
         rule_reasons: dict[str, list[str]] = {}
+        batch_rules: list[Any] = []
 
         def record_rule_reason(symbol: str, reason: str) -> None:
             if not reason:
@@ -337,6 +371,9 @@ class Engine:
             rule_reasons.setdefault(symbol, []).append(reason)
 
         for rule in self._rules:
+            if callable(getattr(rule, "evaluate_batch", None)):
+                batch_rules.append(rule)
+                continue
             for symbol in universe.symbols:
                 if date not in mktdata[symbol].index:
                     continue
@@ -354,6 +391,44 @@ class Engine:
                 if result.constraints is not None:
                     for constrained_symbol in result.constraints:
                         record_rule_reason(constrained_symbol, result.reason)
+
+        pending_market_orders = [
+            managed.order
+            for managed in broker.get_open_orders()
+            if managed.order.order_type == "market"
+        ]
+        for rule in batch_rules:
+            result = rule.evaluate_batch(
+                dict(target_weights),
+                portfolio,
+                pending_orders=pending_market_orders,
+            )
+            if result.hold:
+                rule_hold = True
+                record_rule_reason("__all__", result.reason)
+            if result.weights is not None:
+                # Batch-rule weights are the complete constrained target.
+                previous_weights = target_weights
+                target_weights = dict(result.weights)
+                changed_symbols = {
+                    symbol
+                    for symbol in set(previous_weights) | set(target_weights)
+                    if previous_weights.get(symbol, 0.0) != target_weights.get(symbol, 0.0)
+                }
+                actionable_symbols = changed_symbols | {
+                    symbol
+                    for symbol, weight in target_weights.items()
+                    if symbol != "CASH" and weight > 0 and symbol not in portfolio.positions
+                }
+                rule_weight_override = True
+                rule_weight_overrides.update(
+                    {symbol: target_weights.get(symbol, 0.0) for symbol in actionable_symbols}
+                )
+                for target_symbol in changed_symbols - {"CASH"}:
+                    record_rule_reason(target_symbol, result.reason)
+            if result.constraints is not None:
+                for constrained_symbol in result.constraints:
+                    record_rule_reason(constrained_symbol, result.reason)
 
         def current_portfolio_weights() -> dict[str, float]:
             total_value = portfolio.total_value(bar_prices)
@@ -449,6 +524,15 @@ class Engine:
             adjusted_weights["CASH"] = max(0.0, 1.0 - invested_weight)
         else:
             adjusted_weights = dict(target_weights)
+        adjusted_weights = _apply_limit_trade_policies(
+            adjusted_weights,
+            filters=self._data_filters,
+            mktdata=mktdata,
+            date=date,
+            portfolio=portfolio,
+            prices=bar_prices,
+            reasons=policy_reasons,
+        )
 
         # ── Step 4: Trading algorithm (skip if hold) ──────────────────
         if not hold:
@@ -521,6 +605,12 @@ class Engine:
         _apply_fills(portfolio, broker.get_fills(), self._trades, strategy.portfolio)
 
         _sync_broker_cash(broker, portfolio)
+        _cancel_tradability_blocked_market_orders(
+            broker=broker,
+            mktdata=mktdata,
+            date=date,
+            filters=self._data_filters,
+        )
         broker.on_bar_close(mktdata, date)
         _apply_fills(portfolio, broker.get_fills(), self._trades, strategy.portfolio)
 
@@ -556,11 +646,23 @@ class Engine:
                 adjusted_weights[sym] = float(held_weight)
             if cash_weight:
                 adjusted_weights["CASH"] = cash_weight
+            adjusted_weights = _apply_limit_trade_policies(
+                adjusted_weights,
+                filters=self._data_filters,
+                mktdata=mktdata,
+                date=date,
+                portfolio=portfolio,
+                prices=bar_prices,
+                reasons=policy_reasons,
+            )
             for sym, target_ratio in exit_targets.items():
                 if sym not in portfolio.positions:
                     continue
                 pos = portfolio.positions[sym]
-                target_shares = int(pos.shares * target_ratio)
+                current_weight = float(held_weights.get(sym, 0.0))
+                retained_weight = float(adjusted_weights.get(sym, 0.0))
+                effective_ratio = retained_weight / current_weight if current_weight > 0 else float(target_ratio)
+                target_shares = int(pos.shares * effective_ratio)
                 sell_shares = pos.shares - target_shares
                 if sell_shares > 0:
                     cancel_market_orders = getattr(broker, "cancel_market_orders", None)
@@ -579,6 +681,12 @@ class Engine:
 
             # ── Step 8: Broker executes exit orders ───────────────────
             _sync_broker_cash(broker, portfolio)
+            _cancel_tradability_blocked_market_orders(
+                broker=broker,
+                mktdata=mktdata,
+                date=date,
+                filters=self._data_filters,
+            )
             broker.on_bar_close(mktdata, date)
             _apply_fills(portfolio, broker.get_fills(), self._trades, strategy.portfolio)
 
@@ -609,6 +717,12 @@ class Engine:
             for sym, pos in portfolio.positions.items()
         }
         tv = float(portfolio.total_value(prices))
+        combined_reasons = {symbol: list(reasons) for symbol, reasons in rule_reasons.items()}
+        for symbol, reasons in policy_reasons.items():
+            target = combined_reasons.setdefault(symbol, [])
+            for reason in reasons:
+                if reason not in target:
+                    target.append(reason)
         self._snapshots.append(
             BarSnapshot(
                 date=date,
@@ -617,7 +731,7 @@ class Engine:
                 positions=pos_snapshot,
                 cash=float(portfolio.cash),
                 total_value=tv,
-                rule_reasons={symbol: "; ".join(reasons) for symbol, reasons in rule_reasons.items()},
+                rule_reasons={symbol: "; ".join(reasons) for symbol, reasons in combined_reasons.items()},
             )
         )
 
@@ -636,6 +750,7 @@ class Engine:
         lot_size: int = 1,
         cash_annual_return: float = 0.0,
         data_start: str | None = None,
+        data_filters: Any | None = None,
     ) -> RunResult:
         """Run the strategy pipeline.
 
@@ -666,6 +781,8 @@ class Engine:
         data_start : str | None
             Start date for loading market data (for indicator warmup).
             If None, uses ``start``.
+        data_filters : object | None
+            Optional SPEC data filters applied before portfolio optimization.
         """
         self.setup(
             strategy=strategy, market=market, broker=broker,
@@ -674,6 +791,7 @@ class Engine:
             universe=universe,
             lot_size=lot_size, cash_annual_return=cash_annual_return,
             data_start=data_start,
+            data_filters=data_filters,
         )
 
         if run_through == "indicator":
@@ -707,6 +825,246 @@ class Engine:
             self._tracer.on_run_end("ok")
 
         return self.result
+
+
+def _row_filtered_from_optimization(
+    symbol: str,
+    row: pd.Series,
+    portfolio: Portfolio,
+    filters: Any | None,
+) -> bool:
+    if filters is None:
+        return False
+    if getattr(filters, "exclude_st", False) and _row_truthy(row, "is_st"):
+        return True
+    if getattr(filters, "exclude_suspended", False) and _row_truthy(row, "is_suspended") and symbol not in portfolio.positions:
+        return True
+    listed_days = int(getattr(filters, "exclude_new_listed_days", 0) or 0)
+    if listed_days > 0 and _row_number(row, "listed_days") < listed_days:
+        return True
+    if getattr(filters, "limit_up_policy", "none") == "exclude_buy":
+        if _row_truthy(row, "is_limit_up") and symbol not in portfolio.positions:
+            return True
+    return False
+
+
+def _apply_limit_trade_policies(
+    target_weights: dict[str, float],
+    *,
+    filters: Any | None,
+    mktdata: dict[str, pd.DataFrame],
+    date: pd.Timestamp,
+    portfolio: Portfolio,
+    prices: dict[str, Decimal],
+    reasons: dict[str, list[str]] | None = None,
+) -> dict[str, float]:
+    if filters is None:
+        return target_weights
+    suspension_policy = _effective_suspension_policy(filters)
+    if (
+        getattr(filters, "limit_up_policy", "none") == "none"
+        and getattr(filters, "limit_down_policy", "none") == "none"
+        and suspension_policy == "none"
+    ):
+        return target_weights
+
+    adjusted = dict(target_weights)
+    changed = False
+    locked_symbols: set[str] = set()
+    total_value = portfolio.total_value(prices)
+    if total_value <= 0:
+        return adjusted
+
+    symbols_with_current_row: set[str] = set()
+    for symbol, frame in mktdata.items():
+        if date not in frame.index:
+            continue
+        symbols_with_current_row.add(symbol)
+        row = frame.loc[date]
+        current_weight = _position_weight(symbol, portfolio, prices, total_value)
+        desired_weight = float(adjusted.get(symbol, 0.0))
+        if suspension_policy == "hold_existing" and _row_truthy(row, "is_suspended"):
+            locked_symbols.add(symbol)
+            _record_policy_reason(reasons, symbol, "tradability_suspended_hold_existing")
+            if desired_weight != current_weight:
+                adjusted[symbol] = current_weight
+            changed = True
+            continue
+        if getattr(filters, "limit_up_policy", "none") == "exclude_buy" and _row_truthy(row, "is_limit_up"):
+            if desired_weight > current_weight:
+                adjusted[symbol] = current_weight
+                locked_symbols.add(symbol)
+                _record_policy_reason(reasons, symbol, "tradability_limit_up_buy_blocked")
+                changed = True
+        if getattr(filters, "limit_down_policy", "none") == "exclude_sell" and _row_truthy(row, "is_limit_down"):
+            if desired_weight < current_weight:
+                adjusted[symbol] = current_weight
+                locked_symbols.add(symbol)
+                _record_policy_reason(reasons, symbol, "tradability_limit_down_sell_blocked")
+                changed = True
+
+    if suspension_policy == "hold_existing":
+        for symbol in portfolio.positions:
+            if symbol in symbols_with_current_row or symbol not in prices:
+                continue
+            current_weight = _position_weight(symbol, portfolio, prices, total_value)
+            if current_weight <= 0:
+                continue
+            locked_symbols.add(symbol)
+            _record_policy_reason(reasons, symbol, "tradability_missing_bar_hold_existing")
+            if float(adjusted.get(symbol, 0.0)) != current_weight:
+                adjusted[symbol] = current_weight
+            changed = True
+
+    if not changed:
+        return target_weights
+    locked_weight = sum(max(0.0, float(adjusted.get(symbol, 0.0))) for symbol in locked_symbols)
+    remaining_capacity = max(0.0, 1.0 - locked_weight)
+    scalable_symbols = [
+        symbol
+        for symbol, weight in adjusted.items()
+        if symbol != "CASH" and symbol not in locked_symbols and float(weight) > 0.0
+    ]
+    scalable_weight = sum(float(adjusted[symbol]) for symbol in scalable_symbols)
+    if scalable_weight > remaining_capacity:
+        scale = remaining_capacity / scalable_weight if scalable_weight > 0 else 0.0
+        for symbol in scalable_symbols:
+            scaled_weight = float(adjusted[symbol]) * scale
+            if scaled_weight != float(adjusted[symbol]):
+                _record_policy_reason(reasons, symbol, "tradability_scaled_for_locked_positions")
+            adjusted[symbol] = scaled_weight
+    invested_weight = sum(max(0.0, float(weight)) for symbol, weight in adjusted.items() if symbol != "CASH")
+    adjusted["CASH"] = max(0.0, 1.0 - invested_weight)
+    return adjusted
+
+
+def _record_policy_reason(reasons: dict[str, list[str]] | None, symbol: str, reason: str) -> None:
+    if reasons is None:
+        return
+    reasons.setdefault(symbol, []).append(reason)
+
+
+def _cancel_tradability_blocked_market_orders(
+    *,
+    broker: Broker,
+    mktdata: dict[str, pd.DataFrame],
+    date: pd.Timestamp,
+    filters: Any | None,
+) -> None:
+    if filters is None:
+        return
+    get_open_orders = getattr(broker, "get_open_orders", None)
+    if not callable(get_open_orders):
+        return
+    suspension_policy = _effective_suspension_policy(filters)
+    if (
+        getattr(filters, "limit_up_policy", "none") == "none"
+        and getattr(filters, "limit_down_policy", "none") == "none"
+        and suspension_policy == "none"
+    ):
+        return
+
+    current_date = pd.Timestamp(date).date()
+    for managed in get_open_orders():
+        order = getattr(managed, "order", None)
+        if order is None or getattr(managed, "status", "") != "open":
+            continue
+        if getattr(order, "order_type", "") != "market":
+            continue
+        if not _is_due_market_order_on_date(managed, current_date):
+            continue
+        symbol = order.symbol
+        frame = mktdata.get(symbol)
+        if frame is None or date not in frame.index:
+            continue
+        row = frame.loc[date]
+        reason = ""
+        if suspension_policy == "hold_existing" and _row_truthy(row, "is_suspended"):
+            reason = "tradability_suspended_pending_order_blocked"
+        elif (
+            order.side == "BUY"
+            and getattr(filters, "limit_up_policy", "none") == "exclude_buy"
+            and _row_truthy(row, "is_limit_up")
+        ):
+            reason = "tradability_limit_up_pending_buy_blocked"
+        elif (
+            order.side == "SELL"
+            and getattr(filters, "limit_down_policy", "none") == "exclude_sell"
+            and _row_truthy(row, "is_limit_down")
+        ):
+            reason = "tradability_limit_down_pending_sell_blocked"
+        if reason:
+            _cancel_managed_market_order(broker, managed, reason)
+
+
+def _cancel_managed_market_order(broker: Broker, managed: Any, reason: str) -> None:
+    cancel_market_order = getattr(broker, "cancel_market_order", None)
+    if callable(cancel_market_order):
+        cancel_market_order(managed, reason=reason)
+        if getattr(managed, "status", "") != "open":
+            return
+    managed.status = "canceled"
+    managed.status_reason = reason
+
+
+def _is_due_market_order_on_date(managed: Any, current_date: Any) -> bool:
+    due_at = getattr(managed, "due_at", None)
+    if due_at:
+        try:
+            return pd.Timestamp(due_at).date() == current_date
+        except (TypeError, ValueError):
+            return False
+    created_at = getattr(managed, "created_at", None)
+    if not created_at:
+        return False
+    try:
+        return pd.Timestamp(created_at).date() < current_date
+    except (TypeError, ValueError):
+        return False
+
+
+def _effective_suspension_policy(filters: Any | None) -> str:
+    if filters is None:
+        return "none"
+    policy = getattr(filters, "suspension_policy", "none")
+    if policy != "none":
+        return policy
+    if getattr(filters, "exclude_suspended", False):
+        return "hold_existing"
+    return "none"
+
+
+def _position_weight(
+    symbol: str,
+    portfolio: Portfolio,
+    prices: dict[str, Decimal],
+    total_value: Decimal,
+) -> float:
+    position = portfolio.positions.get(symbol)
+    price = prices.get(symbol)
+    if position is None or price is None or total_value <= 0:
+        return 0.0
+    return float((Decimal(position.shares) * price) / total_value)
+
+
+def _row_truthy(row: pd.Series, column: str) -> bool:
+    if column not in row:
+        return False
+    value = row[column]
+    if pd.isna(value):
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "t", "yes", "y"}
+    return bool(value)
+
+
+def _row_number(row: pd.Series, column: str) -> float:
+    if column not in row or pd.isna(row[column]):
+        return 0.0
+    try:
+        return float(row[column])
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _signal_output_summary(sample: pd.Series) -> dict[str, object]:
