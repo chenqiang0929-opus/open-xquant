@@ -28,7 +28,7 @@ vs 基准 +7.22% / 0.423 / **-32.8%**)——**收益接近、回撤差一倍**�
 ## 目录
 
 ```
-ETF_research_summary_for_stock_comparison.md   研究记录主文档(54节)
+ETF_research_summary_for_stock_comparison.md   研究记录主文档(55节)
 data_prep/         上游数据构建(产出下面两个输入)
 breakout_system/   突破+止损系统本体(第41-42节)
 rps_pool_study/    RPS动量股池 + 双增长过滤 + 广度择时(第43-47节)
@@ -60,6 +60,8 @@ results/           所有表格数字的来源 CSV;results/logs/ 是原始运行
 | `base_pattern_detector.py` | **欧奈尔基底形态检测器**(杯柄/平底/双底,原书数值) | 54 |
 | `base_pattern_cases.py` / `_cases2.py` | 检测器人工核对(先在 t\* 上、再在真实突破日上) | 54 |
 | `base_pattern_attrib.py` / `base_pattern_trade.py` | 基底形态的归因 / 交易检验 | 54 |
+| `buypoint_and_exit.py` | 买点 2×2(52周新高/量能确认)+ MA20 止盈四变体 | 55 |
+| `pocket_pivot.py` | **口袋支点买点**(双方都没测过的那个) | 55 |
 | `oneil_real_thresholds.py` / `oneil_sampling_variance.py` | 欧奈尔真实阈值、抽样方差 | 50 |
 | `composite3_replication.py` / `rebalance_bonus_study.py` / `ma50_reconcile.py` | 复合因子复现、再平衡收益、MA50 对账 | 48-49 |
 
