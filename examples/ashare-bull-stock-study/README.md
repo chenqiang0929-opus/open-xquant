@@ -28,7 +28,7 @@ vs 基准 +7.22% / 0.423 / **-32.8%**)——**收益接近、回撤差一倍**�
 ## 目录
 
 ```
-ETF_research_summary_for_stock_comparison.md   研究记录主文档(57节)
+ETF_research_summary_for_stock_comparison.md   研究记录主文档(58节)
 data_prep/         上游数据构建(产出下面两个输入)
 breakout_system/   突破+止损系统本体(第41-42节)
 rps_pool_study/    RPS动量股池 + 双增长过滤 + 广度择时(第43-47节)
