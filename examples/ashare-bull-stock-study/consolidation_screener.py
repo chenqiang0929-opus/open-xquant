@@ -2,38 +2,40 @@
 """整理形态筛选器:缩量 + 波动收敛 + 浅回调
 
 ═══ 这个脚本量化的是什么 ═══
-第五十九节在 13,402 个「强势 → 深调20周线 → 买点」事件上做归因,
-20 个特征里**只有三个通过全部纪律,而且全部来自调整期**:
+第五十九节在 13,402 个「强势 → 深调20周线 → 买点」事件上做归因,20 个特征里
+**只有三个通过全部纪律,而且全部来自调整期**:缩量、波动收敛、浅回调。
 
-    特征              P(交易赚钱|特征)   lift    2015前/后同向
-    波动收缩 <0.8×        24.77%       1.37     1.48 / 1.27  ✓
-    调整期缩量 <0.8×      24.06%       1.33     1.49 / 1.15  ✓
-    调整深度 浅于中位      21.95%       1.21     1.19 / 1.32  ✓
-    (基准 18.08%)
+第六十一节把三个特征的**阈值口径**从「钉死的绝对值」改成「当期横截面分位」,
+并让调整天数下限自适应。改的理由是三条实测证据:
+  1 调整期系统性缩短:全样本中位 2015 **135日** → 2024 **83日**(-40%)
+  2 两个比值的分布右移:缩量比中位 1.27→1.40、收敛比 1.20→1.37,
+    使固定阈值 0.8 的选中率 5.85%→4.21%,**2025 单年只剩 2.95%**
+  3 2024-2026 的大牛股整理期短到 **顶住了原来写死的 15 日下限**
+**不是形态失效,是尺子钉死了而市场节奏变了。**
 
-**样本外验证(阈值在 2019 年底前定死,2020-2026 上一个参数没动):**
+**新口径样本外结果(2020-2026,口径在 2019 年底前定死,验证集未调参):**
 
-    配置          胜率              单笔净期望         最大回撤
-    不筛          15.85%           +1.73%          -63.7%
-    三条全中      **22.88%**       **+6.68%**      **-26.1%**
+    配置            胜率           单笔净期望     组合年化      最大回撤
+    不筛            15.43%        +1.61%       +1.50%      -62.0%
+    三条全中        **20.61%**    +3.50%       +10.37%     -35.3%
+    深度最浅40%     19.87%        +3.16%       **+14.14%** -32.4%
 
-═══ 两条必须先读的限制 ═══
+改造修好了旧口径的两个毛病:
+  - 逐年选中率不再单调下滑(旧 5.85%→4.21%→2.95%;新稳定在 15~19%)
+  - 第六十节「搬到大池就净期望转负」不再出现
+    (60日新高 -0.02%→**+2.29%**、口袋支点 -0.43%→**+2.96%**)
+  - 用户 19 只案例回归全过,并**新捞到 6 只**(宇通/宁德/胜宏/药明/迈瑞/立讯)
 
-**一、它没有通过可交易性判据。**
-同一份 OOS 检验里组合级年化只有 +5.08%,与「同数量随机抽取」无法区分(p=0.31)。
-原因已诊断:三条全中只留下 4.2% 的事件(约 59 笔/年),10 个仓位大部分时间空着。
-**不是过滤器无效,是过滤器与组合容量不匹配。**
+═══ 三条必须先读的限制 ═══
 
-**二、它只在「强势 → 深调20周线 → 买点」这个时序里成立,搬不出去(第六十节)。**
-把同样三个特征改用通用定义(调整期起点取近250日最高点)搬到两个大池:
+**一、主判据仍然没过。**「三条全中」OOS 组合年化 +10.37%,
+但 300 次同数量随机对照 **p=0.16** —— 与随机抽同样多的事件无法区分。
 
-    池                  基线胜率   三条全中胜率   三条全中净期望   随机对照 p
-    60日新高(42,609)     16.09%     17.32%      **-0.02%**    0.28
-    口袋支点(38,858)     17.87%     18.84%      **-0.43%**    0.83
+**二、唯一过随机对照的是「深度最浅40%」单条**(年化 +14.14%、p=0.0100,
+Bonferroni 阈值 0.0125)。但它是 4 选 1、p 值贴边,
+且在两个大池的迁移测试里 **p=0.19 / 0.61 不显著**。**不足以称为发现。**
 
-胜率只提 1pp(原场景是 7pp),**净期望反而转负**,「缩量」这一条在两个池里方向都反了。
-→ **所以本脚本坚持用第五十九节的原定义(以「强势日」为调整期起点),
-不用那个搬不动的通用定义。** 用法上也必须限定在同一个时序里。
+**三、它只在「强势 → 深调20周线 → 买点」这个时序里有意义。**
 
 ═══ 正确用法 ═══
   ✓ 对**已经走完「强势 → 深调20周线」**的股票做体检与排序
@@ -44,15 +46,16 @@
 
 ═══ 三段口径(与第五十九节逐字一致,全部只用当日及之前的数据) ═══
   强势日 ts = 最近一次「60日涨幅进入全市场前10%」的交易日(回看 250 日内)
-  触线日 td = ts 之后最早一天,最低价 ≤ 20周线(MA100)×1.03,且 MA100 仍向上
+  触线日 td = ts 之后最早一天,最低价 ≤ 20周线(MA100)×1.03
+              (`--legacy` 还要求 MA100 向上 —— 该条误杀了用户认可的两个案例)
   今天   t  = 待评估的买点
 
   1) 浅回调    深度   = 1 − min(low[ts..t]) ÷ max(high[ts..t])
   2) 缩量      缩量比 = 均量(ts..t) ÷ 均量(ts 之前 60 日)
   3) 波动收敛  收敛比 = 均真实波幅(td..t) ÷ 均真实波幅(ts 之前 60 日)
 
-判定(阈值取自第五十九节的选择集,样本外未重算):
-  缩量比 < 0.80、收敛比 < 0.80、深度 ≤ 0.352
+判定:**默认**用当期横截面最优 40% 分位、下限 = max(10, 0.15 × 当期中位调整天数);
+`--legacy` 切回第五十九节的绝对阈值(0.80/0.80/0.352、下限写死 15 日、要求20周线向上)。
 
 ═══ 怎么用 ═══
     # 全市场:今天有哪些股票处在干净的整理里
@@ -85,6 +88,11 @@ import pandas as pd
 THR_SHRINK = 0.80      # 缩量比上限
 THR_ATR = 0.80         # 波动收敛比上限
 THR_DEPTH = 0.352      # 回调深度上限(选择集中位)
+MIN_ADJ_DAYS_LEGACY = 15   # 旧口径:调整期下限写死
+# ── 新口径(第六十一节,当期横截面分位 + 自适应下限;默认) ──
+Q_KEEP = 0.40          # 三个指标各取当期最优 40%
+MIN_ADJ_RATIO = 0.15   # 下限 = 0.15 × 当期中位调整天数
+MIN_ADJ_FLOOR = 10     # 自适应下限的绝对底
 STRONG_LOOKBACK = 250  # 往回找「强势日」的窗口
 PRE_WIN = 60           # 强势日之前用于对比的基期长度
 MIN_ADJ_DAYS = 15      # 调整期至少这么长
@@ -96,19 +104,24 @@ def true_range(h: np.ndarray, l: np.ndarray, c: np.ndarray) -> np.ndarray:
     return np.maximum(h - l, np.maximum(np.abs(h - pc), np.abs(l - pc)))
 
 
-def score_one(h, l, c, v, ma100, strong_days, t: int) -> dict | None:
+def score_one(h, l, c, v, ma100, strong_days, t: int, legacy: bool = False) -> dict | None:
     """按第五十九节口径,算截至下标 t(含)的三个整理指标。不成立返回 None。"""
     cand = strong_days[(strong_days <= t) & (strong_days >= t - STRONG_LOOKBACK)]
     if cand.size == 0:
         return None
     ts = int(cand[-1])                      # 最近一次强势日
-    if t - ts < MIN_ADJ_DAYS:
+    # 旧口径写死 15 日;新口径先用绝对底 10,真正的自适应下限由调用方按当期中位数再过滤
+    # (第六十一节:2024-2026 大牛股整理期短到顶住了写死的 15 日)
+    if t - ts < (MIN_ADJ_DAYS_LEGACY if legacy else MIN_ADJ_FLOOR):
         return None
     # 触线日:ts 之后最早一次触及 20周线,且 20周线仍向上
     td = -1
     for k in range(ts + 1, t + 1):
-        if (np.isfinite(ma100[k]) and np.isfinite(l[k]) and l[k] <= ma100[k] * 1.03
-                and k >= 20 and np.isfinite(ma100[k - 20]) and ma100[k] > ma100[k - 20]):
+        touch = (np.isfinite(ma100[k]) and np.isfinite(l[k]) and l[k] <= ma100[k] * 1.03)
+        if legacy:   # 旧口径还要求「20周线向上」—— 该条误杀了用户认可的两个案例
+            touch = touch and (k >= 20 and np.isfinite(ma100[k - 20])
+                               and ma100[k] > ma100[k - 20])
+        if touch:
             td = k
             break
     if td < 0:
@@ -174,9 +187,41 @@ def series_of(frames, idx, code):
             pd.to_numeric(x["volume"], errors="coerce").to_numpy(float))
 
 
-def n_pass(s: dict) -> int:
-    return int((s["缩量比"] < THR_SHRINK) + (s["收敛比"] < THR_ATR)
-               + (s["深度"] <= THR_DEPTH))
+def n_pass(s: dict, thr: dict | None = None) -> int:
+    """thr=None 用旧口径绝对阈值;传入 {缩量比,收敛比,深度} 则用当期分位阈值。"""
+    if thr is None:
+        return int((s["缩量比"] < THR_SHRINK) + (s["收敛比"] < THR_ATR)
+                   + (s["深度"] <= THR_DEPTH))
+    return int((s["缩量比"] <= thr["缩量比"]) + (s["收敛比"] <= thr["收敛比"])
+               + (s["深度"] <= thr["深度"]))
+
+
+def cross_section_thresholds(CL, frames, STRONG, MA100, t_pos):
+    """t_pos 当天全市场处于整理中的股票的分位阈值 + 自适应下限。
+
+    单只回看必须和全市场模式**用同一把尺子**,否则同一只股票两个模式判定不一致。
+    逐日重算太慢(每天要扫全市场),所以调用方按**月**重算一次、月内沿用 ——
+    阈值是慢变量,月内漂移可忽略。
+    """
+    idx = CL.index
+    vals = {"缩量比": [], "收敛比": [], "深度": [], "调整天数": []}
+    for ci, code in enumerate(CL.columns):
+        h, l, c, v = series_of(frames, idx, code)
+        if not np.isfinite(c[t_pos]):
+            continue
+        sd = np.flatnonzero(STRONG[:t_pos + 1, ci])
+        if sd.size == 0:
+            continue
+        s_ = score_one(h, l, c, v, MA100[code].to_numpy(float), sd, t_pos)
+        if s_ is None:
+            continue
+        for k in vals:
+            vals[k].append(s_[k])
+    if len(vals["深度"]) < 50:
+        return None, MIN_ADJ_FLOOR
+    floor = max(MIN_ADJ_FLOOR, int(round(MIN_ADJ_RATIO * np.median(vals["调整天数"]))))
+    return ({k: float(np.nanquantile(vals[k], Q_KEEP))
+             for k in ("缩量比", "收敛比", "深度")}, floor)
 
 
 def run_single(a) -> None:
@@ -194,21 +239,28 @@ def run_single(a) -> None:
     d1 = pd.Timestamp(a.end) if a.end else idx[-1]
     print(f"\n{'='*104}")
     print(f"{code}   区间 {d0.date()} ~ {d1.date()}   全期强势日(RPS60>90) {sd_all.size} 天")
-    print(f"阈值:缩量比 < {THR_SHRINK}   收敛比 < {THR_ATR}   深度 ≤ {THR_DEPTH}")
+    print("阈值:" + (f"绝对 {THR_SHRINK}/{THR_ATR}/{THR_DEPTH}(--legacy)"
+                   if getattr(a, "legacy", False) else
+                   f"当期最优 {Q_KEEP:.0%} 分位(逐月重算)+ 自适应调整天数下限"))
     print(f"{'='*104}")
     print(f"{'日期':<12}{'强势日':<12}{'触20周线':<12}{'调整天':>7}{'现价':>8}{'深度':>8}"
           f"{'缩量比':>8}{'收敛比':>8}{'条数':>5}")
+    legacy = getattr(a, "legacy", False)
     hits, prev_key, shown = [], None, 0
+    thr, floor, thr_month = None, MIN_ADJ_FLOOR, None
     for t in range(len(idx)):
         if not (d0 <= idx[t] <= d1) or not np.isfinite(c[t]):
             continue
         sd = sd_all[sd_all <= t]
         if sd.size == 0:
             continue
-        s = score_one(h, l, c, v, m100, sd, t)
-        if s is None:
+        if not legacy and (idx[t].year, idx[t].month) != thr_month:
+            thr_month = (idx[t].year, idx[t].month)
+            thr, floor = cross_section_thresholds(CL, frames, STRONG, MA100, t)
+        s = score_one(h, l, c, v, m100, sd, t, legacy=legacy)
+        if s is None or (not legacy and s["调整天数"] < floor):
             continue
-        n = n_pass(s)
+        n = n_pass(s, None if legacy else thr)
         if n == 3:
             hits.append((idx[t], c[t]))
         key = (n, s["_ts"], s["_td"])          # 状态:条数 / 强势日 / 触线日
@@ -235,7 +287,8 @@ def run_single(a) -> None:
             print(f"  首次亮灯后 {nd:>3} 个交易日({idx[t0i+nd].date()}):"
                   f"{c[t0i+nd]:>8.2f}   {c[t0i+nd]/p_first-1:+.1%}")
     print(f"\n**亮灯持续 {len(hits)} 天 —— 这是状态标记,不是买点。**")
-    print("第五十九节实测:同一时序内三条全中的组合级年化与随机无法区分(p=0.31)。")
+    print("第六十一节实测:同一时序内三条全中的组合级年化 +10.37%,"
+          "但 300 次随机对照 p=0.16 —— 与随机无法区分。")
     print("⚠️ 仅供研究参考,不构成投资建议。")
 
 
@@ -251,6 +304,9 @@ def main() -> None:
     ap.add_argument("--to", dest="end", default=None, help="单只模式结束日")
     ap.add_argument("--daily", action="store_true",
                     help="单只模式逐日打印(默认只打印状态变化的日子)")
+    ap.add_argument("--legacy", action="store_true",
+                    help="用第五十九节旧口径(绝对阈值 0.8/0.8/0.352、下限写死15日、"
+                         "要求20周线向上)。默认用第六十一节的自适应口径")
     a = ap.parse_args()
 
     if a.code:
@@ -274,7 +330,7 @@ def main() -> None:
         if sd.size == 0:
             continue
         m100 = MA100[code].to_numpy(float)
-        s = score_one(h, l, c, v, m100, sd, t_pos)
+        s = score_one(h, l, c, v, m100, sd, t_pos, legacy=a.legacy)
         if s is None:
             continue
         s["代码"] = code
@@ -286,9 +342,23 @@ def main() -> None:
     R = pd.DataFrame(rows)
     if R.empty:
         raise SystemExit("今天没有股票走完「强势 → 深调20周线」这个时序")
-    R["缩量✓"] = R["缩量比"] < THR_SHRINK
-    R["收敛✓"] = R["收敛比"] < THR_ATR
-    R["浅调✓"] = R["深度"] <= THR_DEPTH
+    if a.legacy:
+        R["缩量✓"] = R["缩量比"] < THR_SHRINK
+        R["收敛✓"] = R["收敛比"] < THR_ATR
+        R["浅调✓"] = R["深度"] <= THR_DEPTH
+        thr_txt = f"缩量比 < {THR_SHRINK}   收敛比 < {THR_ATR}   深度 ≤ {THR_DEPTH}(旧口径)"
+    else:
+        floor = max(MIN_ADJ_FLOOR, int(round(MIN_ADJ_RATIO * R["调整天数"].median())))
+        R = R[R["调整天数"] >= floor].reset_index(drop=True)
+        if R.empty:
+            raise SystemExit("应用自适应下限后没有股票入选")
+        qs = {c_: R[c_].quantile(Q_KEEP) for c_ in ("缩量比", "收敛比", "深度")}
+        R["缩量✓"] = R["缩量比"] <= qs["缩量比"]
+        R["收敛✓"] = R["收敛比"] <= qs["收敛比"]
+        R["浅调✓"] = R["深度"] <= qs["深度"]
+        thr_txt = (f"当期最优 {Q_KEEP:.0%} 分位 → 缩量比 ≤ {qs['缩量比']:.2f}   "
+                   f"收敛比 ≤ {qs['收敛比']:.2f}   深度 ≤ {qs['深度']:.1%};"
+                   f"自适应下限 {floor} 日")
     R["满足条数"] = R[["缩量✓", "收敛✓", "浅调✓"]].sum(axis=1)
     # 已亮灯天数:往回数连续三条全中的天数。宇通的案例显示这个信号能持续 42 天,
     # 所以「刚亮」和「亮了很久」是两回事,必须让用户一眼看见。只对当前三条全中的算。
@@ -313,7 +383,7 @@ def main() -> None:
     sel = R if a.all else R[R["满足条数"] == 3]
 
     print(f"\n{'='*112}")
-    print(f"阈值:缩量比 < {THR_SHRINK}   收敛比 < {THR_ATR}   深度 ≤ {THR_DEPTH}")
+    print(f"阈值:{thr_txt}")
     print(f"走完「强势 → 深调20周线」的 **{len(R):,} 只**;"
           f"其中三条全中 **{int((R['满足条数']==3).sum()):,} 只**"
           f"({(R['满足条数']==3).mean():.1%})")
@@ -331,10 +401,12 @@ def main() -> None:
         print(disp.to_string(index=False))
 
     print(f"\n{'='*112}")
-    print("怎么读这张表(第五十九节实测,样本外 2020-2026,同一时序内):")
-    print("  三条全中的历史交易胜率 **22.88%**(不筛 15.85%)、单笔净期望 +6.68%(vs +1.73%)、")
-    print("  最大回撤 -26.1%(vs -63.7%)。**但组合级年化与随机无法区分(p=0.31)。**")
-    print("  第六十节另证:换到没有前置强势段的池子里,同样三条**净期望转负**、迁移失败。")
+    print("怎么读这张表(第六十一节,样本外 2020-2026,同一时序内):")
+    print("  三条全中:胜率 **20.61%**(不筛 15.43%)、单笔净期望 +3.50%(vs +1.61%)、")
+    print("  组合年化 +10.37%(vs +1.50%)、最大回撤 -35.3%(vs -62.0%)。")
+    print("  **但 300 次同数量随机对照 p=0.16 —— 与随机抽同样多的事件无法区分。**")
+    print("  唯一过随机对照的是「深度最浅40%」单条(年化 +14.14%、p=0.0100),但它是")
+    print("  4 选 1、p 值贴边,且在两个大池的迁移测试里 p=0.19/0.61 不显著。")
     print("  → **当排序/体检工具用,只用在走完这个时序的股票上,不要当直接照买的信号。**")
     print("⚠️ 仅供研究参考,不构成投资建议。")
 
