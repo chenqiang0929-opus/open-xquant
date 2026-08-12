@@ -16,13 +16,19 @@
 最优配置仍跑输全市场等权基准(+6.85% / Sharpe 0.419 / 回撤 -58.5%
 vs 基准 +7.22% / 0.423 / **-32.8%**)——**收益接近、回撤差一倍**。
 
+> ⚠️ **必须连着看的限定(第五十四节测出来的)**:上面的 +4.61%/笔、+6.34% 年化
+> **由 2013-04 ~ 2015-05 的 9,660 笔(占 13.7%)主导**。
+> 砍掉这段之后,同一套规则在 2015-05 ~ 2025-07 是 **+1.02%/笔、组合年化 -1.14%**。
+> 独立口径交叉验证(事件文件自带的 `fwd_gain`):前段均值 +117%、winner 率 45.4%,
+> 后段 +48%、12.0%。**这套系统的收益基本来自那一轮牛市。**
+
 细节见 `ETF_research_summary_for_stock_comparison.md` 第四十一、四十二节。
 (文件名是历史遗留:研究从 ETF 起步,后转向个股。)
 
 ## 目录
 
 ```
-ETF_research_summary_for_stock_comparison.md   研究记录主文档(53节)
+ETF_research_summary_for_stock_comparison.md   研究记录主文档(54节)
 data_prep/         上游数据构建(产出下面两个输入)
 breakout_system/   突破+止损系统本体(第41-42节)
 rps_pool_study/    RPS动量股池 + 双增长过滤 + 广度择时(第43-47节)
@@ -51,6 +57,9 @@ results/           所有表格数字的来源 CSV;results/logs/ 是原始运行
 | `bull_pattern_hypotheses.py` | 用户三个假设:基底形态 / 均线多头排列 / CANSLIM | 51 |
 | `bull_feature_scan.py` | 20 个未用过的因子系统扫描 | 53 |
 | `bull_feature_recheck.py` | **复查扫描的噪音上界**(退化特征污染 → 每特征零分布 + 公平天花板) | 53 |
+| `base_pattern_detector.py` | **欧奈尔基底形态检测器**(杯柄/平底/双底,原书数值) | 54 |
+| `base_pattern_cases.py` / `_cases2.py` | 检测器人工核对(先在 t\* 上、再在真实突破日上) | 54 |
+| `base_pattern_attrib.py` / `base_pattern_trade.py` | 基底形态的归因 / 交易检验 | 54 |
 | `oneil_real_thresholds.py` / `oneil_sampling_variance.py` | 欧奈尔真实阈值、抽样方差 | 50 |
 | `composite3_replication.py` / `rebalance_bonus_study.py` / `ma50_reconcile.py` | 复合因子复现、再平衡收益、MA50 对账 | 48-49 |
 
