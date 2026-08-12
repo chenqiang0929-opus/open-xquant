@@ -55,12 +55,22 @@
   缩量比 < 0.80、收敛比 < 0.80、深度 ≤ 0.352
 
 ═══ 怎么用 ═══
+    # 全市场:今天有哪些股票处在干净的整理里
     python consolidation_screener.py --data /path/to/parquet_dir
     python consolidation_screener.py --data DIR --date 2026-07-31 --top 40
     python consolidation_screener.py --data DIR --all --out 全部.csv
 
+    # 单只回看:某只股票历史上什么时候亮过灯(用来验证你自己的案例)
+    python consolidation_screener.py --data DIR --code 600066 --from 2023-01-01 --to 2024-03-31
+    python consolidation_screener.py --data DIR --code 300750 --daily   # 逐日打印
+
 数据要求:一个目录,每只股票一个 parquet,文件名即代码,
 至少含 high / low / close / volume 四列,DatetimeIndex。
+**「强势日」是全市场横截面分位,所以目录必须是全市场,只放几只算不出来。**
+
+⚠️ 数据层面的已知偏差:若你的 parquet 目录只含**当前仍在市**的股票,
+则历史横截面分位会偏乐观(退市股不在分母里)。本研究实测该偏差约
+-0.4~-0.6pp/年(第四十二节),不影响形态判定本身,但看历史统计时要记得。
 """
 from __future__ import annotations
 
@@ -130,20 +140,12 @@ def score_one(h, l, c, v, ma100, strong_days, t: int) -> dict | None:
             "收敛比": float(conv) if np.isfinite(conv) else np.nan}
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="整理形态筛选:缩量 + 波动收敛 + 浅回调")
-    ap.add_argument("--data", required=True, help="逐股 parquet 所在目录")
-    ap.add_argument("--date", default=None, help="评估日 YYYY-MM-DD,默认用数据最后一天")
-    ap.add_argument("--top", type=int, default=30, help="输出前 N 只")
-    ap.add_argument("--out", default=None, help="结果写到这个 CSV")
-    ap.add_argument("--all", action="store_true", help="输出所有走完时序的股票,不只三条全中")
-    a = ap.parse_args()
-
-    files = sorted(glob.glob(os.path.join(a.data, "*.parquet")))
+def load_panel(data_dir: str):
+    """读全市场面板,并算出强势日矩阵与 20周线。两种模式共用。"""
+    files = sorted(glob.glob(os.path.join(data_dir, "*.parquet")))
     if not files:
-        raise SystemExit(f"{a.data} 下没有 parquet 文件")
+        raise SystemExit(f"{data_dir} 下没有 parquet 文件")
     print(f"读取 {len(files)} 个文件…")
-
     closes, frames = {}, {}
     for f in files:
         code = os.path.basename(f)[:-8]
@@ -159,6 +161,103 @@ def main() -> None:
         closes[code] = pd.to_numeric(x["close"], errors="coerce")
     CL = pd.DataFrame(closes).sort_index()
     CL = CL.where(CL > 0)
+    # 强势日:60日涨幅的全市场横截面前 10%(必须用全市场,单只算不出横截面分位)
+    RPS60 = CL.pct_change(60).rank(axis=1, pct=True) * 100
+    return CL, frames, (RPS60 > 90).to_numpy(), CL.rolling(100, min_periods=100).mean()
+
+
+def series_of(frames, idx, code):
+    x = frames[code].reindex(idx)
+    return (pd.to_numeric(x["high"], errors="coerce").where(lambda s: s > 0).to_numpy(float),
+            pd.to_numeric(x["low"], errors="coerce").where(lambda s: s > 0).to_numpy(float),
+            pd.to_numeric(x["close"], errors="coerce").where(lambda s: s > 0).to_numpy(float),
+            pd.to_numeric(x["volume"], errors="coerce").to_numpy(float))
+
+
+def n_pass(s: dict) -> int:
+    return int((s["缩量比"] < THR_SHRINK) + (s["收敛比"] < THR_ATR)
+               + (s["深度"] <= THR_DEPTH))
+
+
+def run_single(a) -> None:
+    """单只回看:逐日算三个指标,标出三条全中的日子。"""
+    CL, frames, STRONG, MA100 = load_panel(a.data)
+    idx = CL.index
+    code = a.code
+    if code not in frames:
+        raise SystemExit(f"{a.data} 里没有 {code}.parquet")
+    ci = list(CL.columns).index(code)
+    h, l, c, v = series_of(frames, idx, code)
+    m100 = MA100[code].to_numpy(float)
+    sd_all = np.flatnonzero(STRONG[:, ci])
+    d0 = pd.Timestamp(a.start) if a.start else idx[0]
+    d1 = pd.Timestamp(a.end) if a.end else idx[-1]
+    print(f"\n{'='*104}")
+    print(f"{code}   区间 {d0.date()} ~ {d1.date()}   全期强势日(RPS60>90) {sd_all.size} 天")
+    print(f"阈值:缩量比 < {THR_SHRINK}   收敛比 < {THR_ATR}   深度 ≤ {THR_DEPTH}")
+    print(f"{'='*104}")
+    print(f"{'日期':<12}{'强势日':<12}{'触20周线':<12}{'调整天':>7}{'现价':>8}{'深度':>8}"
+          f"{'缩量比':>8}{'收敛比':>8}{'条数':>5}")
+    hits, prev_key, shown = [], None, 0
+    for t in range(len(idx)):
+        if not (d0 <= idx[t] <= d1) or not np.isfinite(c[t]):
+            continue
+        sd = sd_all[sd_all <= t]
+        if sd.size == 0:
+            continue
+        s = score_one(h, l, c, v, m100, sd, t)
+        if s is None:
+            continue
+        n = n_pass(s)
+        if n == 3:
+            hits.append((idx[t], c[t]))
+        key = (n, s["_ts"], s["_td"])          # 状态:条数 / 强势日 / 触线日
+        if a.daily or key != prev_key or n == 3:
+            print(f"{str(idx[t].date()):<12}{str(idx[s['_ts']].date()):<12}"
+                  f"{str(idx[s['_td']].date()):<12}{s['调整天数']:>7}{c[t]:>8.2f}"
+                  f"{s['深度']:>8.1%}{s['缩量比']:>8.2f}{s['收敛比']:>8.2f}{n:>5}"
+                  f"{'  ← 三条全中' if n == 3 else ''}")
+            shown += 1
+        prev_key = key
+    if shown == 0:
+        print("(区间内没有走完「强势 → 深调20周线」这个时序)")
+
+    print(f"\n{'-'*104}")
+    if not hits:
+        print("区间内 **没有** 三条全中的日子。")
+        return
+    d_first, p_first = hits[0]
+    print(f"三条全中共 **{len(hits)} 天**   首次 **{d_first.date()}**(收盘 {p_first:.2f})"
+          f"   最后 {hits[-1][0].date()}")
+    t0i = int(idx.searchsorted(d_first))
+    for nd in (60, 120, 252):
+        if t0i + nd < len(c) and np.isfinite(c[t0i + nd]) and p_first > 0:
+            print(f"  首次亮灯后 {nd:>3} 个交易日({idx[t0i+nd].date()}):"
+                  f"{c[t0i+nd]:>8.2f}   {c[t0i+nd]/p_first-1:+.1%}")
+    print(f"\n**亮灯持续 {len(hits)} 天 —— 这是状态标记,不是买点。**")
+    print("第五十九节实测:同一时序内三条全中的组合级年化与随机无法区分(p=0.31)。")
+    print("⚠️ 仅供研究参考,不构成投资建议。")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="整理形态筛选:缩量 + 波动收敛 + 浅回调")
+    ap.add_argument("--data", required=True, help="逐股 parquet 所在目录")
+    ap.add_argument("--date", default=None, help="评估日 YYYY-MM-DD,默认用数据最后一天")
+    ap.add_argument("--top", type=int, default=30, help="输出前 N 只")
+    ap.add_argument("--out", default=None, help="结果写到这个 CSV")
+    ap.add_argument("--all", action="store_true", help="输出所有走完时序的股票,不只三条全中")
+    ap.add_argument("--code", default=None, help="单只回看模式:只看这一只的历史")
+    ap.add_argument("--from", dest="start", default=None, help="单只模式起始日")
+    ap.add_argument("--to", dest="end", default=None, help="单只模式结束日")
+    ap.add_argument("--daily", action="store_true",
+                    help="单只模式逐日打印(默认只打印状态变化的日子)")
+    a = ap.parse_args()
+
+    if a.code:
+        run_single(a)
+        return
+
+    CL, frames, STRONG, MA100 = load_panel(a.data)
     idx = CL.index
     asof = idx[-1] if a.date is None else pd.Timestamp(a.date)
     t_pos = int(idx.searchsorted(asof, side="right")) - 1
@@ -166,30 +265,23 @@ def main() -> None:
         raise SystemExit(f"评估日 {asof.date()} 之前历史不足 {STRONG_LOOKBACK + PRE_WIN} 天")
     print(f"评估日 {idx[t_pos].date()}(共 {len(idx)} 个交易日)")
 
-    # 强势日:60日涨幅的全市场横截面前 10%
-    RPS60 = CL.pct_change(60).rank(axis=1, pct=True) * 100
-    STRONG = (RPS60 > 90).to_numpy()
-    MA100 = CL.rolling(100, min_periods=100).mean()
-
-    rows = []
+    rows, keep = [], {}
     for ci, code in enumerate(CL.columns):
-        x = frames[code].reindex(idx)
-        h = pd.to_numeric(x["high"], errors="coerce").where(lambda s: s > 0).to_numpy(float)
-        l = pd.to_numeric(x["low"], errors="coerce").where(lambda s: s > 0).to_numpy(float)
-        c = pd.to_numeric(x["close"], errors="coerce").where(lambda s: s > 0).to_numpy(float)
-        v = pd.to_numeric(x["volume"], errors="coerce").to_numpy(float)
+        h, l, c, v = series_of(frames, idx, code)
         if not np.isfinite(c[t_pos]):
             continue
         sd = np.flatnonzero(STRONG[:t_pos + 1, ci])
         if sd.size == 0:
             continue
-        s = score_one(h, l, c, v, MA100[code].to_numpy(float), sd, t_pos)
+        m100 = MA100[code].to_numpy(float)
+        s = score_one(h, l, c, v, m100, sd, t_pos)
         if s is None:
             continue
         s["代码"] = code
         s["强势日"] = idx[s.pop("_ts")].date()
         s["触20周线"] = idx[s.pop("_td")].date()
         rows.append(s)
+        keep[code] = (h, l, c, v, m100, sd)
 
     R = pd.DataFrame(rows)
     if R.empty:
@@ -198,10 +290,25 @@ def main() -> None:
     R["收敛✓"] = R["收敛比"] < THR_ATR
     R["浅调✓"] = R["深度"] <= THR_DEPTH
     R["满足条数"] = R[["缩量✓", "收敛✓", "浅调✓"]].sum(axis=1)
+    # 已亮灯天数:往回数连续三条全中的天数。宇通的案例显示这个信号能持续 42 天,
+    # 所以「刚亮」和「亮了很久」是两回事,必须让用户一眼看见。只对当前三条全中的算。
+    streak = {}
+    for code in R.loc[R["满足条数"] == 3, "代码"]:
+        h, l, c, v, m100, sd = keep[code]
+        n = 0
+        for t in range(t_pos, max(t_pos - 250, 0), -1):
+            if not np.isfinite(c[t]):
+                continue
+            s2 = score_one(h, l, c, v, m100, sd[sd <= t], t)
+            if s2 is None or n_pass(s2) < 3:
+                break
+            n += 1
+        streak[code] = n
+    R["已亮灯天数"] = R["代码"].map(streak).fillna(0).astype(int)
     R["排序分"] = (R["满足条数"] * 10
                  - R["缩量比"].fillna(9) - R["收敛比"].fillna(9) - R["深度"].fillna(9) * 2)
     cols = ["代码", "强势日", "触20周线", "调整天数", "触线后天数", "现价", "距区间高",
-            "深度", "缩量比", "收敛比", "缩量✓", "收敛✓", "浅调✓", "满足条数"]
+            "深度", "缩量比", "收敛比", "缩量✓", "收敛✓", "浅调✓", "满足条数", "已亮灯天数"]
     R = R.sort_values("排序分", ascending=False)
     sel = R if a.all else R[R["满足条数"] == 3]
 
