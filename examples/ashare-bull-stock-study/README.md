@@ -28,12 +28,13 @@ vs 基准 +7.22% / 0.423 / **-32.8%**)——**收益接近、回撤差一倍**�
 ## 目录
 
 ```
-ETF_research_summary_for_stock_comparison.md   研究记录主文档(59节)
+ETF_research_summary_for_stock_comparison.md   研究记录主文档(60节)
 data_prep/         上游数据构建(产出下面两个输入)
 breakout_system/   突破+止损系统本体(第41-42节)
 rps_pool_study/    RPS动量股池 + 双增长过滤 + 广度择时(第43-47节)
 bull_features/     牛股特征:成长字段修正、三个假设、20因子扫描(第50-53节)
 portfolio_layer/   指数设计、组合层、口袋支点功效(第56节)
+consolidation_screener.py   **可直接运行的整理形态筛选器**(缩量+波动收敛+浅回调,第59-60节)
 results/           所有表格数字的来源 CSV;results/logs/ 是原始运行日志
 ```
 
