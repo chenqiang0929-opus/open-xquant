@@ -36,8 +36,18 @@
 
 A→B(事件定义的改动)是安全的,甚至更好;**丢覆盖的是 B→C 的阈值口径**
 —— 40% 分位在多数月份比 0.80 严(如 2016-11 是 0.52/0.47/22.1%),
-生益电子 76天→0天。**做单只案例回看时请加 `--legacy`。**
-默认保持分位口径,是因为上面那些统计数字全部建立在它上面。
+生益电子 76天→0天。
+
+**所以两把尺子回答的是两个不同的问题,默认值按场景自动切:**
+
+    分位:「在**今天这批**正在整理的股票里,它排不排得进最干净一档」→ 选股
+    绝对:「它像不像 2014-2019 定义的那种教科书式干净整理」  → 验证案例
+
+    全市场模式(--date / --all,不带 --code)  默认 **分位**
+    单只回看模式(--code)                    默认 **绝对阈值**
+    任何模式都能用 --legacy / --adaptive 手动切(两者互斥)
+
+上面那些 OOS 统计数字建立在**分位口径**上,所以选股场景保持分位不变。
 
 ═══ 三条必须先读的限制 ═══
 
@@ -67,8 +77,11 @@ Bonferroni 阈值 0.0125)。但它是 4 选 1、p 值贴边,
   2) 缩量      缩量比 = 均量(ts..t) ÷ 均量(ts 之前 60 日)
   3) 波动收敛  收敛比 = 均真实波幅(td..t) ÷ 均真实波幅(ts 之前 60 日)
 
-判定:**默认**用当期横截面最优 40% 分位、下限 = max(10, 0.15 × 当期中位调整天数);
-`--legacy` 切回第五十九节的绝对阈值(0.80/0.80/0.352、下限写死 15 日、要求20周线向上)。
+判定用哪把尺子**随模式变**(见开头):全市场选股默认当期最优 40% 分位、
+下限 = max(10, 0.15 × 当期中位调整天数);单只回看默认第五十九节的绝对阈值
+(0.80/0.80/0.352、下限写死 15 日、触线日要求20周线向上)。
+`--legacy` / `--adaptive` 可在任何模式下手动指定,两者互斥。
+脚本每次运行都会打印当前用的是哪把尺子、以及这个默认是怎么来的。
 
 ═══ 怎么用 ═══
     # 全市场:今天有哪些股票处在干净的整理里
@@ -77,9 +90,12 @@ Bonferroni 阈值 0.0125)。但它是 4 选 1、p 值贴边,
     python consolidation_screener.py --data DIR --all --out 全部.csv
 
     # 单只回看:某只股票历史上什么时候亮过灯(用来验证你自己的案例)
-    # ⚠️ 回看请加 --legacy:分位口径在这个场景下覆盖明显更差(见开头 A/B/C 表)
-    python consolidation_screener.py --data DIR --code 600066 --from 2023-01-01 --to 2024-03-31 --legacy
+    # 这个模式默认就是绝对阈值,不用再加 --legacy
+    python consolidation_screener.py --data DIR --code 600066 --from 2023-01-01 --to 2024-03-31
     python consolidation_screener.py --data DIR --code 300750 --daily   # 逐日打印
+
+    # 想看同一只在「选股那把尺子」下什么样,就手动切
+    python consolidation_screener.py --data DIR --code 600066 --adaptive
 
 数据要求:一个目录,每只股票一个 parquet,文件名即代码,
 至少含 high / low / close / volume 四列,DatetimeIndex。
@@ -109,7 +125,6 @@ MIN_ADJ_RATIO = 0.15   # 下限 = 0.15 × 当期中位调整天数
 MIN_ADJ_FLOOR = 10     # 自适应下限的绝对底
 STRONG_LOOKBACK = 250  # 往回找「强势日」的窗口
 PRE_WIN = 60           # 强势日之前用于对比的基期长度
-MIN_ADJ_DAYS = 15      # 调整期至少这么长
 
 
 def true_range(h: np.ndarray, l: np.ndarray, c: np.ndarray) -> np.ndarray:
@@ -256,9 +271,10 @@ def run_single(a) -> None:
     d1 = pd.Timestamp(a.end) if a.end else idx[-1]
     print(f"\n{'='*104}")
     print(f"{code}   区间 {d0.date()} ~ {d1.date()}   全期强势日(RPS60>90) {sd_all.size} 天")
-    print("阈值:" + (f"绝对 {THR_SHRINK}/{THR_ATR}/{THR_DEPTH}(--legacy)"
+    print("阈值:" + (f"绝对 {THR_SHRINK}/{THR_ATR}/{THR_DEPTH} + 下限 {MIN_ADJ_DAYS_LEGACY} 日"
                    if getattr(a, "legacy", False) else
-                   f"当期最优 {Q_KEEP:.0%} 分位(逐月重算)+ 自适应调整天数下限"))
+                   f"当期最优 {Q_KEEP:.0%} 分位(逐月重算)+ 自适应调整天数下限")
+          + f"({getattr(a, 'why', '手动指定')})")
     print(f"{'='*104}")
     print(f"{'日期':<12}{'强势日':<12}{'触20周线':<12}{'调整天':>7}{'现价':>8}{'深度':>8}"
           f"{'缩量比':>8}{'收敛比':>8}{'条数':>5}")
@@ -321,10 +337,26 @@ def main() -> None:
     ap.add_argument("--to", dest="end", default=None, help="单只模式结束日")
     ap.add_argument("--daily", action="store_true",
                     help="单只模式逐日打印(默认只打印状态变化的日子)")
-    ap.add_argument("--legacy", action="store_true",
-                    help="用第五十九节旧口径(绝对阈值 0.8/0.8/0.352、下限写死15日、"
-                         "要求20周线向上)。默认用第六十一节的自适应口径")
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument("--legacy", action="store_true",
+                   help="强制用绝对阈值(0.8/0.8/0.352、下限写死15日、要求20周线向上)")
+    g.add_argument("--adaptive", action="store_true",
+                   help="强制用当期横截面分位(第六十一节口径)")
     a = ap.parse_args()
+
+    # 默认按场景选尺子:选股要比**相对排名**,回看要比**绝对形态**。
+    # 两把尺子回答的是两个问题,所以默认值该服从场景,而不是服从统计口径的一致性:
+    #   分位:「在今天这批正在整理的股票里,它排不排得进最干净一档」→ 选股
+    #   绝对:「它像不像 2014-2019 定义的那种教科书式干净整理」→ 验证案例
+    # 实测依据(screener_case_coverage.py,19 只案例全历史):绝对 18只/4,317天,
+    # 分位 17只/1,130天 —— 分位在多数月份比 0.80 更严,回看会漏掉大量认可的案例。
+    if a.legacy:
+        a.why = "手动指定 --legacy"
+    elif a.adaptive:
+        a.why = "手动指定 --adaptive"
+    else:
+        a.legacy = bool(a.code)
+        a.why = "单只回看默认;--adaptive 切分位" if a.code else "全市场选股默认;--legacy 切绝对阈值"
 
     if a.code:
         run_single(a)
@@ -363,7 +395,9 @@ def main() -> None:
         R["缩量✓"] = R["缩量比"] < THR_SHRINK
         R["收敛✓"] = R["收敛比"] < THR_ATR
         R["浅调✓"] = R["深度"] <= THR_DEPTH
-        thr_txt = f"缩量比 < {THR_SHRINK}   收敛比 < {THR_ATR}   深度 ≤ {THR_DEPTH}(旧口径)"
+        qs, floor = None, MIN_ADJ_DAYS_LEGACY
+        thr_txt = (f"缩量比 < {THR_SHRINK}   收敛比 < {THR_ATR}   深度 ≤ {THR_DEPTH}"
+                   f"   下限 {MIN_ADJ_DAYS_LEGACY} 日")
     else:
         floor = max(MIN_ADJ_FLOOR, int(round(MIN_ADJ_RATIO * R["调整天数"].median())))
         R = R[R["调整天数"] >= floor].reset_index(drop=True)
@@ -379,6 +413,10 @@ def main() -> None:
     R["满足条数"] = R[["缩量✓", "收敛✓", "浅调✓"]].sum(axis=1)
     # 已亮灯天数:往回数连续三条全中的天数。宇通的案例显示这个信号能持续 42 天,
     # 所以「刚亮」和「亮了很久」是两回事,必须让用户一眼看见。只对当前三条全中的算。
+    # 必须传当前这把尺子 —— 早先这里漏了 legacy=/thr=,分位模式下选股用分位、
+    # 数天数却用绝对阈值,同一张表里两把尺子。
+    # 注:回看用的是**今天这把尺子**(qs/floor 不逐日重算)——
+    # 逐日重算要按月扫全市场,代价太大;语义按「以今天的标准往回数」理解。
     streak = {}
     for code in R.loc[R["满足条数"] == 3, "代码"]:
         h, l, c, v, m100, sd = keep[code]
@@ -386,8 +424,8 @@ def main() -> None:
         for t in range(t_pos, max(t_pos - 250, 0), -1):
             if not np.isfinite(c[t]):
                 continue
-            s2 = score_one(h, l, c, v, m100, sd[sd <= t], t)
-            if s2 is None or n_pass(s2) < 3:
+            s2 = score_one(h, l, c, v, m100, sd[sd <= t], t, legacy=a.legacy)
+            if s2 is None or s2["调整天数"] < floor or n_pass(s2, qs) < 3:
                 break
             n += 1
         streak[code] = n
@@ -400,7 +438,7 @@ def main() -> None:
     sel = R if a.all else R[R["满足条数"] == 3]
 
     print(f"\n{'='*112}")
-    print(f"阈值:{thr_txt}")
+    print(f"阈值:{thr_txt}({getattr(a, 'why', '手动指定')})")
     print(f"走完「强势 → 深调20周线」的 **{len(R):,} 只**;"
           f"其中三条全中 **{int((R['满足条数']==3).sum()):,} 只**"
           f"({(R['满足条数']==3).mean():.1%})")
