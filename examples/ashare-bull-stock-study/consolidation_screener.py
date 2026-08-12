@@ -189,11 +189,14 @@ def series_of(frames, idx, code):
 
 def n_pass(s: dict, thr: dict | None = None) -> int:
     """thr=None 用旧口径绝对阈值;传入 {缩量比,收敛比,深度} 则用当期分位阈值。"""
+    # 逐项 int() 后再相加:score_one 里这三个值已 float() 成 Python 标量,
+    # 但若哪天传进来的是 numpy 标量,`np.bool_ + np.bool_` 是**逻辑或**,
+    # True+True+True 会得到 1 而不是 3。写成这样才与实现细节无关。
     if thr is None:
-        return int((s["缩量比"] < THR_SHRINK) + (s["收敛比"] < THR_ATR)
-                   + (s["深度"] <= THR_DEPTH))
-    return int((s["缩量比"] <= thr["缩量比"]) + (s["收敛比"] <= thr["收敛比"])
-               + (s["深度"] <= thr["深度"]))
+        return (int(s["缩量比"] < THR_SHRINK) + int(s["收敛比"] < THR_ATR)
+                + int(s["深度"] <= THR_DEPTH))
+    return (int(s["缩量比"] <= thr["缩量比"]) + int(s["收敛比"] <= thr["收敛比"])
+            + int(s["深度"] <= thr["深度"]))
 
 
 def cross_section_thresholds(CL, frames, STRONG, MA100, t_pos):
