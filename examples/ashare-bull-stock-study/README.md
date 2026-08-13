@@ -1,5 +1,8 @@
 # A股牛股研究案例:突破 + 止损交易系统
 
+> 📄 **先读这个**:[`RESEARCH_SUMMARY.md`](RESEARCH_SUMMARY.md) —— 64 节研究的独立总结报告(结论 / 三个结构性发现 / 11 个自查错误 / 与 DeepSeek 独立研究的交叉验证)。
+> 本 README 是目录与复现步骤;完整过程见 `ETF_research_summary_for_stock_comparison.md`。
+
 一次完整的 A股个股量化研究记录,以及其中「突破后跟随」方向的可复现代码。
 
 > 本目录是**研究案例**,不是 oxq 框架的一部分。脚本只依赖
@@ -28,7 +31,9 @@ vs 基准 +7.22% / 0.423 / **-32.8%**)——**收益接近、回撤差一倍**�
 ## 目录
 
 ```
-ETF_research_summary_for_stock_comparison.md   研究记录主文档(63节)
+RESEARCH_SUMMARY.md                            **独立总结报告(先读这个)**
+ETF_research_summary_for_stock_comparison.md   研究记录主文档(64节)
+external/          DeepSeek 独立研究的材料留档(交叉验证用)
 data_prep/         上游数据构建(产出下面两个输入)
 breakout_system/   突破+止损系统本体(第41-42节)
 rps_pool_study/    RPS动量股池 + 双增长过滤 + 广度择时(第43-47节)
@@ -59,6 +64,7 @@ results/           所有表格数字的来源 CSV;results/logs/ 是原始运行
 | `adaptive_events.py` | **把阈值改成横截面分位、窗口下限改成自适应**,20只案例回归 | 61 |
 | `adaptive_features.py` | 新口径下重选特征 + OOS(300次随机对照) | 61 |
 | `adaptive_transfer.py` | 新口径的迁移复测(**两个大池净期望都转正**) | 61 |
+| `leader_path_features.py` | **路径特征 N(新高密度)+ 群内龙头度 L**;首轮二值化退化作废,修复后 0/4 | 64 |
 | `screener_case_coverage.py` | **落库前自查**:19 只案例在筛选器口径下的 A/B/C 覆盖分解 | 61 |
 | `cross_leg_combo.py` | 跨段组合(① 负向 + ② 正向)+ 择时 ON/OFF 分解 | 62 |
 | `right_tail_anatomy.py` | **右尾解剖**:后 90% 的交易加起来是亏钱的 | 62 |
