@@ -105,7 +105,7 @@ results/           所有表格数字的来源 CSV;results/logs/ 是原始运行
 
 | 产物 | 体积 | 由谁生成 |
 |---|---|---|
-| `oxq_stock_market_fixed/`(5,232 个 parquet) | >1GB | `data_prep/rebuild_price_data_fixed.py` → `data_prep/refine_raw_close_vwap.py` |
+| `oxq_stock_market_fixed/`(5,232 个 parquet) | 858MB | `data_prep/rebuild_price_data_fixed.py` → `data_prep/refine_raw_close_vwap.py` |
 | `oneil_prelaunch_events_fixed.csv`(70,310 个突破事件) | 19.6MB | `data_prep/oneil_prelaunch_attribution.py` |
 
 所有脚本通过环境变量定位工作目录,**默认是脚本自身所在目录**:
@@ -115,6 +115,78 @@ export OXQ_RESEARCH_DIR=/path/to/your/research-workdir
 ```
 
 把上面两个产物放在 `$OXQ_RESEARCH_DIR` 下,再按顺序运行。
+
+### 0.1 从零恢复面板(容器/机器换了之后)
+
+> **这两个产物都是派生物,丢了不要紧,源数据是持久的。**
+> 2026-08-13 容器被回收过一次,派生物全部消失,按下面这条链 **10 分钟**恢复完毕,
+> 面板维度与全部锚点逐一对上。**恢复过程中不要重新下载行情** ——
+> 重下的是另一条价格序列,锚点必然对不上,等于换了一个面板。
+
+源数据在 `chenqiang0929-opus/etf-netflow-dev` 仓库(Git LFS),需要三样:
+
+| 路径 | 内容 |
+|---|---|
+| `mktdata_enriched/2013..2026.parquet` | 逐年全市场个股 OHLCV + turnover + float_mv + is_limit_up + **listed_days** |
+| `mktdata_enriched/others/corporate_actions.parquet` | 除权除息事件,复权重算用 |
+| `data/<最新日期>/kline.parquet` | 从中提取 **510300**(大盘 MA200 闸门用,个股数据里没有 ETF) |
+
+```bash
+# 1) 取源数据(浅克隆也可以,但必须 fetch 到最新 commit 再 git lfs pull)
+cd /path/to/etf-netflow-dev
+git fetch --depth=1 origin main
+git checkout --detach FETCH_HEAD      # 关键:git lfs pull 只认 HEAD,不认 FETCH_HEAD
+git lfs pull                          # 62 个 LFS 对象,约 791MB
+
+# 2) 摆成重建脚本要的目录结构(用软链,不必复制)
+export OXQ_RESEARCH_DIR=/path/to/research-workdir
+mkdir -p $OXQ_RESEARCH_DIR/mktdata_enriched_others
+ln -sfn /path/to/etf-netflow-dev/mktdata_enriched $OXQ_RESEARCH_DIR/mktdata_enriched
+ln -sf  /path/to/etf-netflow-dev/mktdata_enriched/others/corporate_actions.parquet \
+        $OXQ_RESEARCH_DIR/mktdata_enriched_others/
+
+# 3) 重建面板(~150s)
+python data_prep/rebuild_price_data_fixed.py
+
+# 4) 补 510300(重建脚本不产出 ETF)
+python - <<'PY'
+import os, pandas as pd
+k = pd.read_parquet("/path/to/etf-netflow-dev/data/20260729/kline.parquet")
+s = k[k["code"].astype(str).str.zfill(6) == "510300"].copy()
+s["date"] = pd.to_datetime(s["trade_date"])
+s = s.sort_values("date").drop_duplicates("date", keep="last").set_index("date")
+s.index = s.index.tz_localize("UTC"); s.index.name = "date"
+s[["open","high","low","close","volume","amount"]].astype(float).to_parquet(
+    os.environ["OXQ_RESEARCH_DIR"] + "/oxq_stock_market_fixed/510300.parquet")
+PY
+
+# 5) 重建事件文件(~240s)
+python data_prep/oneil_prelaunch_attribution.py
+```
+
+**每一步的验收数字(对不上就停,不要往下跑):**
+
+| 步骤 | 必须等于 |
+|---|---|
+| 重建源表读入 | `11,788,183 行 / 5,232 只标的` |
+| 重建输出 | `5,232` 个 parquet |
+| 面板维度 | `3,297 × 5,232`,`2013-01-04 ~ 2026-08-03` |
+| 事件文件 | `70,310` 笔突破事件 |
+| 最终锚点 | 交易级净期望 **+4.61%**、组合年化 **+6.34%**(`bull_features/base_pattern_trade.py` 开头会自己 assert) |
+
+**已知缺口**:`oxq_stock_market_with_fundamentals/`(旧面板,只用于搬运
+`eps/revenue/net_income/book_value_per_share/roe/operating_cash_flow` 六列)
+不在上述源里,重建后这六列全为 NaN,重建日志会报 `无财务列 5232`。
+价格类研究(§41-62、§64-65)完全不受影响;**只有 §63 成长股方向需要它**。
+补法:`mktdata_enriched/others/financials.parquet` 里有同名的全部六列
+(378,087 行,含 `publish_date`),按发布日做 point-in-time 前向填充即可重建。
+
+**踩过的两个坑,别再踩:**
+1. 本地 checkout 可能是**浅克隆且停在旧 commit**,`ls` 看不到 `mktdata_enriched` ——
+   **不要据此判断数据不存在**,先 `git fetch` 看远端。
+2. `git lfs pull` 只对 **HEAD** 生效。只 `git checkout FETCH_HEAD -- <路径>` 会得到
+   一堆 133 字节的指针文件,而 `git lfs pull` 会**静默什么都不做**(不报错)。
+   必须先 `git checkout --detach FETCH_HEAD`。
 
 ### 1. 运行
 
