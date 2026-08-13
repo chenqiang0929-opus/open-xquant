@@ -123,13 +123,15 @@ export OXQ_RESEARCH_DIR=/path/to/your/research-workdir
 > 面板维度与全部锚点逐一对上。**恢复过程中不要重新下载行情** ——
 > 重下的是另一条价格序列,锚点必然对不上,等于换了一个面板。
 
-源数据在 `chenqiang0929-opus/etf-netflow-dev` 仓库(Git LFS),需要三样:
+源数据在 `chenqiang0929-opus/etf-netflow-dev` 仓库(Git LFS),需要两样:
 
 | 路径 | 内容 |
 |---|---|
 | `mktdata_enriched/2013..2026.parquet` | 逐年全市场个股 OHLCV + turnover + float_mv + is_limit_up + **listed_days** |
 | `mktdata_enriched/others/corporate_actions.parquet` | 除权除息事件,复权重算用 |
-| `data/<最新日期>/kline.parquet` | 从中提取 **510300**(大盘 MA200 闸门用,个股数据里没有 ETF) |
+
+第三样(大盘 MA200 闸门用的 510300 后复权序列)已随本仓库提交:
+`data_prep/510300_hfq.parquet`(182KB)。
 
 ```bash
 # 1) 取源数据(浅克隆也可以,但必须 fetch 到最新 commit 再 git lfs pull)
@@ -154,17 +156,10 @@ python data_prep/rebuild_price_data_fixed.py
 #      而组合层选股(pick="small")按 float_mv 排序,所以会影响组合级结果。
 python data_prep/refine_raw_close_vwap.py
 
-# 4) 补 510300(重建脚本不产出 ETF)
-python - <<'PY'
-import os, pandas as pd
-k = pd.read_parquet("/path/to/etf-netflow-dev/data/20260729/kline.parquet")
-s = k[k["code"].astype(str).str.zfill(6) == "510300"].copy()
-s["date"] = pd.to_datetime(s["trade_date"])
-s = s.sort_values("date").drop_duplicates("date", keep="last").set_index("date")
-s.index = s.index.tz_localize("UTC"); s.index.name = "date"
-s[["open","high","low","close","volume","amount"]].astype(float).to_parquet(
-    os.environ["OXQ_RESEARCH_DIR"] + "/oxq_stock_market_fixed/510300.parquet")
-PY
+# 4) 补 510300(重建脚本不产出 ETF;这份**后复权**序列已随仓库提交,182KB)
+cp data_prep/510300_hfq.parquet $OXQ_RESEARCH_DIR/oxq_stock_market_fixed/510300.parquet
+#    ⚠️ 不要用 data/*/kline.parquet 里的 510300 —— 那是**不复权**价,
+#       会让 MA200 闸门有 87 天判定不同,组合级锚点必挂(见下面坑 4)
 
 # 5) 重建事件文件(~240s)
 python data_prep/oneil_prelaunch_attribution.py
@@ -180,6 +175,9 @@ python data_prep/oneil_prelaunch_attribution.py
 | 事件文件 | `70,310` 笔突破事件 |
 | 最终锚点 | 交易级净期望 **+4.61%**、组合年化 **+6.34%**(`bull_features/base_pattern_trade.py` 开头会自己 assert) |
 
+2026-08-13 按本流程完整走过一遍,五项全部逐一对上,另有一项独立真值核对:
+宁德时代 300750 @ 2021-11-30 重建不复权价 **679.68** vs 雪球真值 **680.00**(偏差 −0.047%)。
+
 **已知缺口**:`oxq_stock_market_with_fundamentals/`(旧面板,只用于搬运
 `eps/revenue/net_income/book_value_per_share/roe/operating_cash_flow` 六列)
 不在上述源里,重建后这六列全为 NaN,重建日志会报 `无财务列 5232`。
@@ -187,7 +185,7 @@ python data_prep/oneil_prelaunch_attribution.py
 补法:`mktdata_enriched/others/financials.parquet` 里有同名的全部六列
 (378,087 行,含 `publish_date`),按发布日做 point-in-time 前向填充即可重建。
 
-**踩过的三个坑,别再踩:**
+**踩过的四个坑,别再踩:**
 1. 本地 checkout 可能是**浅克隆且停在旧 commit**,`ls` 看不到 `mktdata_enriched` ——
    **不要据此判断数据不存在**,先 `git fetch` 看远端。
 2. `git lfs pull` 只对 **HEAD** 生效。只 `git checkout FETCH_HEAD -- <路径>` 会得到
@@ -200,17 +198,20 @@ python data_prep/oneil_prelaunch_attribution.py
    交易级逐笔独立回放,**只用 OHLC**;组合级还要用
    **`float_mv`**(选股排序 `pick="small"`)和 **510300 的 MA200 闸门**。
    **两个锚点必须都过 —— 只验交易级会给出"数据没问题"的错误结论。**
-4. **510300 必须用复权序列。** 个股数据里没有 ETF,要另外补;
-   而 `data/*/kline.parquet` 里的是**不复权**价。两者实测差别很大:
+4. **510300 必须用复权序列 —— 这就是上面那个组合级锚点差异的真正原因。**
+   个股数据里没有 ETF,要另外补;而 `data/*/kline.parquet` 里的是**不复权**价:
 
-   | 来源 | 首 | 末 | 累计 | MA200 之上占比 |
-   |---|---:|---:|---:|---:|
-   | `~/.oxq/data/market/510300.parquet`(复权) | 2.0232 | 4.7010 | **+132.4%** | 54.39% |
-   | `data/*/kline.parquet`(不复权) | 2.5300 | 4.6570 | +84.1% | 51.75% |
+   | 来源 | 首 | 末 | 累计 | MA200 之上占比 | 组合级锚点 |
+   |---|---:|---:|---:|---:|---|
+   | `data_prep/510300_hfq.parquet`(后复权,**已提交**) | 2.0232 | 4.7010 | **+132.4%** | 54.39% | **+6.34% ✓** |
+   | `data/*/kline.parquet`(不复权) | 2.5300 | 4.6570 | +84.1% | 51.75% | +2.98% ✗ |
 
    两者比值从 0.7997 单向漂到 1.0000(分红累积的形状),
-   **MA200 闸门有 87 天(2.64%)判定不同**。而 §42 实测这个闸门是全研究最大的
-   杠杆(年化 −13.73% → +6.34%),闸门时点一动组合年化就会大幅变。
+   **MA200 闸门有 87 天(2.64%)判定不同**。§42 实测这个闸门是全研究最大的
+   杠杆(年化 −13.73% → +6.34%),**2.64% 的闸门差异就足以让组合年化少掉一半**。
+
+   为此把这 182KB 的复权序列直接提交进了仓库(`data_prep/510300_hfq.parquet`),
+   恢复流程不再依赖任何可能消失的本地缓存。
 
 ### 1. 运行
 
