@@ -148,6 +148,13 @@ ln -sf  /path/to/etf-netflow-dev/mktdata_enriched/others/corporate_actions.parqu
 # 3) 重建面板(~150s)
 python data_prep/rebuild_price_data_fixed.py
 
+# 3.5) 用 VWAP 重新标定 raw_close —— **这一步不能跳**
+#      它会重算 float_mv = raw_close × outstanding_share,
+#      而组合层选股(pick="small")就是按 float_mv 排序的。
+#      跳过它:交易级锚点照样是 +4.61%(不用 float_mv),
+#              组合级会掉到 +4.09%,assert 会拦下来。
+python data_prep/refine_raw_close_vwap.py
+
 # 4) 补 510300(重建脚本不产出 ETF)
 python - <<'PY'
 import os, pandas as pd
@@ -181,12 +188,19 @@ python data_prep/oneil_prelaunch_attribution.py
 补法:`mktdata_enriched/others/financials.parquet` 里有同名的全部六列
 (378,087 行,含 `publish_date`),按发布日做 point-in-time 前向填充即可重建。
 
-**踩过的两个坑,别再踩:**
+**踩过的三个坑,别再踩:**
 1. 本地 checkout 可能是**浅克隆且停在旧 commit**,`ls` 看不到 `mktdata_enriched` ——
    **不要据此判断数据不存在**,先 `git fetch` 看远端。
 2. `git lfs pull` 只对 **HEAD** 生效。只 `git checkout FETCH_HEAD -- <路径>` 会得到
    一堆 133 字节的指针文件,而 `git lfs pull` 会**静默什么都不做**(不报错)。
    必须先 `git checkout --detach FETCH_HEAD`。
+3. **跳过 3.5 的 refine 步骤,只有组合级锚点会挂,交易级照样完美通过。**
+   实测:交易级 +4.61%(与原值一字不差)、组合级 +4.09%(应 +6.34%)。
+   这是「交易级 ≠ 组合级」在数据管道上的又一次体现 ——
+   **只对交易级锚点会给出"数据没问题"的错误结论。两个锚点必须都过。**
+   另一个可对照的痕迹:重建日志验证1 里的
+   「`|偏差|>50% 的标的:5.4% ← 应接近0`」,那 5.4% 正是 refine 脚本
+   要处理的「283 只标的 volume 以手计而非股」。**重建日志自己就在提示这一步没做。**
 
 ### 1. 运行
 
