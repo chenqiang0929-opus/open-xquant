@@ -1,6 +1,30 @@
 # A股牛股研究案例:突破 + 止损交易系统
 
-> 📄 **先读这个**:[`RESEARCH_SUMMARY.md`](RESEARCH_SUMMARY.md) —— 66 节研究的独立总结报告(结论 / 三个结构性发现 / 11 个自查错误 / 与 DeepSeek 独立研究的交叉验证)。
+## 🚀 从新会话开始(第一件事)
+
+面板数据是**派生物**且不在 git 仓库里(约 1GB),容器回收后必然消失 —— 已发生三次。
+**先恢复面板,再干别的:**
+
+```bash
+bash examples/ashare-bull-stock-study/data_prep/recover_panel.sh
+```
+
+约 12 分钟,跑完自动核对 **10 项锚点**(面板 `3297 × 5232`、起止日、
+有财务 `4967`/无财务 `265`,以及 `688183 @2024-05-31` 的收盘 `14.49`/MA100 `9.69`/
+MA300 `10.74`/RPS50 `99.7`),任一对不上即退出非零。细节与踩过的四个坑见 [§0.1](#01-从零恢复面板容器机器换了之后)。
+
+然后读这两份:
+
+| 文件 | 内容 |
+|---|---|
+| [`ETF_research_summary_for_stock_comparison.md`](ETF_research_summary_for_stock_comparison.md) | §1~§77 全部研究过程与结论 |
+| [`TRADING_SYSTEM.md`](TRADING_SYSTEM.md) | 系统规格 v0.3,含**「已证伪、必须删掉」清单**与七处未验证项 |
+
+**开发分支**:`claude/human-guide-docs-xi52le`(main 定期从这里合并)。
+
+---
+
+> 📄 **总结报告**:[`RESEARCH_SUMMARY.md`](RESEARCH_SUMMARY.md) —— 独立总结(结论 / 三个结构性发现 / 11 个自查错误 / 与 DeepSeek 独立研究的交叉验证)。
 > 本 README 是目录与复现步骤;完整过程见 `ETF_research_summary_for_stock_comparison.md`。
 
 一次完整的 A股个股量化研究记录,以及其中「突破后跟随」方向的可复现代码。
@@ -32,7 +56,7 @@ vs 基准 +7.22% / 0.423 / **-32.8%**)——**收益接近、回撤差一倍**�
 
 ```
 RESEARCH_SUMMARY.md                            **独立总结报告(先读这个)**
-ETF_research_summary_for_stock_comparison.md   研究记录主文档(66节)
+ETF_research_summary_for_stock_comparison.md   研究记录主文档(69节)
 external/          DeepSeek 独立研究的材料留档(交叉验证用)+ VERIFICATION_SPEC.md(待做检验规格)
 data_prep/         上游数据构建(产出下面两个输入)
 breakout_system/   突破+止损系统本体(第41-42节)
@@ -89,6 +113,9 @@ results/           所有表格数字的来源 CSV;results/logs/ 是原始运行
 | `base_pattern_detector.py` | **欧奈尔基底形态检测器**(杯柄/平底/双底,原书数值) | 54 |
 | `base_pattern_cases.py` / `_cases2.py` | 检测器人工核对(先在 t\* 上、再在真实突破日上) | 54 |
 | `base_pattern_attrib.py` / `base_pattern_trade.py` | 基底形态的归因 / 交易检验 | 54 |
+| `age_effect_mvneutral.py`(在 `portfolio_layer/`) | **市值中性化后的年龄效应**:红轴期间同市值档内,1-3年 vs 同档随机 ≥100% **1.21/1.07**、≥500% **2.73/1.36**,三门槛 p 全 0.0000 —— **69 节里第一个通过完整控制的结果** | 69 |
+| `regime_cohort_righttail.py`(在 `portfolio_layer/`) | **牛熊分制下的上市年龄效应**:月线MACD红轴时「1-3年」/「>10年」=1.40,四段牛市全过;**但市值中性化后掉到 1.21** | 68 |
+| `newpool_righttail.py`(在 `portfolio_layer/`) | **地基检验**:次新池右尾密度 vs 全市场;≥100% 只 1.12 倍但 ≥500% 达 **1.52 倍**,且十三年未衰减 | 67 |
 | `newlisting_flatbase.py` | **次新股(上市1-3年)+ 箱体突破**,双层同日随机对照;效应 80% 来自池子、20% 来自形态且不显著 | 66 |
 | `survivorship_100x.py` | **幸存者偏差量化**:随机重仓持有10年,P(≥100倍)≈0.003~0.006%,且**全部来自 2013 入场** | 66 |
 | `tao_golden10.py` | **陶博士年度金股规则**(RPS>90 池 + 每年1月等权10只)全市场检验,年化 +0.69% vs 全市场随机 +4.90% | 66 |
@@ -136,6 +163,30 @@ export OXQ_RESEARCH_DIR=/path/to/your/research-workdir
 第三样(大盘 MA200 闸门用的 510300 后复权序列)已随本仓库提交:
 `data_prep/510300_hfq.parquet`(182KB)。
 
+### 一条命令(推荐)
+
+```bash
+bash data_prep/recover_panel.sh
+```
+
+脚本把下面全部 6 步 + 10 项锚点核对固化在一起,`set -euo pipefail`,
+**每步跑完立即核对,对不上即退出非零**,绝不带着错的面板往下跑。
+可用 `SRC_REPO` / `OXQ_RESEARCH_DIR` / `OXQ_PYTHON` 覆盖默认路径。
+
+核对的 10 项:面板 `3297 × 5232`、起止日、有财务 `4967` / 无财务 `265`、
+以及 `688183 @2024-05-31` 的 收盘 `14.49` / MA100 `9.69` / MA300 `10.74` / RPS50 `99.7`。
+**最后四项是从 §75 实测取的具体数值,它们才真正检验价格序列有没有重建对。**
+
+> 2026-08-14 面板第三次被容器回收后,本脚本完整跑通一遍,10 项锚点全部逐一对上。
+
+**为什么面板会反复丢**:它是**派生物**,且位于 git 仓库**之外**
+(`$OXQ_RESEARCH_DIR`,约 1GB),从未被提交;而研究会话跑在**临时容器**里,
+闲置一段时间即被回收 —— 仓库能从 GitHub 拉回,面板不能。
+三次丢失(08-13 / 08-14 ×2)**全部发生在长时间暂停之后**。
+不提交面板到仓库:体积太大,且是派生数据,塞进开源项目仓库是错的。
+
+### 手工 6 步(附录:说明脚本在做什么)
+
 ```bash
 # 1) 取源数据(浅克隆也可以,但必须 fetch 到最新 commit 再 git lfs pull)
 cd /path/to/etf-netflow-dev
@@ -166,6 +217,9 @@ cp data_prep/510300_hfq.parquet $OXQ_RESEARCH_DIR/oxq_stock_market_fixed/510300.
 
 # 5) 重建事件文件(~240s)
 python data_prep/oneil_prelaunch_attribution.py
+
+# 6) 回填六列财务字段(~80s)  ⚠️ 2026-08-14 漏过这一步,详见下面坑 5
+python data_prep/fill_fundamentals.py
 ```
 
 **每一步的验收数字(对不上就停,不要往下跑):**
@@ -177,18 +231,18 @@ python data_prep/oneil_prelaunch_attribution.py
 | 面板维度 | `3,297 × 5,232`,`2013-01-04 ~ 2026-08-03` |
 | 事件文件 | `70,310` 笔突破事件 |
 | 最终锚点 | 交易级净期望 **+4.61%**、组合年化 **+6.34%**(`bull_features/base_pattern_trade.py` 开头会自己 assert) |
+| 财务回填 | `有财务 4,967 / 无财务 265`,且**价格列逐字节自检通过 5,232** |
 
 2026-08-13 按本流程完整走过一遍,五项全部逐一对上,另有一项独立真值核对:
 宁德时代 300750 @ 2021-11-30 重建不复权价 **679.68** vs 雪球真值 **680.00**(偏差 −0.047%)。
 
-**已知缺口**:`oxq_stock_market_with_fundamentals/`(旧面板,只用于搬运
-`eps/revenue/net_income/book_value_per_share/roe/operating_cash_flow` 六列)
-不在上述源里,重建后这六列全为 NaN,重建日志会报 `无财务列 5232`。
-价格类研究(§41-62、§64-65)完全不受影响;**只有 §63 成长股方向需要它**。
-补法:`mktdata_enriched/others/financials.parquet` 里有同名的全部六列
-(378,087 行,含 `publish_date`),按发布日做 point-in-time 前向填充即可重建。
+**六列财务字段**(`eps/revenue/net_income/book_value_per_share/roe/operating_cash_flow`):
+`rebuild_price_data_fixed.py` **不产出**它们,重建后全为 NaN(日志报 `无财务列 5232`)。
+**必须跑上面的第 6 步 `fill_fundamentals.py` 补回** ——
+源是 `mktdata_enriched/others/financials.parquet`(含 `publish_date`),
+按发布日做 point-in-time 前向填充,只加列、不动价格字节。
 
-**踩过的四个坑,别再踩:**
+**踩过的五个坑,别再踩:**
 1. 本地 checkout 可能是**浅克隆且停在旧 commit**,`ls` 看不到 `mktdata_enriched` ——
    **不要据此判断数据不存在**,先 `git fetch` 看远端。
 2. `git lfs pull` 只对 **HEAD** 生效。只 `git checkout FETCH_HEAD -- <路径>` 会得到
@@ -325,3 +379,10 @@ OOS 的**后 90% 交易加起来是亏钱的**(基线 -406.2%、三条全中 -15
 但 9 格全部过不了随机对照(最好 p=0.16)。
 真正的原因写在那一节里:**同日随机买一只股票、同样的离场规则,年化中位就有 5.31%~6.46%** ——
 基准比想象的高得多。
+
+5. **财务字段会静默缺失。** 2026-08-14 容器重建时,上面的步骤表里**没有第 6 步**
+   (那时它只写在「已知缺口」一段的正文里,没进步骤表),结果整块面板的
+   `net_income/revenue/eps` **全部 0% 覆盖**,而价格锚点照常通过 ——
+   **价格锚点不检查财务列,它不会替你发现这个。**
+   直到用户拿生益电子的「业绩大幅增长」来对信号时才暴露(§75)。
+   **验收要单独看「有财务 4,967 / 无财务 265」这一行。**
