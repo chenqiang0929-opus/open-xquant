@@ -6,10 +6,19 @@
 **先恢复面板,再干别的:**
 
 ```bash
+# 先花 5 秒查环境(强烈建议,免得跑到一半才发现缺东西)
+PREFLIGHT_ONLY=1 bash examples/ashare-bull-stock-study/data_prep/recover_panel.sh
+
+# 预检通过后跑完整恢复
 bash examples/ashare-bull-stock-study/data_prep/recover_panel.sh
 ```
 
-约 12 分钟,跑完自动核对 **10 项锚点**(面板 `3297 × 5232`、起止日、
+**预检会一次报出全部缺失并给出可执行的修复命令**(不会让你一条条试错)。
+干净容器通常缺三样:`git-lfs` 未装、没有带 pandas 的 python、
+源仓库 `etf-netflow-dev` 未挂进 session(私有仓库,需 Agent 用 `add_repo` 挂载)。
+源仓库缺失时脚本会**自动尝试克隆**。
+
+完整恢复约 12 分钟,跑完自动核对 **10 项锚点**(面板 `3297 × 5232`、起止日、
 有财务 `4967`/无财务 `265`,以及 `688183 @2024-05-31` 的收盘 `14.49`/MA100 `9.69`/
 MA300 `10.74`/RPS50 `99.7`),任一对不上即退出非零。细节与踩过的四个坑见 [§0.1](#01-从零恢复面板容器机器换了之后)。
 
