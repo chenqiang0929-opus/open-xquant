@@ -16,23 +16,99 @@
 set -euo pipefail
 
 SRC_REPO="${SRC_REPO:-/workspace/etf-netflow-dev}"
+SRC_URL="${SRC_URL:-https://github.com/chenqiang0929-opus/etf-netflow-dev}"
 export OXQ_RESEARCH_DIR="${OXQ_RESEARCH_DIR:-/home/user/oxq-panel}"
 STUDY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PANEL="$OXQ_RESEARCH_DIR/oxq_stock_market_fixed"
 
-# ── 解析 python:优先用 open-xquant 缓存 SDK 的 runner(版本哈希会变,用通配) ──
-PY="${OXQ_PYTHON:-}"
-if [ -z "$PY" ]; then
-  PY="$(ls -d "$HOME"/.config/open-xquant/sdk-bundles/*/runner/.venv/bin/python 2>/dev/null | head -1 || true)"
+step() { echo; echo "═══ $* ═══"; }
+fail() { echo "✗ $*" >&2; exit 1; }
+
+# ══════════════════════════════════════════════════════════════════════════
+# 0. 预检 —— **一次报出全部缺失**,不要让人一个个试错
+#
+# 这一段的由来:本脚本首版把「开发容器恰好具备的东西」当成了普遍前提 ——
+# git-lfs 已装、open-xquant SDK venv 已缓存、etf-netflow-dev 已挂进 session。
+# 换一个干净容器,三样全没有,而 `set -euo pipefail` 会在第 1/6 步直接退出,
+# 报错还很难懂。**预检必须先于任何副作用,且一次报全。**
+# ══════════════════════════════════════════════════════════════════════════
+step "0/6 预检"
+PROBLEMS=()
+
+# ── git-lfs ──
+if ! command -v git-lfs >/dev/null 2>&1; then
+  PROBLEMS+=("git-lfs 未安装(源数据是 LFS 对象,约 791MB)
+       修复:  apt-get update && apt-get install -y git-lfs && git lfs install
+       或:    conda install -y -c conda-forge git-lfs && git lfs install")
+else
+  echo "  ✓ git-lfs  $(git lfs version | head -1)"
 fi
-[ -z "$PY" ] && PY="$(command -v python3)"
+
+# ── python:必须能 import pandas/numpy/pyarrow,光有解释器不算 ──
+PY=""
+for cand in "${OXQ_PYTHON:-}" \
+            $(ls -d "$HOME"/.config/open-xquant/sdk-bundles/*/runner/.venv/bin/python 2>/dev/null) \
+            "$(command -v python3 || true)"; do
+  [ -n "$cand" ] && [ -x "$cand" ] || continue
+  if "$cand" -c "import pandas, numpy, pyarrow" >/dev/null 2>&1; then
+    PY="$cand"
+    break
+  fi
+done
+if [ -z "$PY" ]; then
+  PROBLEMS+=("找不到带 pandas/numpy/pyarrow 的 python
+       (光有 python3 不够 —— 重建脚本要读 parquet)
+       修复:  python3 -m pip install pandas numpy pyarrow
+       或:    uv pip install pandas numpy pyarrow
+       或指定: OXQ_PYTHON=/path/to/python bash \$0")
+else
+  echo "  ✓ python   $PY"
+  echo "             pandas $("$PY" -c 'import pandas;print(pandas.__version__)')"
+fi
+
+# ── 源仓库:没有就自动克隆(浅克隆,LFS 稍后单独拉) ──
+if [ ! -d "$SRC_REPO/.git" ]; then
+  echo "  · 源仓库不在 $SRC_REPO,尝试克隆 $SRC_URL"
+  mkdir -p "$(dirname "$SRC_REPO")"
+  if GIT_LFS_SKIP_SMUDGE=1 git clone --depth=1 "$SRC_URL" "$SRC_REPO" 2>&1 | tail -3; then
+    echo "  ✓ 源仓库   已克隆到 $SRC_REPO"
+  else
+    PROBLEMS+=("无法克隆源仓库 $SRC_URL
+       该仓库是私有的,需要本 session 有访问权。
+       修复:  让 Agent 用 add_repo 把 chenqiang0929-opus/etf-netflow-dev 挂进 session,
+              或手工克隆到 $SRC_REPO 后重跑,
+              或用 SRC_REPO=/已有路径 bash \$0 指向已有 clone")
+  fi
+else
+  echo "  ✓ 源仓库   $SRC_REPO"
+fi
+
+# ── 研究脚本 ──
+for s in rebuild_price_data_fixed.py refine_raw_close_vwap.py fill_fundamentals.py \
+         510300_hfq.parquet; do
+  [ -f "$STUDY/data_prep/$s" ] || PROBLEMS+=("缺 data_prep/$s —— 仓库不完整?")
+done
+
+if [ ${#PROBLEMS[@]} -gt 0 ]; then
+  echo
+  echo "✗ 预检未通过,共 ${#PROBLEMS[@]} 项:"
+  for i in "${!PROBLEMS[@]}"; do
+    echo
+    echo "  [$((i+1))] ${PROBLEMS[$i]}"
+  done
+  echo
+  echo "  **全部修完再重跑本脚本。以上问题一次性列出,不必逐个试错。**"
+  exit 1
+fi
+echo
 echo "python : $PY"
 echo "源仓库 : $SRC_REPO"
 echo "工作区 : $OXQ_RESEARCH_DIR"
-echo
-
-step() { echo; echo "═══ $* ═══"; }
-fail() { echo "✗ $*" >&2; exit 1; }
+if [ -n "${PREFLIGHT_ONLY:-}" ]; then
+  echo
+  echo "✓ 预检通过(PREFLIGHT_ONLY 已设,到此为止)。去掉该变量即执行完整恢复。"
+  exit 0
+fi
 
 # ── 1. 取源数据 ────────────────────────────────────────────────────────────
 # 坑 1:本地 checkout 可能是**浅克隆且停在旧 commit**,`ls` 看不到 mktdata_enriched。
