@@ -1,8 +1,8 @@
 # A股牛股量化研究 · 总结报告
 
 > 研究区间 **2013-01-04 ~ 2026-08-03**，全市场 **5,232 只**股票、**3,297** 个交易日
-> 共 **66 节**、约 **48 个脚本**，**14 个连续的事前判据检验全部未通过**
-> 完整过程见同目录 `ETF_research_summary_for_stock_comparison.md`（6,102 行，按时间顺序的研究日志）
+> 共 **67 节**、约 **49 个脚本**，**14 个连续的事前判据检验全部未通过**
+> 完整过程见同目录 `ETF_research_summary_for_stock_comparison.md`（6,254 行，按时间顺序的研究日志）
 
 ⚠️ 本文是研究记录，**不构成投资建议**。所有数字都是历史回测结果。
 
@@ -331,7 +331,7 @@ w_S_MA 的 up50=10.4% 却 up100=9.6%，隐含「涨过50%的里 92% 会到 100%�
 
 > 「用 open-xquant 自动选出明年能稳定赢利的投资组合，类似 A 股的标普 500。」
 
-66 节的结论是：**这个问题的答案可能不在选股上。**
+67 节的结论是：**这个问题的答案可能不在选股上。**
 
 ### 唯一一个还没测、且值得测的选股假说：上市 1-3 年的次新股
 
@@ -365,7 +365,7 @@ w_S_MA 的 up50=10.4% 却 up100=9.6%，隐含「涨过50%的里 92% 会到 100%�
 
 ---
 
-*完整研究日志：`ETF_research_summary_for_stock_comparison.md`（66 节 / 6,102 行）
+*完整研究日志：`ETF_research_summary_for_stock_comparison.md`（67 节 / 6,254 行）
 脚本与原始结果：`breakout_system/`、`rps_pool_study/`、`bull_features/`、`portfolio_layer/`、
 `growth_study/`、`data_prep/`、`results/`
 DeepSeek 的独立研究材料留档于 `external/`，待做检验的规格见 `external/VERIFICATION_SPEC.md`*
