@@ -1,5 +1,8 @@
 # A股牛股研究案例:突破 + 止损交易系统
 
+> 📄 **先读这个**:[`RESEARCH_SUMMARY.md`](RESEARCH_SUMMARY.md) —— 66 节研究的独立总结报告(结论 / 三个结构性发现 / 11 个自查错误 / 与 DeepSeek 独立研究的交叉验证)。
+> 本 README 是目录与复现步骤;完整过程见 `ETF_research_summary_for_stock_comparison.md`。
+
 一次完整的 A股个股量化研究记录,以及其中「突破后跟随」方向的可复现代码。
 
 > 本目录是**研究案例**,不是 oxq 框架的一部分。脚本只依赖
@@ -28,12 +31,15 @@ vs 基准 +7.22% / 0.423 / **-32.8%**)——**收益接近、回撤差一倍**�
 ## 目录
 
 ```
-ETF_research_summary_for_stock_comparison.md   研究记录主文档(61节)
+RESEARCH_SUMMARY.md                            **独立总结报告(先读这个)**
+ETF_research_summary_for_stock_comparison.md   研究记录主文档(66节)
+external/          DeepSeek 独立研究的材料留档(交叉验证用)+ VERIFICATION_SPEC.md(待做检验规格)
 data_prep/         上游数据构建(产出下面两个输入)
 breakout_system/   突破+止损系统本体(第41-42节)
 rps_pool_study/    RPS动量股池 + 双增长过滤 + 广度择时(第43-47节)
 bull_features/     牛股特征:成长字段修正、三个假设、20因子扫描(第50-53节)
 portfolio_layer/   指数设计、组合层、口袋支点功效(第56节)
+growth_study/      **成长股方向**:去掉252天上限与固定止损的长持有检验(第63节)
 consolidation_screener.py   **可直接运行的整理形态筛选器**(缩量+波动收敛+浅回调,第59-61节)
                             默认尺子按场景自动切:全市场选股=横截面分位,
                             单只回看=绝对阈值;`--legacy`/`--adaptive` 可手动指定
@@ -58,7 +64,19 @@ results/           所有表格数字的来源 CSV;results/logs/ 是原始运行
 | `adaptive_events.py` | **把阈值改成横截面分位、窗口下限改成自适应**,20只案例回归 | 61 |
 | `adaptive_features.py` | 新口径下重选特征 + OOS(300次随机对照) | 61 |
 | `adaptive_transfer.py` | 新口径的迁移复测(**两个大池净期望都转正**) | 61 |
+| `leader_path_features.py` | **路径特征 N(新高密度)+ 群内龙头度 L**;首轮二值化退化作废,修复后 0/4 | 64 |
 | `screener_case_coverage.py` | **落库前自查**:19 只案例在筛选器口径下的 A/B/C 覆盖分解 | 61 |
+| `cross_leg_combo.py` | 跨段组合(① 负向 + ② 正向)+ 择时 ON/OFF 分解 | 62 |
+| `right_tail_anatomy.py` | **右尾解剖**:后 90% 的交易加起来是亏钱的 | 62 |
+| `first_leg_drivers.py` | 第一段的驱动来源(对比同日随机对照股) | 62 |
+
+### `growth_study/` —— 成长股方向(第63节)
+
+| 脚本 | 做什么 |
+|---|---|
+| `growth_case_check.py` | 7 只用户案例的时间轴:财报信号什么时候出、止损会被触发几次 |
+| `growth_exit_rules.py` | 7 种离场规则对比(含用户提的「涨N倍后才止损」「牛市不止损」「三段论启动」) |
+| `growth_fullmarket.py` | **全市场 3 信号 × 3 离场主检验** + 300 次同日随机对照 |
 
 ### `bull_features/` —— 牛股到底和非牛股差在哪
 
@@ -71,6 +89,9 @@ results/           所有表格数字的来源 CSV;results/logs/ 是原始运行
 | `base_pattern_detector.py` | **欧奈尔基底形态检测器**(杯柄/平底/双底,原书数值) | 54 |
 | `base_pattern_cases.py` / `_cases2.py` | 检测器人工核对(先在 t\* 上、再在真实突破日上) | 54 |
 | `base_pattern_attrib.py` / `base_pattern_trade.py` | 基底形态的归因 / 交易检验 | 54 |
+| `newlisting_flatbase.py` | **次新股(上市1-3年)+ 箱体突破**,双层同日随机对照;效应 80% 来自池子、20% 来自形态且不显著 | 66 |
+| `survivorship_100x.py` | **幸存者偏差量化**:随机重仓持有10年,P(≥100倍)≈0.003~0.006%,且**全部来自 2013 入场** | 66 |
+| `tao_golden10.py` | **陶博士年度金股规则**(RPS>90 池 + 每年1月等权10只)全市场检验,年化 +0.69% vs 全市场随机 +4.90% | 66 |
 | `buypoint_and_exit.py` | 买点 2×2(52周新高/量能确认)+ MA20 止盈四变体 | 55 |
 | `pocket_pivot.py` | **口袋支点买点**(双方都没测过的那个) | 55 |
 | `oneil_real_thresholds.py` / `oneil_sampling_variance.py` | 欧奈尔真实阈值、抽样方差 | 50 |
@@ -87,7 +108,7 @@ results/           所有表格数字的来源 CSV;results/logs/ 是原始运行
 
 | 产物 | 体积 | 由谁生成 |
 |---|---|---|
-| `oxq_stock_market_fixed/`(5,232 个 parquet) | >1GB | `data_prep/rebuild_price_data_fixed.py` → `data_prep/refine_raw_close_vwap.py` |
+| `oxq_stock_market_fixed/`(5,232 个 parquet) | 858MB | `data_prep/rebuild_price_data_fixed.py` → `data_prep/refine_raw_close_vwap.py` |
 | `oneil_prelaunch_events_fixed.csv`(70,310 个突破事件) | 19.6MB | `data_prep/oneil_prelaunch_attribution.py` |
 
 所有脚本通过环境变量定位工作目录,**默认是脚本自身所在目录**:
@@ -97,6 +118,103 @@ export OXQ_RESEARCH_DIR=/path/to/your/research-workdir
 ```
 
 把上面两个产物放在 `$OXQ_RESEARCH_DIR` 下,再按顺序运行。
+
+### 0.1 从零恢复面板(容器/机器换了之后)
+
+> **这两个产物都是派生物,丢了不要紧,源数据是持久的。**
+> 2026-08-13 容器被回收过一次,派生物全部消失,按下面这条链 **10 分钟**恢复完毕,
+> 面板维度与全部锚点逐一对上。**恢复过程中不要重新下载行情** ——
+> 重下的是另一条价格序列,锚点必然对不上,等于换了一个面板。
+
+源数据在 `chenqiang0929-opus/etf-netflow-dev` 仓库(Git LFS),需要两样:
+
+| 路径 | 内容 |
+|---|---|
+| `mktdata_enriched/2013..2026.parquet` | 逐年全市场个股 OHLCV + turnover + float_mv + is_limit_up + **listed_days** |
+| `mktdata_enriched/others/corporate_actions.parquet` | 除权除息事件,复权重算用 |
+
+第三样(大盘 MA200 闸门用的 510300 后复权序列)已随本仓库提交:
+`data_prep/510300_hfq.parquet`(182KB)。
+
+```bash
+# 1) 取源数据(浅克隆也可以,但必须 fetch 到最新 commit 再 git lfs pull)
+cd /path/to/etf-netflow-dev
+git fetch --depth=1 origin main
+git checkout --detach FETCH_HEAD      # 关键:git lfs pull 只认 HEAD,不认 FETCH_HEAD
+git lfs pull                          # 62 个 LFS 对象,约 791MB
+
+# 2) 摆成重建脚本要的目录结构(用软链,不必复制)
+export OXQ_RESEARCH_DIR=/path/to/research-workdir
+mkdir -p $OXQ_RESEARCH_DIR/mktdata_enriched_others
+ln -sfn /path/to/etf-netflow-dev/mktdata_enriched $OXQ_RESEARCH_DIR/mktdata_enriched
+ln -sf  /path/to/etf-netflow-dev/mktdata_enriched/others/corporate_actions.parquet \
+        $OXQ_RESEARCH_DIR/mktdata_enriched_others/
+
+# 3) 重建面板(~150s)
+python data_prep/rebuild_price_data_fixed.py
+
+# 3.5) 用 VWAP 重新标定 raw_close(独立真值核对:宁德时代 300750 @ 2021-11-30
+#      重建价 679.68 vs 雪球 680.00,偏差 -0.047%;旧的公司行动表反推法是 -0.967%)
+#      它同时重算 float_mv = raw_close × outstanding_share,
+#      而组合层选股(pick="small")按 float_mv 排序,所以会影响组合级结果。
+python data_prep/refine_raw_close_vwap.py
+
+# 4) 补 510300(重建脚本不产出 ETF;这份**后复权**序列已随仓库提交,182KB)
+cp data_prep/510300_hfq.parquet $OXQ_RESEARCH_DIR/oxq_stock_market_fixed/510300.parquet
+#    ⚠️ 不要用 data/*/kline.parquet 里的 510300 —— 那是**不复权**价,
+#       会让 MA200 闸门有 87 天判定不同,组合级锚点必挂(见下面坑 4)
+
+# 5) 重建事件文件(~240s)
+python data_prep/oneil_prelaunch_attribution.py
+```
+
+**每一步的验收数字(对不上就停,不要往下跑):**
+
+| 步骤 | 必须等于 |
+|---|---|
+| 重建源表读入 | `11,788,183 行 / 5,232 只标的` |
+| 重建输出 | `5,232` 个 parquet |
+| 面板维度 | `3,297 × 5,232`,`2013-01-04 ~ 2026-08-03` |
+| 事件文件 | `70,310` 笔突破事件 |
+| 最终锚点 | 交易级净期望 **+4.61%**、组合年化 **+6.34%**(`bull_features/base_pattern_trade.py` 开头会自己 assert) |
+
+2026-08-13 按本流程完整走过一遍,五项全部逐一对上,另有一项独立真值核对:
+宁德时代 300750 @ 2021-11-30 重建不复权价 **679.68** vs 雪球真值 **680.00**(偏差 −0.047%)。
+
+**已知缺口**:`oxq_stock_market_with_fundamentals/`(旧面板,只用于搬运
+`eps/revenue/net_income/book_value_per_share/roe/operating_cash_flow` 六列)
+不在上述源里,重建后这六列全为 NaN,重建日志会报 `无财务列 5232`。
+价格类研究(§41-62、§64-65)完全不受影响;**只有 §63 成长股方向需要它**。
+补法:`mktdata_enriched/others/financials.parquet` 里有同名的全部六列
+(378,087 行,含 `publish_date`),按发布日做 point-in-time 前向填充即可重建。
+
+**踩过的四个坑,别再踩:**
+1. 本地 checkout 可能是**浅克隆且停在旧 commit**,`ls` 看不到 `mktdata_enriched` ——
+   **不要据此判断数据不存在**,先 `git fetch` 看远端。
+2. `git lfs pull` 只对 **HEAD** 生效。只 `git checkout FETCH_HEAD -- <路径>` 会得到
+   一堆 133 字节的指针文件,而 `git lfs pull` 会**静默什么都不做**(不报错)。
+   必须先 `git checkout --detach FETCH_HEAD`。
+3. **交易级锚点通过 ≠ 面板对了。** 恢复过程中反复出现
+   「交易级 +4.61% 一字不差、组合级差很远」:
+   未跑 refine 时 `+4.09%`,跑了 refine 反而变成 `+2.98%`
+   ——**后一个数直接证伪了「是 refine 漏了」这个假设**。
+   交易级逐笔独立回放,**只用 OHLC**;组合级还要用
+   **`float_mv`**(选股排序 `pick="small"`)和 **510300 的 MA200 闸门**。
+   **两个锚点必须都过 —— 只验交易级会给出"数据没问题"的错误结论。**
+4. **510300 必须用复权序列 —— 这就是上面那个组合级锚点差异的真正原因。**
+   个股数据里没有 ETF,要另外补;而 `data/*/kline.parquet` 里的是**不复权**价:
+
+   | 来源 | 首 | 末 | 累计 | MA200 之上占比 | 组合级锚点 |
+   |---|---:|---:|---:|---:|---|
+   | `data_prep/510300_hfq.parquet`(后复权,**已提交**) | 2.0232 | 4.7010 | **+132.4%** | 54.39% | **+6.34% ✓** |
+   | `data/*/kline.parquet`(不复权) | 2.5300 | 4.6570 | +84.1% | 51.75% | +2.98% ✗ |
+
+   两者比值从 0.7997 单向漂到 1.0000(分红累积的形状),
+   **MA200 闸门有 87 天(2.64%)判定不同**。§42 实测这个闸门是全研究最大的
+   杠杆(年化 −13.73% → +6.34%),**2.64% 的闸门差异就足以让组合年化少掉一半**。
+
+   为此把这 182KB 的复权序列直接提交进了仓库(`data_prep/510300_hfq.parquet`),
+   恢复流程不再依赖任何可能消失的本地缓存。
 
 ### 1. 运行
 
@@ -193,3 +311,17 @@ python breakout_system/diag_ruleA_vs_stage1.py       # 基线差异逐项诊断 
 (选中率逐年衰减、案例覆盖、大池迁移),年化 +10.37% 也过了判据,
 但**随机对照 p=0.16 没过**,而且事前已声明「这是最后一轮参数改造」——
 所以结论写的是「**不算发现**」,没有再去调分位、调下限或换特征。
+
+**第六十二节给出了这 12 个检验为什么全都过不了的统一解释:**
+OOS 的**后 90% 交易加起来是亏钱的**(基线 -406.2%、三条全中 -158.6%),
+全部利润来自前 10%。而**所有提高胜率的过滤器都在削右尾** ——
+跨段组合把胜率提到全研究最高的 25.37%,组合年化却从 +10.37% 变成 -0.30%,
+因为它把 80 个最大赢家里的 60 个筛掉了。
+**在这个体系里,胜率不是收益的来源。**
+
+**第六十三节换了一个完全不同的框架再验一次:** 去掉 252 天上限、去掉固定止损,
+用三路信号(基本面 / 月线巨量长阳 / 两者并集)× 三种离场跑全市场。
+**9 格里「不止损」在三路信号上一致最好** —— 这是同一条右尾结论的第三次独立验证。
+但 9 格全部过不了随机对照(最好 p=0.16)。
+真正的原因写在那一节里:**同日随机买一只股票、同样的离场规则,年化中位就有 5.31%~6.46%** ——
+基准比想象的高得多。
