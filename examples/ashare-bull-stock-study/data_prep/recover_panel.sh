@@ -21,6 +21,20 @@ export OXQ_RESEARCH_DIR="${OXQ_RESEARCH_DIR:-/home/user/oxq-panel}"
 STUDY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PANEL="$OXQ_RESEARCH_DIR/oxq_stock_market_fixed"
 
+# ══════════════════════════════════════════════════════════════════════════
+# 产生锚点的环境 —— §1~§77 的全部结论都是在这套版本下算出来的
+#
+# 记这个是因为一处疏漏:首版脚本没记录版本,后来有会话把 pandas 从 3.0.5
+# 回退到项目 uv.lock 锁的 2.3.3,理由是「版本漂移会移动锚点」—— 警觉是对的,
+# **但方向反了**:锚点恰恰是在 3.0.5 下产生的。
+# 注意 sdk-bundles venv 与项目 uv 环境是**两个不同的环境**,不要混。
+# ══════════════════════════════════════════════════════════════════════════
+ANCHOR_PANDAS="3.0.5"
+ANCHOR_NUMPY="2.5.1"
+ANCHOR_PYARROW="25.0.0"
+ANCHOR_PYTHON="3.12.3"
+ANCHOR_ENV="\$HOME/.config/open-xquant/sdk-bundles/*/runner/.venv/bin/python"
+
 step() { echo; echo "═══ $* ═══"; }
 fail() { echo "✗ $*" >&2; exit 1; }
 
@@ -34,36 +48,69 @@ fail() { echo "✗ $*" >&2; exit 1; }
 # ══════════════════════════════════════════════════════════════════════════
 step "0/6 预检"
 PROBLEMS=()
+AUTO="${NO_AUTO_INSTALL:+0}"; AUTO="${AUTO:-1}"      # NO_AUTO_INSTALL=1 可关闭自动安装
 
-# ── git-lfs ──
+find_py() {
+  local cand
+  for cand in "${OXQ_PYTHON:-}" \
+              $(ls -d "$HOME"/.config/open-xquant/sdk-bundles/*/runner/.venv/bin/python 2>/dev/null) \
+              "$(command -v python3 || true)"; do
+    [ -n "$cand" ] && [ -x "$cand" ] || continue
+    if "$cand" -c "import pandas, numpy, pyarrow" >/dev/null 2>&1; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ── git-lfs(缺则自动装) ──
+if ! command -v git-lfs >/dev/null 2>&1 && [ "$AUTO" = 1 ]; then
+  echo "  · git-lfs 未装,尝试自动安装"
+  if command -v apt-get >/dev/null 2>&1; then
+    (apt-get update -qq && apt-get install -y -qq git-lfs) >/dev/null 2>&1 || true
+  elif command -v conda >/dev/null 2>&1; then
+    conda install -y -q -c conda-forge git-lfs >/dev/null 2>&1 || true
+  fi
+  command -v git-lfs >/dev/null 2>&1 && git lfs install >/dev/null 2>&1 || true
+fi
 if ! command -v git-lfs >/dev/null 2>&1; then
-  PROBLEMS+=("git-lfs 未安装(源数据是 LFS 对象,约 791MB)
+  PROBLEMS+=("git-lfs 未安装,且自动安装失败(源数据是 LFS 对象,约 791MB)
        修复:  apt-get update && apt-get install -y git-lfs && git lfs install
        或:    conda install -y -c conda-forge git-lfs && git lfs install")
 else
   echo "  ✓ git-lfs  $(git lfs version | head -1)"
 fi
 
-# ── python:必须能 import pandas/numpy/pyarrow,光有解释器不算 ──
-PY=""
-for cand in "${OXQ_PYTHON:-}" \
-            $(ls -d "$HOME"/.config/open-xquant/sdk-bundles/*/runner/.venv/bin/python 2>/dev/null) \
-            "$(command -v python3 || true)"; do
-  [ -n "$cand" ] && [ -x "$cand" ] || continue
-  if "$cand" -c "import pandas, numpy, pyarrow" >/dev/null 2>&1; then
-    PY="$cand"
-    break
+# ── python:必须能 import pandas/numpy/pyarrow,光有解释器不算(缺则自动装) ──
+PY="$(find_py || true)"
+if [ -z "$PY" ] && [ "$AUTO" = 1 ]; then
+  BASE="${OXQ_PYTHON:-$(command -v python3 || true)}"
+  if [ -n "$BASE" ] && [ -x "$BASE" ]; then
+    echo "  · 未找到带 pandas 的 python,尝试装进 $BASE"
+    "$BASE" -m pip install -q pandas numpy pyarrow >/dev/null 2>&1 \
+      || "$BASE" -m pip install -q --break-system-packages pandas numpy pyarrow >/dev/null 2>&1 \
+      || true
+    PY="$(find_py || true)"
   fi
-done
+fi
 if [ -z "$PY" ]; then
-  PROBLEMS+=("找不到带 pandas/numpy/pyarrow 的 python
+  PROBLEMS+=("找不到带 pandas/numpy/pyarrow 的 python,且自动安装失败
        (光有 python3 不够 —— 重建脚本要读 parquet)
        修复:  python3 -m pip install pandas numpy pyarrow
        或:    uv pip install pandas numpy pyarrow
        或指定: OXQ_PYTHON=/path/to/python bash \$0")
 else
   echo "  ✓ python   $PY"
-  echo "             pandas $("$PY" -c 'import pandas;print(pandas.__version__)')"
+  VERS="$("$PY" -c 'import pandas,numpy,pyarrow,sys;print(pandas.__version__,numpy.__version__,pyarrow.__version__,sys.version.split()[0])')"
+  set -- $VERS
+  echo "             pandas $1  numpy $2  pyarrow $3  python $4"
+  # ── 版本漂移提示(不是硬失败,但锚点挂了这是第一嫌疑) ──
+  if [ "${1%%.*}" != "${ANCHOR_PANDAS%%.*}" ]; then
+    echo "  ⚠️ pandas 主版本与产生锚点时不同:当前 $1,锚点环境 $ANCHOR_PANDAS"
+    echo "     锚点大概率仍能通过(都是滚动均值与百分位排名),但**若锚点核对失败,先查这条**:"
+    echo "     OXQ_PYTHON=\$(ls -d \$HOME/.config/open-xquant/sdk-bundles/*/runner/.venv/bin/python | head -1) bash \$0"
+  fi
 fi
 
 # ── 源仓库:没有就自动克隆(浅克隆,LFS 稍后单独拉) ──
@@ -165,6 +212,7 @@ step "6/6 财务字段 PIT 回填"
 
 # ── 全量锚点核对 ───────────────────────────────────────────────────────────
 step "锚点核对(任一不过即退出非零)"
+export ANCHOR_PANDAS ANCHOR_NUMPY ANCHOR_PYARROW
 "$PY" - <<'PYEOF'
 import glob, os, sys
 import numpy as np, pandas as pd
@@ -213,8 +261,20 @@ r = (F.iloc[t] / F.shift(50).iloc[t] - 1).where(CL.iloc[t].notna()).rank(pct=Tru
 chk("688183 RPS50", round(float(r["688183"]), 1), 99.7, 0.2)
 
 if bad:
+    import numpy as _np
+    import pyarrow as _pa
     print(f"\n✗ {len(bad)} 项锚点对不上:{', '.join(bad)}")
     print("  **不要带着这个面板往下跑。**")
+    print(f"\n  当前环境:pandas {pd.__version__} / numpy {_np.__version__} / "
+          f"pyarrow {_pa.__version__}")
+    print(f"  产生锚点:pandas {os.environ.get('ANCHOR_PANDAS','3.0.5')} / "
+          f"numpy {os.environ.get('ANCHOR_NUMPY','2.5.1')} / "
+          f"pyarrow {os.environ.get('ANCHOR_PYARROW','25.0.0')}")
+    print("  **若版本不同,这是第一嫌疑。** 用产生锚点的环境重试:")
+    print("    OXQ_PYTHON=$(ls -d $HOME/.config/open-xquant/sdk-bundles/*/"
+          "runner/.venv/bin/python | head -1) bash data_prep/recover_panel.sh")
+    print("  若版本相同仍对不上,则是数据问题 —— 检查是否误用了重新下载的行情"
+          "(必须用 etf-netflow-dev 的 mktdata_enriched,不能重下)。")
     sys.exit(1)
 print("\n✓ 全部锚点通过")
 PYEOF
