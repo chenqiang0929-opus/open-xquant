@@ -283,7 +283,7 @@ for part, title in (("A", "A 部分:单独检验(全市场,同市值档随机对
             rows.append(dict(部分=part, 信号=nm, 门槛=f"≥{int(g*100)}%", **s))
             print(f"{nm:<26}{'≥'+str(int(g*100))+'%':<9}{s['n_mo']:>6}"
                   f"{s['obs']:>10.2%}{s['rnd']:>10.2%}{s['lift']:>8.2f}"
-                  f"{f'[{s.lo:.2f}, {s.hi:.2f}]':>18}{s['p']:>8.4f}")
+                  f"{f'''[{s['lo']:.2f}, {s['hi']:.2f}]''':>18}{s['p']:>8.4f}")
         print()
 
 R = pd.DataFrame(rows)
