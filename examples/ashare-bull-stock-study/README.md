@@ -169,6 +169,9 @@ cp data_prep/510300_hfq.parquet $OXQ_RESEARCH_DIR/oxq_stock_market_fixed/510300.
 
 # 5) 重建事件文件(~240s)
 python data_prep/oneil_prelaunch_attribution.py
+
+# 6) 回填六列财务字段(~80s)  ⚠️ 2026-08-14 漏过这一步,详见下面坑 5
+python data_prep/fill_fundamentals.py
 ```
 
 **每一步的验收数字(对不上就停,不要往下跑):**
@@ -180,18 +183,18 @@ python data_prep/oneil_prelaunch_attribution.py
 | 面板维度 | `3,297 × 5,232`,`2013-01-04 ~ 2026-08-03` |
 | 事件文件 | `70,310` 笔突破事件 |
 | 最终锚点 | 交易级净期望 **+4.61%**、组合年化 **+6.34%**(`bull_features/base_pattern_trade.py` 开头会自己 assert) |
+| 财务回填 | `有财务 4,967 / 无财务 265`,且**价格列逐字节自检通过 5,232** |
 
 2026-08-13 按本流程完整走过一遍,五项全部逐一对上,另有一项独立真值核对:
 宁德时代 300750 @ 2021-11-30 重建不复权价 **679.68** vs 雪球真值 **680.00**(偏差 −0.047%)。
 
-**已知缺口**:`oxq_stock_market_with_fundamentals/`(旧面板,只用于搬运
-`eps/revenue/net_income/book_value_per_share/roe/operating_cash_flow` 六列)
-不在上述源里,重建后这六列全为 NaN,重建日志会报 `无财务列 5232`。
-价格类研究(§41-62、§64-65)完全不受影响;**只有 §63 成长股方向需要它**。
-补法:`mktdata_enriched/others/financials.parquet` 里有同名的全部六列
-(378,087 行,含 `publish_date`),按发布日做 point-in-time 前向填充即可重建。
+**六列财务字段**(`eps/revenue/net_income/book_value_per_share/roe/operating_cash_flow`):
+`rebuild_price_data_fixed.py` **不产出**它们,重建后全为 NaN(日志报 `无财务列 5232`)。
+**必须跑上面的第 6 步 `fill_fundamentals.py` 补回** ——
+源是 `mktdata_enriched/others/financials.parquet`(含 `publish_date`),
+按发布日做 point-in-time 前向填充,只加列、不动价格字节。
 
-**踩过的四个坑,别再踩:**
+**踩过的五个坑,别再踩:**
 1. 本地 checkout 可能是**浅克隆且停在旧 commit**,`ls` 看不到 `mktdata_enriched` ——
    **不要据此判断数据不存在**,先 `git fetch` 看远端。
 2. `git lfs pull` 只对 **HEAD** 生效。只 `git checkout FETCH_HEAD -- <路径>` 会得到
@@ -328,3 +331,10 @@ OOS 的**后 90% 交易加起来是亏钱的**(基线 -406.2%、三条全中 -15
 但 9 格全部过不了随机对照(最好 p=0.16)。
 真正的原因写在那一节里:**同日随机买一只股票、同样的离场规则,年化中位就有 5.31%~6.46%** ——
 基准比想象的高得多。
+
+5. **财务字段会静默缺失。** 2026-08-14 容器重建时,上面的步骤表里**没有第 6 步**
+   (那时它只写在「已知缺口」一段的正文里,没进步骤表),结果整块面板的
+   `net_income/revenue/eps` **全部 0% 覆盖**,而价格锚点照常通过 ——
+   **价格锚点不检查财务列,它不会替你发现这个。**
+   直到用户拿生益电子的「业绩大幅增长」来对信号时才暴露(§75)。
+   **验收要单独看「有财务 4,967 / 无财务 265」这一行。**
