@@ -1,6 +1,30 @@
 # A股牛股研究案例:突破 + 止损交易系统
 
-> 📄 **先读这个**:[`RESEARCH_SUMMARY.md`](RESEARCH_SUMMARY.md) —— 69 节研究的独立总结报告(结论 / 三个结构性发现 / 11 个自查错误 / 与 DeepSeek 独立研究的交叉验证)。
+## 🚀 从新会话开始(第一件事)
+
+面板数据是**派生物**且不在 git 仓库里(约 1GB),容器回收后必然消失 —— 已发生三次。
+**先恢复面板,再干别的:**
+
+```bash
+bash examples/ashare-bull-stock-study/data_prep/recover_panel.sh
+```
+
+约 12 分钟,跑完自动核对 **10 项锚点**(面板 `3297 × 5232`、起止日、
+有财务 `4967`/无财务 `265`,以及 `688183 @2024-05-31` 的收盘 `14.49`/MA100 `9.69`/
+MA300 `10.74`/RPS50 `99.7`),任一对不上即退出非零。细节与踩过的四个坑见 [§0.1](#01-从零恢复面板容器机器换了之后)。
+
+然后读这两份:
+
+| 文件 | 内容 |
+|---|---|
+| [`ETF_research_summary_for_stock_comparison.md`](ETF_research_summary_for_stock_comparison.md) | §1~§77 全部研究过程与结论 |
+| [`TRADING_SYSTEM.md`](TRADING_SYSTEM.md) | 系统规格 v0.3,含**「已证伪、必须删掉」清单**与七处未验证项 |
+
+**开发分支**:`claude/human-guide-docs-xi52le`(main 定期从这里合并)。
+
+---
+
+> 📄 **总结报告**:[`RESEARCH_SUMMARY.md`](RESEARCH_SUMMARY.md) —— 独立总结(结论 / 三个结构性发现 / 11 个自查错误 / 与 DeepSeek 独立研究的交叉验证)。
 > 本 README 是目录与复现步骤;完整过程见 `ETF_research_summary_for_stock_comparison.md`。
 
 一次完整的 A股个股量化研究记录,以及其中「突破后跟随」方向的可复现代码。
