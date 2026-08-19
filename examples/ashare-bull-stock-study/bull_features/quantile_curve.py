@@ -131,16 +131,19 @@ for p in months:
     if ok.sum() < 200:
         continue
     ratio = np.where(base, FMAX[min(t + 1, NT - 1)] / Fa[t] - 1, np.nan)
-    mvt = np.where(ok, MVa[t], np.nan)
-    qm = np.nanquantile(mvt[ok], np.linspace(0, 1, NQ + 1)[1:-1])
+    # band 从 base 建、信号用 ok(带 MA300/HI250 掩码)—— 与 §79/§80 一致。
+    # 两边都用 ok 会让 SMALL_MV 恰等于 band 0,五个档被 len(b)<=len(si) 全跳过,
+    # 零锚点算不出来。§79 首轮栽过一次,这里我又写回来了一次。
+    mvt = np.where(base, MVa[t], np.nan)
+    qm = np.nanquantile(mvt[base], np.linspace(0, 1, NQ + 1)[1:-1])
     bands = []
     for i in range(NQ):
         lo = -np.inf if i == 0 else qm[i - 1]
         hi = np.inf if i >= NQ - 1 else qm[i]
-        bands.append(np.flatnonzero(ok & (mvt > lo) & (mvt <= hi)))
+        bands.append(np.flatnonzero(base & (mvt > lo) & (mvt <= hi)))
     r50, r250 = pct(RET50, t, ok), pct(RET250, t, ok)
     tq = pct(TOa, t, ok)
-    q20mv = np.nanquantile(mvt[ok], 0.2)
+    q20mv = np.nanquantile(mvt[base], 0.2)
     S = {
         "AGE_YOUNG 上市[1,3)年": ok & (LDa[t] >= Y_LO) & (LDa[t] < Y_HI),
         "AGE_OLD 上市>10年": ok & (LDa[t] >= 3650),

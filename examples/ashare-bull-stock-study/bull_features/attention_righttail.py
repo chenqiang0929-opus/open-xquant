@@ -128,11 +128,16 @@ print(f"龙虎榜 {len(lhb):,} 行 → 落到面板 {n_hit:,} 个(标的,日);"
 mar = []
 for f in sorted(glob.glob(f"{SRC}/margin_detail_*.parquet")):
     d = pd.read_parquet(f)
+    # 沪深列名不一致(§40 已记过):沪 信用交易日期/标的证券代码,深 date/证券代码
     cc = [c for c in d.columns if "证券代码" in c][0]
-    dc = [c for c in d.columns if "日期" in c][0]
+    dc = [c for c in d.columns if "日期" in c or c == "date"][0]
     bc = [c for c in d.columns if c == "融资余额"][0]
+    raw = d[dc]
+    dt = (pd.to_datetime(raw, errors="coerce") if raw.dtype.kind == "M"
+          else pd.to_datetime(raw.astype(str).str.replace(r"\D", "", regex=True),
+                              format="%Y%m%d", errors="coerce"))
     t_ = pd.DataFrame({"code": d[cc].astype(str).str.zfill(6),
-                       "date": pd.to_datetime(d[dc].astype(str), errors="coerce"),
+                       "date": dt,
                        "bal": pd.to_numeric(d[bc], errors="coerce")}).dropna()
     mar.append(t_[t_["code"].str.match(r"^(0|3|6|8)")])
 mar = pd.concat(mar, ignore_index=True)
@@ -195,10 +200,11 @@ for p in months:
         continue
     ok = base & np.isfinite(MA300[t]) & np.isfinite(HI250[t])
     ratio = np.where(base, FMAX[min(t + 1, NT - 1)] / Fa[t] - 1, np.nan)
-    mvt = np.where(ok, MVa[t], np.nan)
-    qm = np.nanquantile(mvt[ok], np.linspace(0, 1, NQ + 1)[1:-1])
-    r50 = pct(RET50, t, ok)
-    qr = np.nanquantile(r50[ok], np.linspace(0, 1, NQ + 1)[1:-1])
+    # band 从 base 建、信号用 ok —— 与 §79/§80 一致(见 §83 同一处注释)
+    mvt = np.where(base, MVa[t], np.nan)
+    qm = np.nanquantile(mvt[base], np.linspace(0, 1, NQ + 1)[1:-1])
+    r50 = pct(RET50, t, base)
+    qr = np.nanquantile(r50[base], np.linspace(0, 1, NQ + 1)[1:-1])
     mrg_ok = ok & np.isfinite(MARGIN_R[t])
     mr = np.where(mrg_ok, MARGIN_R[t], np.nan)
     mrp = pd.Series(mr).rank(pct=True).to_numpy(float) * 100
@@ -219,10 +225,10 @@ for p in months:
         return [b for b in bs if len(b) >= 2 * MIN_BAND]
 
     jobs = [
-        ("LHB_RECENT 近60日上榜", ok & LHB_RECENT[t], mk_bands(ok, extra=True)),
+        ("LHB_RECENT 近60日上榜", ok & LHB_RECENT[t], mk_bands(base, extra=True)),
         ("MARGIN_HI 融资余额占比前20%", mrg_ok & (mrp >= 80), mk_bands(mrg_ok)),
         ("SMALL_MV 市值最小档(零锚点)",
-         ok & (mvt <= np.nanquantile(mvt[ok], 0.2)), mk_bands(ok)),
+         ok & (mvt <= np.nanquantile(mvt[base], 0.2)), mk_bands(base)),
     ]
     segs = ["全样本", "2013-2018" if p.year <= 2018 else "2019-2026"]
     for nm, sel, bands in jobs:
