@@ -75,6 +75,15 @@ DISCLAIMER = ("§61 判定:三条全中年化 +10.37%,但 300 次随机对照 p=
 
 t0 = time.time()
 CL, frames, STRONG, MA100 = load_panel(DATA)
+# load_panel 读目录下**全部** parquet,含 510300(ETF)—— 项目其他脚本一律跳过它。
+# 锚点 (3297,5232) 拦下了这个差异;**不放宽锚点,改成与全项目同一个 universe**。
+if "510300" in CL.columns:
+    k = list(CL.columns).index("510300")
+    STRONG = np.delete(STRONG, k, axis=1)
+    CL = CL.drop(columns=["510300"])
+    MA100 = MA100.drop(columns=["510300"])
+    frames.pop("510300", None)
+    print("  已剔除 510300(ETF),与全项目 universe 对齐")
 idx = CL.index
 NT, NS = CL.shape
 print(f"面板 {CL.shape}  {idx[0].date()} ~ {idx[-1].date()}  ({time.time()-t0:.0f}s)")
