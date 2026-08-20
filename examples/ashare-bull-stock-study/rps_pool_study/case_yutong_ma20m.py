@@ -36,7 +36,12 @@ mp = ym.unique()
 
 
 def mdd(eq):
-    return float((np.maximum.accumulate(eq) - eq).max() / np.maximum.accumulate(eq).max())
+    """最大回撤 = max over t of (运行峰值 − 净值)/运行峰值。
+    **2026-08 修正**:原写法是「最大绝对跌幅 / 全局峰值」,早期回撤被后期高净值
+    稀释,系统性低估 —— 由 §95 的全样本锚点抓出。合成校验 eq=[1,2,1.2,5,4]:
+    旧 20.0%,正确 40.0%。"""
+    pk = np.maximum.accumulate(eq)
+    return float(np.max((pk - eq) / pk))
 
 
 def run(win):
