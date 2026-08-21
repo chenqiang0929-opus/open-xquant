@@ -46,7 +46,7 @@ fail() { echo "✗ $*" >&2; exit 1; }
 # 换一个干净容器,三样全没有,而 `set -euo pipefail` 会在第 1/6 步直接退出,
 # 报错还很难懂。**预检必须先于任何副作用,且一次报全。**
 # ══════════════════════════════════════════════════════════════════════════
-step "0/6 预检"
+step "0/7 预检"
 PROBLEMS=()
 AUTO="${NO_AUTO_INSTALL:+0}"; AUTO="${AUTO:-1}"      # NO_AUTO_INSTALL=1 可关闭自动安装
 
@@ -163,7 +163,7 @@ fi
 # 坑 2:`git lfs pull` 只对 HEAD 生效。只 `git checkout FETCH_HEAD -- <路径>` 会得到
 #       一堆 133 字节的指针文件,而 `git lfs pull` 会**静默什么都不做**(不报错)。
 #       必须先 `git checkout --detach FETCH_HEAD`。
-step "1/6 取源数据(fetch → detach → lfs pull)"
+step "1/7 取源数据(fetch → detach → lfs pull)"
 cd "$SRC_REPO"
 git fetch --depth=1 origin main
 git checkout --detach FETCH_HEAD
@@ -174,7 +174,7 @@ sz=$(stat -c%s mktdata_enriched/others/financials.parquet 2>/dev/null || echo 0)
 echo "✓ 源数据就位(financials.parquet $((sz/1024/1024))MB)"
 
 # ── 2. 摆目录结构(软链,不复制) ─────────────────────────────────────────────
-step "2/6 建立软链"
+step "2/7 建立软链"
 mkdir -p "$OXQ_RESEARCH_DIR/mktdata_enriched_others"
 ln -sfn "$SRC_REPO/mktdata_enriched" "$OXQ_RESEARCH_DIR/mktdata_enriched"
 ln -sf  "$SRC_REPO/mktdata_enriched/others/corporate_actions.parquet" \
@@ -182,7 +182,7 @@ ln -sf  "$SRC_REPO/mktdata_enriched/others/corporate_actions.parquet" \
 echo "✓ 软链完成"
 
 # ── 3. 重建价格面板 ────────────────────────────────────────────────────────
-step "3/6 重建价格面板(~150s)"
+step "3/7 重建价格面板(~150s)"
 cd "$OXQ_RESEARCH_DIR"
 "$PY" "$STUDY/data_prep/rebuild_price_data_fixed.py"
 n=$(ls "$PANEL"/*.parquet 2>/dev/null | wc -l)
@@ -192,14 +192,14 @@ echo "✓ 5,232 个 parquet"
 # ── 4. VWAP 重标定 raw_close ───────────────────────────────────────────────
 # 独立真值核对:宁德时代 300750 @2021-11-30 重建价 679.68 vs 雪球 680.00(−0.047%)。
 # 它同时重算 float_mv = raw_close × outstanding_share,而组合层按 float_mv 排序。
-step "4/6 VWAP 重标定"
+step "4/7 VWAP 重标定"
 "$PY" "$STUDY/data_prep/refine_raw_close_vwap.py"
 echo "✓ 完成"
 
 # ── 5. 补 510300 后复权 ────────────────────────────────────────────────────
 # 坑 4:不要用 data/*/kline.parquet 里的 510300 —— 那是**不复权**价,
 #       会让 MA200 闸门有 87 天判定不同,组合级锚点必挂。
-step "5/6 补 510300 后复权序列"
+step "5/7 补 510300 后复权序列"
 cp "$STUDY/data_prep/510300_hfq.parquet" "$PANEL/510300.parquet"
 echo "✓ 完成"
 
@@ -207,8 +207,17 @@ echo "✓ 完成"
 # ⚠️ 这一步 08-14 恢复时**漏掉了** —— README 的「已知缺口」写了这件事,
 #    但没写进步骤表,导致六列财务字段 0% 覆盖,直到 §75 要用业绩信号时才发现。
 #    现在它是恢复链的一等公民。
-step "6/6 财务字段 PIT 回填"
+step "6/7 财务字段 PIT 回填"
 "$PY" "$STUDY/data_prep/fill_fundamentals.py"
+
+# ── 7. 重建突破事件文件 ────────────────────────────────────────────────────
+# ⚠️ 这一步 08-14 二次恢复时**又漏掉了** —— 和上面第 6 步一模一样的毛病:
+#    README 的手工附录第 5 步与验收表都写了「70,310 笔突破事件」,
+#    但「一条命令」这条路没有它,于是 10 项锚点全绿、面板看起来完好,
+#    而 bull_features/ 下依赖事件的脚本一跑就 FileNotFoundError。
+#    **验收表里有的每一行,脚本都必须真的产出。**
+step "7/7 重建突破事件文件(~240s)"
+"$PY" "$STUDY/data_prep/oneil_prelaunch_attribution.py"
 
 # ── 全量锚点核对 ───────────────────────────────────────────────────────────
 step "锚点核对(任一不过即退出非零)"
@@ -260,6 +269,10 @@ chk("688183 MA300", round(float(F.rolling(300, min_periods=300).mean().iloc[t]["
 r = (F.iloc[t] / F.shift(50).iloc[t] - 1).where(CL.iloc[t].notna()).rank(pct=True) * 100
 chk("688183 RPS50", round(float(r["688183"]), 1), 99.7, 0.2)
 
+# 事件文件(第 7 步产出)。价格锚点不检查它,漏了不会被上面任何一项发现。
+EV = f"{SP}/oneil_prelaunch_events_fixed.csv"
+chk("突破事件数", sum(1 for _ in open(EV)) - 1 if os.path.exists(EV) else -1, 70310)
+
 if bad:
     import numpy as _np
     import pyarrow as _pa
@@ -283,6 +296,9 @@ echo
 echo "═══ 面板恢复完成 ═══"
 echo "  $PANEL"
 echo
-echo "下一步可跑(会自行 assert 锚点):"
+echo "下一步可跑(会自行 assert 锚点;它要读第 7 步产出的事件文件):"
 echo "  cd $OXQ_RESEARCH_DIR && $PY $STUDY/bull_features/base_pattern_trade.py"
 echo "  → 交易级净期望 +4.61% / 组合年化 +6.34%"
+echo
+echo "  ** §66 的教训:上面 11 项锚点全过,只说明面板对;"
+echo "     交易级与组合级双锚点必须再单独验一次。**"
