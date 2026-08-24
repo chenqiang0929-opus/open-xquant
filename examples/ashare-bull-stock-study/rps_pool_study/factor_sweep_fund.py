@@ -85,3 +85,66 @@ Q6 H3:通过 H2 的因子里,**至少一半**能过 H3 留出期。
 **不因为留出期结果不好就回头改训练期的因子定义**;
 不基于本节结论做任何可交易性声明。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, NBR, OUT, SEED, run_window_fast  # noqa: E402
+from codex_r10_replication import DATA, TOP_N, WEIGHT, metrics, pct  # noqa: E402
+from factor_sweep_pv import draw_fast  # noqa: E402
+from fundamental_yoy import label_periods, yoy_series  # noqa: E402
+
+NSEED = 500
+ALPHA = 0.05 / 12
+TRAIN = ("2014-01-02", "2021-12-31")
+HOLD = ("2022-01-04", "2026-07-27")
+FLOW = ["eps", "revenue", "net_income", "operating_cash_flow"]
+
+
+def ttm_and_yoy(code, idx):
+    """把累计口径的流量字段转 TTM,并算同报告期同比。
+
+    TTM = 本年累计 + 上年年报 − 上年同期累计;报告期标签复用 label_periods。
+    返回 (ttm_df, yoy_df, bps),三者都已 reindex 到 idx 并按公告日前向填充。
+    """
+    x = pd.read_parquet(f"{DATA}/{code}.parquet",
+                        columns=[*FLOW, "book_value_per_share"])
+    if getattr(x.index, "tz", None) is not None:
+        x.index = x.index.tz_localize(None)
+    ni = x["net_income"].ffill()
+    ch = ni[ni.diff().fillna(0) != 0].index
+    ch = ch[np.isfinite(ni[ch].to_numpy(float))]
+    if len(ch) < 8:
+        e = pd.DataFrame(np.nan, index=idx, columns=FLOW)
+        return e, e.copy(), pd.Series(np.nan, index=idx)
+    lab = label_periods(ch)
+    cum = {c: {} for c in FLOW}
+    ttm_rows, yoy_rows, dates = [], [], []
+    for t, (ry, rp) in zip(ch, lab, strict=True):
+        if ry is None:
+            continue
+        tv, yv = {}, {}
+        for c in FLOW:
+            v = float(pd.to_numeric(x[c], errors="coerce").ffill().get(t, np.nan))
+            cum[c][(ry, rp)] = v
+            fy = cum[c].get((ry - 1, 4))          # 上年年报(全年累计)
+            same = cum[c].get((ry - 1, rp))       # 上年同期累计
+            tv[c] = (v + fy - same) if (rp < 4 and fy is not None
+                                        and same is not None) else (v if rp == 4 else np.nan)
+            yv[c] = (v / abs(same) - 1) if same not in (None, 0) else np.nan
+        ttm_rows.append(tv)
+        yoy_rows.append(yv)
+        dates.append(t)
+    di = pd.DatetimeIndex(dates)
+    ttm = pd.DataFrame(ttm_rows, index=di).reindex(idx).ffill()
+    yoy = pd.DataFrame(yoy_rows, index=di).reindex(idx).ffill()
+    bps = pd.to_numeric(x["book_value_per_share"], errors="coerce").ffill().reindex(idx)
+    return ttm, yoy, bps
