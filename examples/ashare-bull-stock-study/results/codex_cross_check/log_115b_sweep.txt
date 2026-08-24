@@ -1,0 +1,25 @@
+锚点F1 ✓ 面板 3297×5217
+调仓日 153 个
+因子构造完成 (7s)
+small_cap                full 年化+33.14% p=0.0020 | oos 年化+29.77% p=0.0020 | 通过     (59s)
+large_cap                full 年化 +9.00% p=0.0379 | oos 年化+13.95% p=0.0040 |   —  负对照  (56s)
+low_turnover             full 年化+13.72% p=0.0020 | oos 年化+20.57% p=0.0020 | 通过     (41s)
+high_turnover            full 年化-13.36% p=1.0000 | oos 年化-17.11% p=1.0000 |   —  负对照  (36s)
+small_cap_low_turnover   full 年化+25.63% p=0.0020 | oos 年化+36.21% p=0.0020 | 通过     (38s)
+low_amihud               full 年化 +4.45% p=0.3832 | oos 年化 +7.78% p=0.0878 |   —    (47s)
+high_amihud              full 年化+30.69% p=0.0020 | oos 年化+54.25% p=0.0020 | 通过     (36s)
+low_vol_60               full 年化 +8.25% p=0.2315 | oos 年化+10.00% p=0.0479 |   —    (37s)
+low_vol_120              full 年化 +7.63% p=0.2954 | oos 年化 +9.53% p=0.1158 |   —    (37s)
+low_mdd_250              full 年化 +9.15% p=0.0060 | oos 年化+13.08% p=0.0020 |   —    (37s)
+mom_250                  full 年化 -5.51% p=1.0000 | oos 年化 -9.22% p=0.9920 |   —    (36s)
+mom_60                   full 年化-10.14% p=1.0000 | oos 年化-21.73% p=1.0000 |   —    (35s)
+rev_20                   full 年化 +3.33% p=0.8483 | oos 年化+14.21% p=0.1896 |   —    (36s)
+rev_5                    full 年化 -7.49% p=1.0000 | oos 年化 -2.95% p=0.9401 |   —    (35s)
+near_high_250            full 年化 -6.69% p=1.0000 | oos 年化 -7.39% p=0.9980 |   —    (36s)
+trend_sma50_200          full 年化 -8.33% p=1.0000 | oos 年化-16.11% p=1.0000 |   —    (38s)
+
+锚点F1 抽样越界 0 次  ✓
+F3 负对照 ('large_cap', 'high_turnover') 通过者:无  ✓
+F2 通过 4/16 个(Bonferroni α=0.003125)
+  small_cap, low_turnover, small_cap_low_turnover, high_amihud
+落库 /home/user/oxq-panel/factor_sweep_pv.csv
