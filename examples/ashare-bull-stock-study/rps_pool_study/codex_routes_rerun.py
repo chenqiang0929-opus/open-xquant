@@ -75,3 +75,268 @@ S3 R09 `core_quality_composite` 会通过 J4。
 S4 **R08 修正后不会通过 J4** —— 价值因子在同市值邻域内没有增量。
 S5 四条路线里通过 J4 的数量 ∈ [1, 3]。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, NBR, OUT, SEED, run_window_fast  # noqa: E402
+from codex_r10_replication import DATA, TOP_N, WEIGHT, metrics  # noqa: E402
+from factor_sweep_pv import draw_fast  # noqa: E402
+from fundamental_yoy import label_periods, yoy_series  # noqa: E402
+
+NSEED, ALPHA = 200, 0.05 / 4
+WINS = {"full": ("2014-01-02", "2025-12-31"), "oos": ("2023-01-03", "2025-12-31")}
+CODEX_CAGR = {"R06": 0.0905, "R08": 0.1708, "R09": 0.1025, "R11": 0.1960}
+FLOW = ["eps", "revenue", "net_income", "operating_cash_flow"]
+
+
+def wrank(v, elig=None, invert=False):
+    """照抄 evaluate_quality_factors.winsor_rank。"""
+    s = pd.Series(v, dtype=float)
+    if elig is not None:
+        s = s.where(elig)
+    val = s.dropna()
+    if val.empty:
+        return s.to_numpy()
+    lo, hi = val.quantile([0.01, 0.99])
+    s = s.clip(lower=lo, upper=hi)
+    if invert:
+        s = -s
+    return s.rank(pct=True, ascending=True).to_numpy()
+
+
+def build_fund(codes, idx):
+    """逐股拼 TTM 与同比,返回 (nt,ns) 矩阵字典。报告期标签复用 label_periods。"""
+    nt, ns = len(idx), len(codes)
+    keys = ["eps_ttm", "rev_ttm", "ni_ttm", "ocfps_ttm", "bps", "roe_lvl", "roe_chg"]
+    fm = {k: np.full((nt, ns), np.nan, np.float32) for k in keys}
+    anchor_bad, anchor_n = 0, 0
+    t0 = time.time()
+    for j, c in enumerate(codes):
+        x = pd.read_parquet(f"{DATA}/{c}.parquet",
+                            columns=[*FLOW, "book_value_per_share", "roe"])
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        ni = pd.to_numeric(x["net_income"], errors="coerce").ffill()
+        ch = ni[ni.diff().fillna(0) != 0].index
+        ch = ch[np.isfinite(ni[ch].to_numpy(float))]
+        if len(ch) < 8:
+            continue
+        lab = label_periods(ch)
+        cum = {k: {} for k in [*FLOW, "roe"]}
+        rows, dates = [], []
+        for t, (ry, rp) in zip(ch, lab, strict=True):
+            if ry is None:
+                continue
+            r = {}
+            for c2, key in zip([*FLOW, "roe"], [*FLOW, "roe"], strict=True):
+                v = float(pd.to_numeric(x[c2], errors="coerce").ffill().get(t, np.nan))
+                cum[key][(ry, rp)] = v
+            for src, dst in (("eps", "eps_ttm"), ("revenue", "rev_ttm"),
+                             ("net_income", "ni_ttm"), ("operating_cash_flow", "ocfps_ttm")):
+                v = cum[src][(ry, rp)]
+                fy, same = cum[src].get((ry - 1, 4)), cum[src].get((ry - 1, rp))
+                r[dst] = (v if rp == 4 else
+                          (v + fy - same if fy is not None and same is not None else np.nan))
+                if dst == "ni_ttm" and rp == 4 and np.isfinite(v):
+                    anchor_n += 1
+                    anchor_bad += int(abs(r[dst] - v) > 1e-6 * max(abs(v), 1.0))
+            r["roe_lvl"] = cum["roe"][(ry, rp)]
+            prev = cum["roe"].get((ry - 1, rp))
+            r["roe_chg"] = (r["roe_lvl"] - prev) if prev is not None else np.nan
+            rows.append(r)
+            dates.append(t)
+        if not rows:
+            continue
+        df = pd.DataFrame(rows, index=pd.DatetimeIndex(dates)).reindex(idx).ffill()
+        for k in keys[:-3]:
+            fm[k][:, j] = df[k].to_numpy(np.float32)
+        fm["roe_lvl"][:, j] = df["roe_lvl"].to_numpy(np.float32)
+        fm["roe_chg"][:, j] = df["roe_chg"].to_numpy(np.float32)
+        fm["bps"][:, j] = pd.to_numeric(x["book_value_per_share"], errors="coerce"
+                                       ).ffill().reindex(idx).to_numpy(np.float32)
+        if (j + 1) % 1500 == 0:
+            print(f"  财务 {j+1}/{ns} ({time.time()-t0:.0f}s)", flush=True)
+    print(f"财务面板完成 ({time.time()-t0:.0f}s);TTM 恒等式:{anchor_n} 个年报点,"
+          f"违例 {anchor_bad} 个 {'✓' if anchor_bad == 0 else '✗'}")
+    return fm, anchor_bad
+
+
+def route_scores(name, t, e, fm, cl, raw, logcap, tmean, price_mode):
+    """四条路线在调仓日 t、合格集 e 上的分数(越大越优先)。price_mode: raw|qfq"""
+    px = (raw if price_mode == "raw" else cl)[t, e].astype(np.float64)
+    if name == "R06":
+        w = np.log(np.maximum(cl[max(0, t - 249):t + 1, e].astype(np.float64), 1e-12))
+        lr = np.diff(w, axis=0)
+        cols = []
+        for n in (20, 60, 120):
+            cols.append(-np.std(lr[-n:], axis=0, ddof=1))
+        for n in (60, 120, 250):
+            ww = w[-n:]
+            pk = np.maximum.accumulate(ww, axis=0)
+            cols.append(np.min(ww - pk, axis=0))
+        r = [pd.Series(c).rank(pct=True, ascending=True).to_numpy() for c in cols]
+        return np.mean(r, axis=0)
+    if name in ("R08", "R11_value"):
+        ep, bp = fm["eps_ttm"][t, e] / px, fm["bps"][t, e] / px
+        cfp = fm["ocfps_ttm"][t, e] / px
+        r = []
+        for v in (ep, bp, cfp):
+            s = pd.Series(np.where(v > 0, v, np.nan))
+            r.append(s.rank(pct=True, ascending=True).to_numpy())
+        return np.mean(r, axis=0)
+    if name in ("R09", "R11_qual"):
+        ep = fm["eps_ttm"][t, e] / px
+        cfp = fm["ocfps_ttm"][t, e] / px
+        marg = fm["ni_ttm"][t, e] / np.where(fm["rev_ttm"][t, e] != 0,
+                                            fm["rev_ttm"][t, e], np.nan)
+        roe, roec = fm["roe_lvl"][t, e], fm["roe_chg"][t, e]
+        conv = fm["ocfps_ttm"][t, e] / np.where(fm["eps_ttm"][t, e] != 0,
+                                               fm["eps_ttm"][t, e], np.nan)
+        prof, cash = ep > 0, cfp > 0
+        r = [wrank(marg, marg > 0), wrank(roe, roe > 0), wrank(roec, prof),
+             wrank(conv, prof & cash & (conv > 0))]
+        return np.nanmean(np.where(np.isnan(r), np.nan, r), axis=0) * np.where(
+            np.any(np.isnan(r), axis=0), np.nan, 1.0)
+    raise ValueError(name)
+
+
+def main():
+    z = np.load(CACHE, allow_pickle=True)
+    idx = pd.DatetimeIndex(z["idx"])
+    codes = list(z["codes"])
+    op, cl, susp, lu, ld, ok = z["OP"], z["CL"], z["SUSP"], z["LU"], z["LD"], z["OK"]
+    logcap, tmean = z["LOGCAP"], z["TMEAN"]
+    nt, ns = len(idx), len(codes)
+    assert (nt, ns) == (3297, 5217), "锚点J1a"
+    print(f"锚点J1a ✓ 面板 {nt}×{ns}")
+
+    y = yoy_series("300347").set_index(["报告年", "报告期"])["同比"]
+    truth = {(2017, "中报"): .5307, (2017, "三季报"): 1.0103,
+             (2017, "年报"): 1.1401, (2018, "一季报"): 1.2107}
+    bad = [k for k, v in truth.items() if abs(float(y.get(k, np.nan)) - v) > 0.005]
+    print(f"锚点J1d 泰格同比复现:违例 {len(bad)} 项 {'✓' if not bad else '✗ ' + str(bad)}")
+    assert not bad, "锚点J1d 不过"
+
+    raw = np.full((nt, ns), np.nan, np.float32)
+    for j, c in enumerate(codes):
+        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        raw[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
+            lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
+    print("不复权价矩阵完成")
+
+    fm, abad = build_fund(codes, idx)
+    assert abad == 0, "锚点J1c TTM 恒等式不过"
+
+    b = pd.read_parquet(f"{DATA}/510300.parquet", columns=["close"])
+    b.index = pd.to_datetime(b.index).tz_localize(None)
+    cal = pd.DatetimeIndex(b.index.unique()).sort_values()
+    cal = cal[(cal >= "2014-01-01") & (cal <= "2026-08-20")]
+    cal_pos = pd.Index(idx).get_indexer(cal)
+    reb = cal_pos[::20]
+    ipos = pd.Index(idx)
+
+    def build(name, mode):
+        sel, elig, srk = {}, {}, {}
+        for t in reb:
+            t = int(t)
+            base = ok[t] & np.isfinite(logcap[t]) & np.isfinite(tmean[t])
+            if name == "R11":
+                thr = np.nanpercentile(logcap[t][base], 10)
+                base = base & (logcap[t] > thr)
+            e = np.flatnonzero(base)
+            if len(e) < TOP_N * 3:
+                continue
+            if name == "R11":
+                v = np.nanmean(np.vstack([
+                    pd.Series(route_scores("R11_value", t, e, fm, cl, raw, logcap,
+                                           tmean, mode)).rank(pct=True).to_numpy(),
+                    pd.Series(route_scores("R11_qual", t, e, fm, cl, raw, logcap,
+                                           tmean, mode)).rank(pct=True).to_numpy(),
+                    pd.Series(route_scores("R06", t, e, fm, cl, raw, logcap,
+                                           tmean, mode)).rank(pct=True).to_numpy(),
+                    pd.Series((pd.Series(-logcap[t, e]).rank(pct=True)
+                               + pd.Series(-tmean[t, e]).rank(pct=True)) / 2
+                              ).rank(pct=True).to_numpy()]), axis=0)
+            else:
+                v = route_scores(name, t, e, fm, cl, raw, logcap, tmean, mode)
+            g = np.isfinite(v)
+            if g.sum() < TOP_N:
+                continue
+            e2, v2 = e[g], v[g]
+            top = e2[np.argsort(-v2, kind="stable")[:TOP_N]]
+            sel[t] = (top, np.full(TOP_N, WEIGHT))
+            order = e[np.argsort(logcap[t, e], kind="stable")]
+            rk = {int(c): i for i, c in enumerate(order)}
+            elig[t] = order
+            srk[t] = np.array([rk[int(c)] for c in top])
+        return sel, elig, srk
+
+    def run(sel, w):
+        d0, d1 = WINS[w]
+        w0 = int(ipos.get_indexer([pd.Timestamp(d0)], method="bfill")[0])
+        w1 = int(ipos.get_indexer([pd.Timestamp(d1)], method="ffill")[0])
+        eq, dd, tr, fz = run_window_fast(op, cl, susp, lu, ld, sel, cal_pos, w0, w1)
+        return metrics(eq, dd, idx), (w0, w1)
+
+    rows, viol = [], 0
+    for name in ("R06", "R08", "R09", "R11"):
+        r = {"route": name, "codex_cagr": CODEX_CAGR[name]}
+        for mode in ("qfq", "raw"):
+            sel, elig, srk = build(name, mode)
+            for w in WINS:
+                m, _ = run(sel, w)
+                r[f"{mode}_{w}_cagr"] = m["cagr"]
+                r[f"{mode}_{w}_total"] = m["total"]
+                r[f"{mode}_{w}_mdd"] = m["mdd"]
+            if mode == "raw":
+                for w in WINS:
+                    d0, d1 = WINS[w]
+                    w0 = int(ipos.get_indexer([pd.Timestamp(d0)], method="bfill")[0])
+                    w1 = int(ipos.get_indexer([pd.Timestamp(d1)], method="ffill")[0])
+                    cg = []
+                    for sd in range(NSEED):
+                        rng = np.random.default_rng(SEED + sd)
+                        cs = {}
+                        for t in sel:
+                            o, rk = elig[t], srk[t]
+                            ps = draw_fast(rng, rk, len(o))
+                            viol += int(np.sum(np.abs(ps - rk) > NBR))
+                            cs[t] = (o[ps], np.full(TOP_N, WEIGHT))
+                        e2, d2, _, _ = run_window_fast(op, cl, susp, lu, ld, cs,
+                                                       cal_pos, w0, w1)
+                        cg.append(metrics(e2, d2, idx)["cagr"])
+                    a = np.array(cg)
+                    r[f"ctrl_{w}_med"] = float(np.median(a))
+                    r[f"p_{w}"] = (1 + int(np.sum(a >= r[f"raw_{w}_cagr"]))) / (NSEED + 1)
+        r["J2"] = abs(r["qfq_full_cagr"] - r["codex_cagr"]) <= 0.06
+        r["J3_pp"] = (r["raw_full_cagr"] - r["qfq_full_cagr"]) * 100
+        r["J4"] = bool(r["p_full"] < ALPHA and r["p_oos"] < ALPHA)
+        rows.append(r)
+        print(f"{name}  他{r['codex_cagr']:+6.2%} | 他口径{r['qfq_full_cagr']:+7.2%}"
+              f"(J2 {'✓' if r['J2'] else '✗'}) | 真实{r['raw_full_cagr']:+7.2%}"
+              f"(差{r['J3_pp']:+5.2f}pp) | oos{r['raw_oos_cagr']:+7.2%} | "
+              f"p_full={r['p_full']:.4f} p_oos={r['p_oos']:.4f} "
+              f"J4 {'✓' if r['J4'] else '✗'}", flush=True)
+
+    df = pd.DataFrame(rows)
+    print(f"\n锚点J1b 抽样越界 {viol} 次 {'✓' if viol == 0 else '✗ 作废'}")
+    assert viol == 0
+    print(f"J2 复现通过 {int(df['J2'].sum())}/4;J4 对照通过 {int(df['J4'].sum())}/4"
+          f"(α={ALPHA}):{', '.join(df.loc[df['J4'], 'route']) or '无'}")
+    df.to_csv(f"{OUT}/codex_routes_rerun.csv", index=False)
+    print(f"落库 {OUT}/codex_routes_rerun.csv")
+
+
+if __name__ == "__main__":
+    main()
