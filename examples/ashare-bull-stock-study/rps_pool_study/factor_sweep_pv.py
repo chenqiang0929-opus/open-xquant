@@ -67,3 +67,184 @@ P6 通过 F2 的因子总数 ∈ [3, 8]。
 **不跑依赖财务数据的因子**(价值/质量/多因子)—— 那要等 §115-A 的 PIT 验证过关;
 不基于本节结论做任何可交易性声明。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, NBR, OUT, SEED, run_window_fast  # noqa: E402
+from codex_r10_replication import DATA, TOP_N, WEIGHT, WINDOWS, metrics, pct  # noqa: E402
+
+NSEED = 500
+ALPHA = 0.05 / 16
+NEG = ("large_cap", "high_turnover")
+
+
+def draw_fast(rng, ranks, n, nbr=NBR):
+    """向量化的邻域抽样:每只在自身市值名次 ±nbr 内换一只,去重。"""
+    lo = np.maximum(0, ranks - nbr)
+    hi = np.minimum(n - 1, ranks + nbr)
+    span = hi - lo + 1
+    pos = lo + (rng.random(len(ranks)) * span).astype(np.int64)
+    for _ in range(12):
+        _, first = np.unique(pos, return_index=True)
+        dup = np.setdiff1d(np.arange(len(pos)), first)
+        if not len(dup):
+            break
+        pos[dup] = lo[dup] + (rng.random(len(dup)) * span[dup]).astype(np.int64)
+    return pos
+
+
+def build_factors(cl, logcap, tmean, amih, reb):
+    """在 153 个调仓日上算 16 个价量因子。分数一律'越大越优先'。"""
+    out = {k: {} for k in (
+        "small_cap", "large_cap", "low_turnover", "high_turnover",
+        "small_cap_low_turnover", "low_amihud", "high_amihud",
+        "low_vol_60", "low_vol_120", "low_mdd_250", "mom_250", "mom_60",
+        "rev_20", "rev_5", "near_high_250", "trend_sma50_200")}
+    fin = {}
+    for t in reb:
+        t = int(t)
+        w = cl[max(0, t - 249):t + 1].astype(np.float64)
+        r = w[1:] / w[:-1] - 1.0
+        px = cl[t].astype(np.float64)
+        with np.errstate(all="ignore"):
+            v60 = np.nanstd(r[-60:], axis=0, ddof=1)
+            v120 = np.nanstd(r[-120:], axis=0, ddof=1)
+            pk = np.maximum.accumulate(np.nan_to_num(w, nan=-np.inf), axis=0)
+            dd = np.where(pk > 0, w / pk - 1.0, np.nan)
+            mdd = np.nanmin(dd, axis=0)
+            hi250 = np.nanmax(w, axis=0)
+            m250 = px / cl[max(0, t - 250)].astype(np.float64) - 1.0
+            m60 = px / cl[max(0, t - 60)].astype(np.float64) - 1.0
+            r20 = px / cl[max(0, t - 20)].astype(np.float64) - 1.0
+            r5 = px / cl[max(0, t - 5)].astype(np.float64) - 1.0
+            s20, s50 = np.nanmean(w[-20:], 0), np.nanmean(w[-50:], 0)
+            s60, s200 = np.nanmean(w[-60:], 0), np.nanmean(w[-200:], 0)
+            trend = np.where((px > s200) & (s50 > s200), s50 / s200 - 1.0, np.nan)
+        lc, tm, am = (logcap[t].astype(np.float64), tmean[t].astype(np.float64),
+                      amih[t].astype(np.float64))
+        f = {"small_cap": -lc, "large_cap": lc, "low_turnover": -tm,
+             "high_turnover": tm, "low_amihud": -am, "high_amihud": am,
+             "low_vol_60": -v60, "low_vol_120": -v120, "low_mdd_250": mdd,
+             "mom_250": m250, "mom_60": m60, "rev_20": -r20, "rev_5": -r5,
+             "near_high_250": np.where(hi250 > 0, px / hi250, np.nan),
+             "trend_sma50_200": trend}
+        for k, v in f.items():
+            out[k][t] = v
+        fin[t] = (s20, s60)
+        out["small_cap_low_turnover"][t] = None   # 复合分,选股时单算
+    return out, None
+
+
+def main():
+    z = np.load(CACHE, allow_pickle=True)
+    idx = pd.DatetimeIndex(z["idx"])
+    codes = list(z["codes"])
+    op, cl, susp, lu, ld, ok = z["OP"], z["CL"], z["SUSP"], z["LU"], z["LD"], z["OK"]
+    logcap, tmean, amih = z["LOGCAP"], z["TMEAN"], z["AMIH"]
+    nt, ns = len(idx), len(codes)
+    assert (nt, ns) == (3297, 5217), f"锚点F1 面板 {(nt, ns)}"
+    print(f"锚点F1 ✓ 面板 {nt}×{ns}")
+
+    b = pd.read_parquet(f"{DATA}/510300.parquet", columns=["close"])
+    b.index = pd.to_datetime(b.index).tz_localize(None)
+    bs = pd.to_numeric(b["close"], errors="coerce").ffill()
+    cal = pd.DatetimeIndex(b.index.unique()).sort_values()
+    cal = cal[(cal >= "2014-01-01") & (cal <= "2026-08-20")]
+    cal_pos = pd.Index(idx).get_indexer(cal)
+    reb = cal_pos[::20]
+    ipos = pd.Index(idx)
+    print(f"调仓日 {len(reb)} 个")
+
+    def win(w):
+        d0, d1 = WINDOWS[w]
+        return (int(ipos.get_indexer([pd.Timestamp(d0)], method="bfill")[0]),
+                int(ipos.get_indexer([pd.Timestamp(d1)], method="ffill")[0]))
+
+    t0 = time.time()
+    fac, _ = build_factors(cl, logcap, tmean, amih, reb)
+    print(f"因子构造完成 ({time.time()-t0:.0f}s)")
+
+    names = list(fac)
+    rows, viol_all = [], 0
+    for name in names:
+        sel, elig, selrank = {}, {}, {}
+        for t in reb:
+            t = int(t)
+            base_ok = ok[t] & np.isfinite(logcap[t]) & np.isfinite(tmean[t])
+            if name == "small_cap_low_turnover":
+                m = base_ok
+                e = np.flatnonzero(m)
+                if len(e) < TOP_N * 3:
+                    continue
+                s = (pct(-logcap[t, e].astype(float)) + pct(-tmean[t, e].astype(float))) / 2
+            else:
+                v = fac[name][t]
+                m = base_ok & np.isfinite(v)
+                e = np.flatnonzero(m)
+                if len(e) < TOP_N * 3:
+                    continue
+                s = v[e]
+            top = e[np.argsort(-s, kind="stable")[:TOP_N]]
+            sel[t] = (top, np.full(TOP_N, WEIGHT))
+            order = e[np.argsort(logcap[t, e], kind="stable")]
+            rk = {int(c): i for i, c in enumerate(order)}
+            elig[t] = order
+            selrank[t] = np.array([rk[int(c)] for c in top])
+
+        row = {"factor": name, "n_reb": len(sel)}
+        t1 = time.time()
+        for w in ("full", "oos"):
+            w0, w1 = win(w)
+            eq, dd, tr, fz = run_window_fast(op, cl, susp, lu, ld, sel, cal_pos, w0, w1)
+            m = metrics(eq, dd, idx)
+            s = bs[(bs.index >= WINDOWS[w][0]) & (bs.index <= WINDOWS[w][1])]
+            cg = []
+            for sd in range(NSEED):
+                rng = np.random.default_rng(SEED + sd)
+                csel = {}
+                for t in sel:
+                    order, ranks = elig[t], selrank[t]
+                    ps = draw_fast(rng, ranks, len(order))
+                    viol_all += int(np.sum(np.abs(ps - ranks) > NBR))
+                    csel[t] = (order[ps], np.full(TOP_N, WEIGHT))
+                e2, d2, _, _ = run_window_fast(op, cl, susp, lu, ld, csel, cal_pos, w0, w1)
+                cg.append(metrics(e2, d2, idx)["cagr"])
+            a = np.array(cg)
+            p = (1 + int(np.sum(a >= m["cagr"]))) / (NSEED + 1)
+            row |= {f"{w}_cagr": m["cagr"], f"{w}_mdd": m["mdd"], f"{w}_sharpe": m["sharpe"],
+                    f"{w}_total": m["total"], f"{w}_frozen": fz, f"{w}_trades": tr,
+                    f"{w}_bench": float(s.iloc[-1] / s.iloc[0] - 1),
+                    f"{w}_ctrl_med": float(np.median(a)),
+                    f"{w}_ctrl_p999": float(np.percentile(a, 99.7)), f"{w}_p": p}
+        row["pass_F2"] = bool(row["full_p"] < ALPHA and row["oos_p"] < ALPHA)
+        rows.append(row)
+        flag = "负对照" if name in NEG else ""
+        print(f"{name:24s} full 年化{row['full_cagr']:+7.2%} p={row['full_p']:.4f} | "
+              f"oos 年化{row['oos_cagr']:+7.2%} p={row['oos_p']:.4f} | "
+              f"{'通过' if row['pass_F2'] else '  — ':4s} {flag}  ({time.time()-t1:.0f}s)",
+              flush=True)
+
+    df = pd.DataFrame(rows)
+    print(f"\n锚点F1 抽样越界 {viol_all} 次  {'✓' if viol_all == 0 else '✗ 整节作废'}")
+    assert viol_all == 0
+    neg_pass = [r["factor"] for r in rows if r["factor"] in NEG and r["pass_F2"]]
+    print(f"F3 负对照 {NEG} 通过者:{neg_pass or '无'}  "
+          f"{'✓' if not neg_pass else '✗ 整节作废'}")
+    npass = int(df["pass_F2"].sum())
+    print(f"F2 通过 {npass}/{len(df)} 个(Bonferroni α={ALPHA:.6f})")
+    print("  " + ", ".join(df.loc[df["pass_F2"], "factor"]))
+    df.to_csv(f"{OUT}/factor_sweep_pv.csv", index=False)
+    print(f"落库 {OUT}/factor_sweep_pv.csv")
+
+
+if __name__ == "__main__":
+    main()
