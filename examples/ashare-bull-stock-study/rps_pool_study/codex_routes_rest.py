@@ -62,3 +62,256 @@ T4 **R08 与 R09 至少一条通过 K4 的 2026 留出期。** 理由:§117 里�
 T5 R03 低 RPS 反转的复现会过 K2 但不过 K3 —— 他公布 +21.19% 排他表里第 2,
    我预测那是小盘 beta(低 RPS 的票偏小盘),市值中性之后消失。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, NBR, OUT, SEED, run_window_fast  # noqa: E402
+from codex_r10_replication import DATA, TOP_N, WEIGHT, metrics  # noqa: E402
+from codex_routes_rerun import build_fund, route_scores  # noqa: E402
+from factor_sweep_pv import draw_fast  # noqa: E402
+
+NSEED, ALPHA = 200, 0.05 / 5
+WINS = {"full": ("2014-01-02", "2025-12-31"), "oos": ("2023-01-03", "2025-12-31"),
+        "hold": ("2026-01-05", "2026-08-03")}
+CODEX = {"R01": .0534, "R02": .0442, "R03": .2119, "R04": .0065,
+         "R05": .0911, "R07": .0403, "R13": .0298}
+SELECT = ("R03", "R04", "R05", "R07", "R13")
+
+
+
+def rsi(w, n=21):
+    d = np.diff(w, axis=0)
+    up = np.where(d > 0, d, 0.0)
+    dn = np.where(d < 0, -d, 0.0)
+    au, ad = np.mean(up[-n:], axis=0), np.mean(dn[-n:], axis=0)
+    return np.where(au + ad > 0, 100.0 * au / (au + ad), 50.0)
+
+
+def mfi(h, lw, c, v, n=14):
+    tp = (h + lw + c) / 3.0
+    rmf = tp * v
+    d = np.diff(tp, axis=0)
+    pos = np.nansum(np.where(d > 0, rmf[1:], 0.0)[-n:], axis=0)
+    neg = np.nansum(np.where(d < 0, rmf[1:], 0.0)[-n:], axis=0)
+    return np.where(pos + neg > 0, 100.0 * pos / (pos + neg), 50.0)
+
+
+def score(name, t, e, mode, cl, raw, amt, vol, hi, lo, fm):
+    """五条选股路线在调仓日 t、合格集 e 上的分数(越大越优先),NaN = 不合格。"""
+    px = (raw if mode == "raw" else cl)[t, e].astype(np.float64)
+    w = cl[max(0, t - 260):t + 1, e].astype(np.float64)
+    if name == "R03":                      # 低 RPS120 反转:取分位最低的 20 只
+        r120 = cl[t, e] / cl[max(0, t - 120), e] - 1.0
+        return -pd.Series(r120).rank(pct=True).to_numpy()
+    if name == "R04":                      # RSI21 < 20,最超卖优先
+        rs = rsi(w, 21)
+        return np.where(rs < 20.0, -rs, np.nan)
+    if name == "R05":                      # 突破布林上轨,带宽最窄优先
+        m20 = np.mean(w[-20:], axis=0)
+        s20 = np.std(w[-20:], axis=0, ddof=1)
+        width = (4 * s20) / np.where(w[-1] > 0, w[-1], np.nan)
+        return np.where(w[-1] > m20 + 2 * s20, -width, np.nan)
+    if name == "R07":                      # 趋势为正 + 站上 VWAP + MFI∈[50,80]
+        tr60 = cl[t, e] / cl[max(0, t - 60), e] - 1.0
+        a20 = np.nansum(amt[max(0, t - 20):t + 1, e], axis=0)
+        v20 = np.nansum(vol[max(0, t - 20):t + 1, e], axis=0)
+        gap = cl[t, e] / np.where(v20 > 0, a20 / np.where(v20 > 0, v20, np.nan),
+                                  np.nan) - 1.0
+        s = slice(max(0, t - 60), t + 1)
+        mf = mfi(hi[s, e], lo[s, e], cl[s, e], vol[s, e], 14)
+        elig = (tr60 > 0) & (gap > 0) & (mf >= 50) & (mf <= 80)
+        return np.where(elig, pd.Series(mf).rank(pct=True).to_numpy(), np.nan)
+    if name == "R13":                      # 近 250 日新高 + RPS + PIT 基本面
+        h250 = np.nanmax(cl[max(0, t - 249):t + 1, e].astype(np.float64), axis=0)
+        near = cl[t, e] / h250 - 1.0
+        p120 = pd.Series(cl[t, e] / cl[max(0, t - 120), e] - 1).rank(pct=True).to_numpy() * 100
+        p250 = pd.Series(cl[t, e] / cl[max(0, t - 250), e] - 1).rank(pct=True).to_numpy() * 100
+        ep, cfp = fm["eps_ttm"][t, e] / px, fm["ocfps_ttm"][t, e] / px
+        roe = fm["roe_lvl"][t, e]
+        conv = fm["ocfps_ttm"][t, e] / np.where(fm["eps_ttm"][t, e] != 0,
+                                                fm["eps_ttm"][t, e], np.nan)
+        elig = ((near >= -0.10) & (p120 >= 80) & (p250 >= 80) & (ep > 0)
+                & (cfp > 0) & (roe >= 8.0) & (conv >= 0.8))
+        sc = (0.4 * p120 / 100 + 0.3 * p250 / 100
+              + 0.2 * pd.Series(near).rank(pct=True).to_numpy()
+              + 0.1 * pd.Series(roe).rank(pct=True).to_numpy())
+        return np.where(elig, sc, np.nan)
+    raise ValueError(name)
+
+
+def main():
+    z = np.load(CACHE, allow_pickle=True)
+    idx = pd.DatetimeIndex(z["idx"])
+    codes = list(z["codes"])
+    op, cl, susp, lu, ld, ok = z["OP"], z["CL"], z["SUSP"], z["LU"], z["LD"], z["OK"]
+    logcap, tmean = z["LOGCAP"], z["TMEAN"]
+    nt, ns = len(idx), len(codes)
+    assert (nt, ns) == (3297, 5217), "锚点K1a"
+    print(f"锚点K1a ✓ {nt}×{ns}", flush=True)
+
+    raw = np.full((nt, ns), np.nan, np.float32)
+    hi = np.full((nt, ns), np.nan, np.float32)
+    lo = np.full((nt, ns), np.nan, np.float32)
+    vol = np.full((nt, ns), np.nan, np.float32)
+    amt = np.full((nt, ns), np.nan, np.float32)
+    t0 = time.time()
+    for j, c in enumerate(codes):
+        x = pd.read_parquet(f"{DATA}/{c}.parquet",
+                            columns=["raw_close", "high", "low", "volume", "amount"])
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        x = x.reindex(idx)
+        raw[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
+            lambda s: s > 0).ffill().to_numpy(np.float32)
+        for arr, col in ((hi, "high"), (lo, "low"), (vol, "volume"), (amt, "amount")):
+            arr[:, j] = pd.to_numeric(x[col], errors="coerce").to_numpy(np.float32)
+        if (j + 1) % 2000 == 0:
+            print(f"  价量 {j+1}/{ns} ({time.time()-t0:.0f}s)", flush=True)
+    print(f"价量矩阵完成 ({time.time()-t0:.0f}s)", flush=True)
+    fm, abad = build_fund(codes, idx)
+    assert abad == 0, "锚点K1c TTM 恒等式不过"
+
+    b = pd.read_parquet(f"{DATA}/510300.parquet", columns=["close"])
+    b.index = pd.to_datetime(b.index).tz_localize(None)
+    bs = pd.to_numeric(b["close"], errors="coerce").ffill()
+    cal = pd.DatetimeIndex(b.index.unique()).sort_values()
+    cal = cal[(cal >= "2014-01-01") & (cal <= "2026-08-20")]
+    cal_pos = pd.Index(idx).get_indexer(cal)
+    reb = cal_pos[::20]
+    ipos = pd.Index(idx)
+
+    def wpos(w):
+        d0, d1 = WINS[w]
+        return (int(ipos.get_indexer([pd.Timestamp(d0)], method="bfill")[0]),
+                int(ipos.get_indexer([pd.Timestamp(d1)], method="ffill")[0]))
+
+    rows = []
+    sig01 = ((bs > bs.rolling(200).mean())
+             & (bs.rolling(50).mean() > bs.rolling(200).mean())).astype(float)
+    sig02 = (bs / bs.shift(250) - 1.0 > 0).astype(float)
+    for nm, sg in (("R01", sig01), ("R02", sig02)):
+        r = {"route": nm, "codex_cagr": CODEX[nm], "kind": "择时"}
+        for w in ("full", "oos", "hold"):
+            d0, d1 = WINS[w]
+            m = (bs.index >= d0) & (bs.index <= d1)
+            px = bs[m]
+            s = sg.shift(1).reindex(px.index).fillna(0.0)
+            eq = (px.pct_change().fillna(0.0) * s).add(1.0).cumprod()
+            yrs = (px.index[-1] - px.index[0]).days / 365.25
+            r[f"{w}_cagr"] = float(eq.iloc[-1] ** (1 / yrs) - 1)
+            r[f"{w}_bench"] = float(px.iloc[-1] / px.iloc[0] - 1)
+            r[f"{w}_mdd"] = float((eq / eq.cummax() - 1).min())
+        r["K2"] = bool(abs(r["full_cagr"] - r["codex_cagr"]) <= 0.06)
+        rows.append(r)
+        print(f"{nm} 他{r['codex_cagr']:+6.2%} | 我 full{r['full_cagr']:+7.2%}"
+              f"(K2 {'✓' if r['K2'] else '✗'}) oos{r['oos_cagr']:+7.2%} "
+              f"2026{r['hold_cagr']:+7.2%} 回撤{r['full_mdd']:+7.2%}", flush=True)
+
+    def pick(fn, mode):
+        sel, elig, srk = {}, {}, {}
+        for t in reb:
+            t = int(t)
+            base = ok[t] & np.isfinite(logcap[t]) & np.isfinite(tmean[t])
+            e = np.flatnonzero(base)
+            if len(e) < TOP_N * 3:
+                continue
+            v = fn(t, e, mode)
+            g = np.isfinite(v)
+            if g.sum() < TOP_N:
+                continue
+            e2 = e[g]
+            top = e2[np.argsort(-v[g], kind="stable")[:TOP_N]]
+            sel[t] = (top, np.full(TOP_N, WEIGHT))
+            order = e[np.argsort(logcap[t, e], kind="stable")]
+            rk = {int(c): i for i, c in enumerate(order)}
+            elig[t] = order
+            srk[t] = np.array([rk[int(c)] for c in top])
+        return sel, elig, srk
+
+    viol = 0
+
+    def ctrl_p(sel, elig, srk, w, target):
+        nonlocal viol
+        w0, w1 = wpos(w)
+        cg = []
+        for sd in range(NSEED):
+            rng = np.random.default_rng(SEED + sd)
+            cs = {}
+            for t in sel:
+                o, rk = elig[t], srk[t]
+                ps = draw_fast(rng, rk, len(o))
+                viol += int(np.sum(np.abs(ps - rk) > NBR))
+                cs[t] = (o[ps], np.full(TOP_N, WEIGHT))
+            e3, d3, _, _ = run_window_fast(op, cl, susp, lu, ld, cs, cal_pos, w0, w1)
+            cg.append(metrics(e3, d3, idx)["cagr"])
+        a = np.array(cg)
+        return float(np.median(a)), (1 + int(np.sum(a >= target))) / (NSEED + 1)
+
+    for name in SELECT:
+        r = {"route": name, "codex_cagr": CODEX[name], "kind": "选股"}
+        for mode in ("qfq", "raw"):
+            sel, elig, srk = pick(
+                lambda t, e, m, n=name: score(n, t, e, m, cl, raw, amt, vol, hi, lo, fm),
+                mode)
+            r[f"{mode}_nreb"] = len(sel)
+            for w in ("full", "oos", "hold"):
+                if not sel:
+                    r[f"{mode}_{w}_cagr"] = np.nan
+                    continue
+                w0, w1 = wpos(w)
+                eq, dd, _, _ = run_window_fast(op, cl, susp, lu, ld, sel,
+                                               cal_pos, w0, w1)
+                mm = metrics(eq, dd, idx)
+                r[f"{mode}_{w}_cagr"] = mm["cagr"]
+                r[f"{mode}_{w}_mdd"] = mm["mdd"]
+            if mode == "raw" and sel:
+                for w in ("full", "oos"):
+                    med, p = ctrl_p(sel, elig, srk, w, r[f"raw_{w}_cagr"])
+                    r[f"ctrl_{w}_med"], r[f"p_{w}"] = med, p
+        r["K2"] = bool(abs(r.get("qfq_full_cagr", np.nan) - r["codex_cagr"]) <= 0.06)
+        r["K3"] = bool(r.get("p_full", 1) < ALPHA and r.get("p_oos", 1) < ALPHA)
+        rows.append(r)
+        print(f"{name} 他{r['codex_cagr']:+6.2%} | 他口径{r.get('qfq_full_cagr', np.nan):+7.2%}"
+              f"(K2 {'✓' if r['K2'] else '✗'}) | 真实{r.get('raw_full_cagr', np.nan):+7.2%} "
+              f"oos{r.get('raw_oos_cagr', np.nan):+7.2%} 2026{r.get('raw_hold_cagr', np.nan):+7.2%}"
+              f" | p_full={r.get('p_full', np.nan):.4f} p_oos={r.get('p_oos', np.nan):.4f}"
+              f" K3 {'✓' if r['K3'] else '✗'} 调仓日{r.get('raw_nreb', 0)}", flush=True)
+
+    print("\nK4 R08/R09 的 2026 干净留出期", flush=True)
+    for name in ("R08", "R09"):
+        sel, elig, srk = pick(
+            lambda t, e, m, n=name: route_scores(n, t, e, fm, cl, raw, logcap,
+                                                 tmean, "raw"), "raw")
+        w0, w1 = wpos("hold")
+        eq, dd, _, _ = run_window_fast(op, cl, susp, lu, ld, sel, cal_pos, w0, w1)
+        sc = metrics(eq, dd, idx)["cagr"]
+        med, p = ctrl_p(sel, elig, srk, "hold", sc)
+        rows.append({"route": name + "_2026hold", "kind": "留出期",
+                     "raw_hold_cagr": sc, "ctrl_hold_med": med, "p_hold": p,
+                     "K4": bool(p < 0.05)})
+        print(f"  {name} 2026 年化{sc:+7.2%} 对照中位{med:+7.2%} p={p:.4f} "
+              f"K4 {'✓' if p < 0.05 else '✗'}", flush=True)
+
+    df = pd.DataFrame(rows)
+    print(f"\n锚点K1b 抽样越界 {viol} 次 {'✓' if viol == 0 else '✗ 作废'}")
+    assert viol == 0
+    k2 = df[df["kind"].isin(["择时", "选股"])]["K2"]
+    sk = df[df["kind"] == "选股"]
+    print(f"K2 复现通过 {int(k2.sum())}/{len(k2)};"
+          f"K3 对照通过 {int(sk['K3'].sum())}/5(α={ALPHA}):"
+          f"{', '.join(sk.loc[sk['K3'], 'route']) or '无'}")
+    df.to_csv(f"{OUT}/codex_routes_rest.csv", index=False)
+    print(f"落库 {OUT}/codex_routes_rest.csv")
+
+
+if __name__ == "__main__":
+    main()
