@@ -65,3 +65,234 @@ W3 对「闭眼买银行」的比较(描述项,不设通过阈值)。
 不因结果不利就改对照设计或换窗口;
 不基于本节结论做任何可交易性声明。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, NBR, OUT, SEED, run_window_fast  # noqa: E402
+from codex_r10_replication import DATA, TOP_N, WEIGHT, metrics  # noqa: E402
+from codex_routes_rerun import build_fund, route_scores, wrank  # noqa: E402
+from fundamental_yoy import yoy_series  # noqa: E402
+
+NSEED, ALPHA = 500, 0.05 / 3
+WINS = {"train": ("2014-01-02", "2021-12-31"), "holdout": ("2022-01-04", "2026-08-03")}
+CLS = ("/home/user/quant-research-dev/mktdata/others/"
+       "classification_enriched.parquet")
+
+
+def build_industry(codes, idx):
+    """PIT 申万一级行业 -> (nt, ns) 的 int16 行业 id 矩阵,-1 = 未知。"""
+    c = pd.read_parquet(CLS, columns=["code", "industry_l1_name",
+                                      "effective_from", "effective_to"])
+    c["code"] = c["code"].astype(str).str.zfill(6)
+    c["effective_from"] = pd.to_datetime(c["effective_from"])
+    c["effective_to"] = pd.to_datetime(c["effective_to"]).fillna(
+        pd.Timestamp("2099-01-01"))
+    names = sorted(c["industry_l1_name"].dropna().unique())
+    nid = {n: i for i, n in enumerate(names)}
+    pos = {code: j for j, code in enumerate(codes)}
+    m = np.full((len(idx), len(codes)), -1, np.int16)
+    arr = idx.to_numpy()
+    for code, g in c.groupby("code", sort=False):
+        j = pos.get(code)
+        if j is None:
+            continue
+        for _, r in g.iterrows():
+            if pd.isna(r["industry_l1_name"]):
+                continue
+            a = np.searchsorted(arr, r["effective_from"].to_datetime64(), "left")
+            b = np.searchsorted(arr, r["effective_to"].to_datetime64(), "left")
+            if b > a:
+                m[a:b, j] = nid[r["industry_l1_name"]]
+    return m, names, nid
+
+
+def draw_industry(rng, order_in_ind, pos_in_ind, nbr=NBR):
+    """对照 I:在**同一行业内**的市值名次邻域抽样。order_in_ind 为该行业内按市值升序的列号。"""
+    n = len(order_in_ind)
+    lo = max(0, pos_in_ind - nbr)
+    hi = min(n - 1, pos_in_ind + nbr)
+    return int(rng.integers(lo, hi + 1))
+
+
+def main():  # noqa: PLR0915
+    z = np.load(CACHE, allow_pickle=True)
+    idx = pd.DatetimeIndex(z["idx"])
+    codes = list(z["codes"])
+    op, cl, susp, lu, ld, ok = z["OP"], z["CL"], z["SUSP"], z["LU"], z["LD"], z["OK"]
+    logcap, tmean = z["LOGCAP"], z["TMEAN"]
+    nt, ns = len(idx), len(codes)
+    assert (nt, ns) == (3297, 5217), "锚点W1a"
+    y = yoy_series("300347").set_index(["报告年", "报告期"])["同比"]
+    assert abs(float(y.get((2017, "中报"), np.nan)) - 0.5307) < 0.005, "锚点W1"
+    print(f"锚点W1a ✓ {nt}×{ns};泰格同比 ✓", flush=True)
+
+    t0 = time.time()
+    ind, names, nid = build_industry(codes, idx)
+    bank = nid.get("银行", -99)
+    print(f"行业矩阵完成 ({time.time()-t0:.0f}s),{len(names)} 个申万一级行业,"
+          f"银行 id={bank}", flush=True)
+
+    raw = np.full((nt, ns), np.nan, np.float32)
+    for j, c in enumerate(codes):
+        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        raw[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
+            lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
+    fm, abad = build_fund(codes, idx)
+    assert abad == 0, "锚点W1d TTM"
+    print("锚点W1d ✓ TTM 恒等式", flush=True)
+
+    b = pd.read_parquet(f"{DATA}/510300.parquet", columns=["close"])
+    b.index = pd.to_datetime(b.index).tz_localize(None)
+    cal = pd.DatetimeIndex(b.index.unique()).sort_values()
+    cal = cal[(cal >= "2014-01-01") & (cal <= "2026-08-20")]
+    cal_pos = pd.Index(idx).get_indexer(cal)
+    reb = cal_pos[::20]
+    ipos = pd.Index(idx)
+
+    def wpos(w):
+        d0, d1 = WINS[w]
+        return (int(ipos.get_indexer([pd.Timestamp(d0)], method="bfill")[0]),
+                int(ipos.get_indexer([pd.Timestamp(d1)], method="ffill")[0]))
+
+    def cfp_score(t, e):
+        v = fm["ocfps_ttm"][t, e] / raw[t, e].astype(np.float64)
+        return wrank(v, v > 0)
+
+    def build(fn):
+        """返回 sel 与每期的行业内定位信息(供对照 I 用)。"""
+        sel, meta = {}, {}
+        cov_n = cov_d = 0
+        for t in reb:
+            t = int(t)
+            base = ok[t] & np.isfinite(logcap[t]) & np.isfinite(tmean[t])
+            e = np.flatnonzero(base)
+            if len(e) < TOP_N:
+                continue
+            cov_d += len(e)
+            cov_n += int((ind[t, e] >= 0).sum())
+            e = e[ind[t, e] >= 0]                     # 查不到行业的剔出
+            if len(e) < TOP_N:
+                continue
+            v = np.asarray(fn(t, e), dtype=float)
+            g = np.isfinite(v)
+            if not g.any():
+                continue
+            e2 = e[g]
+            k = min(TOP_N, len(e2))
+            top = e2[np.argsort(-v[g], kind="stable")[:k]]
+            sel[t] = (top, np.full(k, WEIGHT))
+            groups = {}
+            for i2 in np.unique(ind[t, e]):
+                gi = e[ind[t, e] == i2]
+                groups[int(i2)] = gi[np.argsort(logcap[t, gi], kind="stable")]
+            posmap = {}
+            for c_ in top:
+                i2 = int(ind[t, c_])
+                posmap[int(c_)] = (i2, int(np.flatnonzero(groups[i2] == c_)[0]))
+            meta[t] = (groups, posmap)
+        return sel, meta, cov_n / max(cov_d, 1)
+
+    viol = 0
+
+    def ev(sel, meta, w, nseed=NSEED):
+        nonlocal viol
+        w0, w1 = wpos(w)
+        eq, dd, _, _ = run_window_fast(op, cl, susp, lu, ld, sel, cal_pos, w0, w1)
+        m = metrics(eq, dd, idx)
+        cg = []
+        for sd in range(nseed):
+            rng = np.random.default_rng(SEED + sd)
+            cs = {}
+            for t, (cols, _) in sel.items():
+                groups, posmap = meta[t]
+                out, taken = [], set()
+                for c_ in cols:
+                    i2, p2 = posmap[int(c_)]
+                    g2 = groups[i2]
+                    for _ in range(40):
+                        q = draw_industry(rng, g2, p2)
+                        if (i2, q) not in taken:
+                            break
+                    taken.add((i2, q))
+                    pick = int(g2[q])
+                    viol += int(ind[t, pick] != i2)      # 行业恒等式
+                    out.append(pick)
+                cs[t] = (np.array(out, np.int64), np.full(len(out), WEIGHT))
+            e2, d2, _, _ = run_window_fast(op, cl, susp, lu, ld, cs, cal_pos, w0, w1)
+            cg.append(metrics(e2, d2, idx)["cagr"])
+        a = np.array(cg)
+        return m, float(np.median(a)), (1 + int(np.sum(a >= m["cagr"]))) / (nseed + 1)
+
+    rows = []
+    for name, fn in (("R08", lambda t, e: route_scores("R08", t, e, fm, cl, raw,
+                                                       logcap, tmean, "raw")),
+                     ("R09", lambda t, e: route_scores("R09", t, e, fm, cl, raw,
+                                                       logcap, tmean, "raw")),
+                     ("CFP_single", cfp_score)):
+        sel, meta, cov = build(fn)
+        bk = np.mean([float(np.mean(ind[t, v[0]] == bank)) for t, v in sel.items()])
+        r = {"strategy": name, "n_reb": len(sel), "ind_cov": cov, "bank_share": bk}
+        for w in WINS:
+            m, med, p = ev(sel, meta, w)
+            r |= {f"{w}_cagr": m["cagr"], f"{w}_mdd": m["mdd"],
+                  f"{w}_sharpe": m["sharpe"], f"{w}_ctrl": med, f"{w}_p": p}
+        r["W2"] = bool(r["train_p"] < ALPHA and r["holdout_p"] < ALPHA)
+        rows.append(r)
+        print(f"{name:11s} 银行占比{bk:5.1%} | 训练{r['train_cagr']:+7.2%} "
+              f"对照{r['train_ctrl']:+7.2%} p={r['train_p']:.4f} | "
+              f"留出{r['holdout_cagr']:+7.2%} 回撤{r['holdout_mdd']:+7.2%} "
+              f"夏普{r['holdout_sharpe']:5.2f} 对照{r['holdout_ctrl']:+7.2%} "
+              f"p={r['holdout_p']:.4f} | W2 {'✓' if r['W2'] else '✗'}", flush=True)
+
+    # ---- W3 基准 B:等权持有当日全部合格银行股(不含成本)----
+    ret = np.zeros_like(cl)
+    ret[1:] = cl[1:] / cl[:-1] - 1.0
+    print("\nW3 基准 B(等权全部合格银行股,不含成本、不含整手)", flush=True)
+    for w in WINS:
+        w0, w1 = wpos(w)
+        days = cal_pos[(cal_pos >= w0) & (cal_pos <= w1)]
+        eqv, held = 1.0, None
+        curve = []
+        for t in days:
+            if held is not None and len(held):
+                rr = ret[t, held]
+                rr = rr[np.isfinite(rr)]
+                eqv *= 1 + (float(rr.mean()) if len(rr) else 0.0)
+            curve.append(eqv)
+            if int(t) in reb:
+                held = np.flatnonzero(ok[t] & (ind[t] == bank))
+        cv = np.array(curve)
+        yrs = (idx[days[-1]] - idx[days[0]]).days / 365.25
+        rr = np.diff(cv) / cv[:-1]
+        rr = rr[np.isfinite(rr)]
+        sd = rr.std(ddof=1)
+        print(f"  {w:8s} 年化{cv[-1]**(1/yrs)-1:+7.2%} 回撤"
+              f"{np.min(cv/np.maximum.accumulate(cv)-1):+7.2%} "
+              f"夏普{rr.mean()/sd*np.sqrt(252) if sd > 0 else 0:5.2f}", flush=True)
+        rows.append({"strategy": f"BANK_EW_{w}", f"{w}_cagr": float(cv[-1]**(1/yrs)-1),
+                     f"{w}_mdd": float(np.min(cv/np.maximum.accumulate(cv)-1))})
+
+    df = pd.DataFrame(rows)
+    print(f"\n锚点W1b 行业恒等式违例 {viol} 次 {'✓' if viol == 0 else '✗ 作废'}")
+    assert viol == 0
+    print(f"锚点W1c 行业覆盖率 {df['ind_cov'].dropna().min():.1%} "
+          f"{'✓' if df['ind_cov'].dropna().min() >= 0.95 else '✗'}")
+    print(f"W2 通过 {int(df['W2'].fillna(False).sum())}/3(α={ALPHA:.6f}):"
+          f"{', '.join(df.loc[df['W2'].fillna(False), 'strategy']) or '无'}")
+    df.to_csv(f"{OUT}/industry_neutral.csv", index=False)
+    print(f"落库 {OUT}/industry_neutral.csv")
+
+
+if __name__ == "__main__":
+    main()
