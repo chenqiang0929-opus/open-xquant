@@ -60,3 +60,133 @@ U3 留出期年化相对训练期 **下降幅度 > 5pp**(两条都是)。
 **不因为留出期结果不好就回头改训练期的因子定义或窗口**;
 不基于本节结论做任何可交易性声明。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, NBR, OUT, SEED, run_window_fast  # noqa: E402
+from codex_r10_replication import DATA, TOP_N, WEIGHT, metrics  # noqa: E402
+from codex_routes_rerun import build_fund, route_scores  # noqa: E402
+from factor_sweep_pv import draw_fast  # noqa: E402
+from fundamental_yoy import yoy_series  # noqa: E402
+
+NSEED, ALPHA = 500, 0.05 / 2
+WINS = {"train": ("2014-01-02", "2021-12-31"), "holdout": ("2022-01-04", "2026-08-03")}
+
+
+def main():
+    z = np.load(CACHE, allow_pickle=True)
+    idx = pd.DatetimeIndex(z["idx"])
+    codes = list(z["codes"])
+    op, cl, susp, lu, ld, ok = z["OP"], z["CL"], z["SUSP"], z["LU"], z["LD"], z["OK"]
+    logcap, tmean = z["LOGCAP"], z["TMEAN"]
+    nt, ns = len(idx), len(codes)
+    assert (nt, ns) == (3297, 5217), "锚点L1a"
+    print(f"锚点L1a ✓ {nt}×{ns}", flush=True)
+
+    y = yoy_series("300347").set_index(["报告年", "报告期"])["同比"]
+    truth = {(2017, "中报"): .5307, (2017, "三季报"): 1.0103,
+             (2017, "年报"): 1.1401, (2018, "一季报"): 1.2107}
+    bad = [k for k, v in truth.items() if abs(float(y.get(k, np.nan)) - v) > 0.005]
+    print(f"锚点L1d 泰格同比复现:违例 {len(bad)} 项 {'✓' if not bad else '✗'}", flush=True)
+    assert not bad
+
+    raw = np.full((nt, ns), np.nan, np.float32)
+    t0 = time.time()
+    for j, c in enumerate(codes):
+        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        raw[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
+            lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
+    print(f"不复权价矩阵完成 ({time.time()-t0:.0f}s)", flush=True)
+    fm, abad = build_fund(codes, idx)
+    assert abad == 0, "锚点L1c TTM 恒等式不过"
+
+    b = pd.read_parquet(f"{DATA}/510300.parquet", columns=["close"])
+    b.index = pd.to_datetime(b.index).tz_localize(None)
+    bs = pd.to_numeric(b["close"], errors="coerce").ffill()
+    cal = pd.DatetimeIndex(b.index.unique()).sort_values()
+    cal = cal[(cal >= "2014-01-01") & (cal <= "2026-08-20")]
+    cal_pos = pd.Index(idx).get_indexer(cal)
+    reb = cal_pos[::20]
+    ipos = pd.Index(idx)
+
+    def wpos(w):
+        d0, d1 = WINS[w]
+        return (int(ipos.get_indexer([pd.Timestamp(d0)], method="bfill")[0]),
+                int(ipos.get_indexer([pd.Timestamp(d1)], method="ffill")[0]))
+
+    viol, rows = 0, []
+    for name in ("R08", "R09"):
+        sel, elig, srk = {}, {}, {}
+        for t in reb:
+            t = int(t)
+            base = ok[t] & np.isfinite(logcap[t]) & np.isfinite(tmean[t])
+            e = np.flatnonzero(base)
+            if len(e) < TOP_N * 3:
+                continue
+            v = route_scores(name, t, e, fm, cl, raw, logcap, tmean, "raw")
+            g = np.isfinite(v)
+            if g.sum() < TOP_N:
+                continue
+            e2 = e[g]
+            top = e2[np.argsort(-v[g], kind="stable")[:TOP_N]]
+            sel[t] = (top, np.full(TOP_N, WEIGHT))
+            order = e[np.argsort(logcap[t, e], kind="stable")]
+            rk = {int(c): i for i, c in enumerate(order)}
+            elig[t] = order
+            srk[t] = np.array([rk[int(c)] for c in top])
+        r = {"route": name}
+        for w in ("train", "holdout"):
+            w0, w1 = wpos(w)
+            nre = sum(1 for t in sel if w0 <= t <= w1)
+            eq, dd, tr, fz = run_window_fast(op, cl, susp, lu, ld, sel, cal_pos, w0, w1)
+            m = metrics(eq, dd, idx)
+            s = bs[(bs.index >= WINS[w][0]) & (bs.index <= WINS[w][1])]
+            cg = []
+            for sd in range(NSEED):
+                rng = np.random.default_rng(SEED + sd)
+                cs = {}
+                for t in sel:
+                    o, rk = elig[t], srk[t]
+                    ps = draw_fast(rng, rk, len(o))
+                    viol += int(np.sum(np.abs(ps - rk) > NBR))
+                    cs[t] = (o[ps], np.full(TOP_N, WEIGHT))
+                e3, d3, _, _ = run_window_fast(op, cl, susp, lu, ld, cs, cal_pos, w0, w1)
+                cg.append(metrics(e3, d3, idx)["cagr"])
+            a = np.array(cg)
+            p = (1 + int(np.sum(a >= m["cagr"]))) / (NSEED + 1)
+            r |= {f"{w}_cagr": m["cagr"], f"{w}_mdd": m["mdd"], f"{w}_sharpe": m["sharpe"],
+                  f"{w}_total": m["total"], f"{w}_nreb": nre, f"{w}_frozen": fz,
+                  f"{w}_bench": float(s.iloc[-1] / s.iloc[0] - 1),
+                  f"{w}_ctrl_med": float(np.median(a)), f"{w}_p": p}
+            print(f"  {name} {w:8s} 调仓{nre:3d} 年化{m['cagr']:+7.2%} 回撤{m['mdd']:+7.2%} "
+                  f"夏普{m['sharpe']:5.2f} | 对照中位{np.median(a):+7.2%} p={p:.4f}",
+                  flush=True)
+        r["L2"] = bool(r["train_p"] < ALPHA)
+        r["L3"] = bool(r["holdout_p"] < ALPHA)
+        r["decay_pp"] = (r["holdout_cagr"] - r["train_cagr"]) * 100
+        rows.append(r)
+        print(f"{name}  L2 训练期 {'✓' if r['L2'] else '✗'}  "
+              f"L3 留出期 {'✓' if r['L3'] else '✗'}  衰减 {r['decay_pp']:+.2f}pp\n", flush=True)
+
+    df = pd.DataFrame(rows)
+    print(f"锚点L1b 抽样越界 {viol} 次 {'✓' if viol == 0 else '✗ 作废'}")
+    assert viol == 0
+    print(f"L2 训练期通过 {int(df['L2'].sum())}/2;L3 留出期通过 {int(df['L3'].sum())}/2"
+          f"(α={ALPHA}):{', '.join(df.loc[df['L3'], 'route']) or '无'}")
+    df.to_csv(f"{OUT}/value_quality_oos.csv", index=False)
+    print(f"落库 {OUT}/value_quality_oos.csv")
+
+
+if __name__ == "__main__":
+    main()
