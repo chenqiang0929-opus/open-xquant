@@ -73,29 +73,39 @@ CODEX_FULL_CAGR = {"R01": .0740, "R02": .0590, "R03": .1667, "R04": .0204,
 
 
 def zigzag(s, th):
-    """月末收盘的 ZigZag:确认拐点后切段。返回 [(起, 止, '牛'/'熊'), ...]。"""
+    """月末收盘的 ZigZag。
+
+    §126 第一版写错过:`direction=0` 时两个分支同时生效,`ext` 被 max/min 两套
+    逻辑轮流覆盖成当前价,阈值条件永远不成立 → 13 年只切出 1 段。
+    本版用**独立的 hi/lo 跟踪**,由先触发的一侧决定初始方向。
+    """
     v = s.to_numpy(float)
     d = s.index
     piv = [0]
     direction = 0
-    ext, ei = v[0], 0
+    hi = lo = v[0]
+    hi_i = lo_i = 0
     for i in range(1, len(v)):
-        if direction >= 0 and v[i] > ext:
-            ext, ei = v[i], i
-        if direction <= 0 and v[i] < ext:
-            ext, ei = v[i], i
-        if direction >= 0 and v[i] <= ext * (1 - th) and ei != piv[-1]:
-            piv.append(ei)
-            direction, ext, ei = -1, v[i], i
-        elif direction <= 0 and v[i] >= ext * (1 + th) and ei != piv[-1]:
-            piv.append(ei)
-            direction, ext, ei = 1, v[i], i
-    piv.append(len(v) - 1)
+        if v[i] > hi:
+            hi, hi_i = v[i], i
+        if v[i] < lo:
+            lo, lo_i = v[i], i
+        if direction != 1 and v[i] >= lo * (1 + th):
+            if lo_i > piv[-1]:
+                piv.append(lo_i)
+            direction = 1
+            hi, hi_i = v[i], i
+        elif direction != -1 and v[i] <= hi * (1 - th):
+            if hi_i > piv[-1]:
+                piv.append(hi_i)
+            direction = -1
+            lo, lo_i = v[i], i
+    if piv[-1] != len(v) - 1:
+        piv.append(len(v) - 1)
     segs = []
     for a, b in zip(piv[:-1], piv[1:], strict=True):
-        if b <= a:
-            continue
-        segs.append((d[a], d[b], "牛" if v[b] > v[a] else "熊"))
+        if b > a:
+            segs.append((d[a], d[b], "牛" if v[b] > v[a] else "熊"))
     return segs
 
 
@@ -204,22 +214,31 @@ def main():  # noqa: PLR0915
     # 一条连续净值曲线(2014-01-02 → 面板末)
     w0 = int(ipos.get_indexer([pd.Timestamp("2014-01-02")], method="bfill")[0])
     w1 = int(ipos.get_indexer([pd.Timestamp("2026-08-03")], method="ffill")[0])
-    curves = {}
+    curve_cache = f"{OUT}/cycle_curves.parquet"
+    if os.path.exists(curve_cache):
+        cdf = pd.read_parquet(curve_cache)
+        curves = {c: cdf[c].dropna() for c in cdf.columns}
+        print(f"复用曲线缓存 {curve_cache}", flush=True)
+    else:
+        curves = {}
     sig = {"R01": ((bsr > bsr.rolling(200).mean())
                    & (bsr.rolling(50).mean() > bsr.rolling(200).mean())).astype(float),
            "R02": (bsr / bsr.shift(250) - 1.0 > 0).astype(float)}
     days = cal_pos[(cal_pos >= w0) & (cal_pos <= w1)]
     di = idx[days]
-    for nm in TIMING:
-        px = bs.reindex(di).ffill()
-        s = sig[nm].reindex(di).shift(1).fillna(0.0)
-        curves[nm] = pd.Series(
-            (px.pct_change().fillna(0.0) * s).add(1.0).cumprod().to_numpy(), index=di)
-    for nm in STOCKS:
-        eq, dd, _, _ = run_window_fast(op, cl, susp, lu, ld, build(nm), cal_pos, w0, w1)
-        curves[nm] = pd.Series(eq / eq[0], index=idx[dd])
-        print(f"{nm} 曲线完成", flush=True)
-    curves["510300"] = (bs.reindex(di).ffill() / bs.reindex(di).ffill().iloc[0])
+    if not curves:
+        for nm in TIMING:
+            px = bs.reindex(di).ffill()
+            s = sig[nm].reindex(di).shift(1).fillna(0.0)
+            curves[nm] = pd.Series(
+                (px.pct_change().fillna(0.0) * s).add(1.0).cumprod().to_numpy(), index=di)
+        for nm in STOCKS:
+            eq, dd, _, _ = run_window_fast(op, cl, susp, lu, ld, build(nm), cal_pos, w0, w1)
+            curves[nm] = pd.Series(eq / eq[0], index=idx[dd])
+            print(f"{nm} 曲线完成", flush=True)
+        curves["510300"] = (bs.reindex(di).ffill() / bs.reindex(di).ffill().iloc[0])
+        pd.DataFrame(curves).to_parquet(curve_cache)
+        print(f"曲线缓存写入 {curve_cache}", flush=True)
 
     # 锚点 X2:切出 full 窗口须与 §122 相符
     print("\n锚点X2 曲线一致性(vs §122 all13_report full 年化)", flush=True)
