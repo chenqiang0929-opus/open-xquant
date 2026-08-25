@@ -72,3 +72,193 @@ V4 至少一个开关会在训练期就失败(M2 找不到满足「年化下降 
 **不扩充参数网格、不因留出期结果不好回头改训练期选参规则**;
 不基于本节结论做任何可交易性声明。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, OUT, SEED, build_sel, run_window_fast  # noqa: E402
+from codex_r10_replication import DATA, TOP_N, metrics  # noqa: E402
+
+NSEED = 200
+WINS = {"train": ("2014-01-02", "2021-12-31"), "holdout": ("2022-01-04", "2026-08-03")}
+GRID = {"SW1": (60, 120, 250), "SW2": (0.30, 0.40, 0.50), "SW3": (0.15, 0.25, 0.35)}
+
+
+def gate_sel(sel, on):
+    """把开关作用到选股字典:on[t] 为 False 的调仓日改为空持仓(全部卖出)。"""
+    return {t: (v if on.get(t, True) else (np.zeros(0, np.int64), np.zeros(0)))
+            for t, v in sel.items()}
+
+
+def main():
+    z = np.load(CACHE, allow_pickle=True)
+    idx = pd.DatetimeIndex(z["idx"])
+    codes = list(z["codes"])
+    op, cl, susp, lu, ld, ok = z["OP"], z["CL"], z["SUSP"], z["LU"], z["LD"], z["OK"]
+    logcap, tmean = z["LOGCAP"], z["TMEAN"]
+    nt, ns = len(idx), len(codes)
+    assert (nt, ns) == (3297, 5217), "锚点M1a"
+    print(f"锚点M1a ✓ {nt}×{ns}", flush=True)
+
+    b = pd.read_parquet(f"{DATA}/510300.parquet", columns=["close"])
+    b.index = pd.to_datetime(b.index).tz_localize(None)
+    bs = pd.to_numeric(b["close"], errors="coerce").ffill().reindex(idx).ffill()
+    cal = pd.DatetimeIndex(b.index.unique()).sort_values()
+    cal = cal[(cal >= "2014-01-01") & (cal <= "2026-08-20")]
+    cal_pos = pd.Index(idx).get_indexer(cal)
+    reb = cal_pos[::20]
+    ipos = pd.Index(idx)
+    sel, elig, _ = build_sel(reb, ok, logcap, tmean)
+    print(f"标的策略 small_cap_low_turnover,调仓日 {len(sel)}", flush=True)
+
+    # ── 三个开关的原始序列(逐日)──
+    ret = np.zeros_like(cl)
+    ret[1:] = cl[1:] / cl[:-1] - 1.0
+    micro = np.full(nt, np.nan)                     # 微盘等权指数(最小十分位)
+    eqv, held = 1.0, None
+    for t in range(nt):
+        if held is not None and len(held):
+            r = ret[t, held]
+            r = r[np.isfinite(r)]
+            eqv *= 1 + (float(r.mean()) if len(r) else 0.0)
+        micro[t] = eqv
+        if t in elig:
+            o = elig[t]
+            held = o[:max(TOP_N, len(o) // 10)]
+    rel = pd.Series(micro / bs.to_numpy(), index=idx)
+    ma100 = pd.DataFrame(cl, index=idx).rolling(100, min_periods=100).mean().to_numpy()
+    with np.errstate(all="ignore"):
+        above = np.nansum(cl > ma100, axis=1) / np.maximum(
+            np.nansum(np.isfinite(ma100) & np.isfinite(cl), axis=1), 1)
+    breadth = pd.Series(above, index=idx)
+
+    def wpos(w):
+        d0, d1 = WINS[w]
+        return (int(ipos.get_indexer([pd.Timestamp(d0)], method="bfill")[0]),
+                int(ipos.get_indexer([pd.Timestamp(d1)], method="ffill")[0]))
+
+    def run(s, w):
+        w0, w1 = wpos(w)
+        eq, dd, tr, fz = run_window_fast(op, cl, susp, lu, ld, s, cal_pos, w0, w1)
+        return metrics(eq, dd, idx), eq, dd
+
+    # ── 锚点 M1:开关恒为「开」时必须与基线逐日相等 ──
+    base = {w: run(sel, w) for w in WINS}
+    allon = gate_sel(sel, {t: True for t in sel})
+    ok_id = True
+    for w in WINS:
+        e1 = base[w][1]
+        e2 = run(allon, w)[1]
+        err = float(np.max(np.abs(e2 - e1) / np.maximum(np.abs(e1), 1e-9)))
+        ok_id &= err < 1e-9
+        print(f"锚点M1 开关恒等式 {w:8s} 最大相对误差 {err:.3e} "
+              f"{'✓' if err < 1e-9 else '✗'}", flush=True)
+    assert ok_id, "锚点M1 不过"
+    for w in WINS:
+        m = base[w][0]
+        print(f"基线(无开关) {w:8s} 年化{m['cagr']:+7.2%} 回撤{m['mdd']:+7.2%} "
+              f"夏普{m['sharpe']:5.2f}", flush=True)
+
+    def switch_on(kind, par):
+        """返回 {调仓日 -> 是否持仓}。信号只用到 t 当日及以前的信息。"""
+        if kind == "SW1":
+            ma = rel.rolling(par, min_periods=par).mean()
+            sig = (rel > ma).to_numpy()
+            return {int(t): bool(sig[int(t)]) if np.isfinite(rel.iloc[int(t)])
+                    else True for t in sel}
+        if kind == "SW2":
+            sig = (breadth > par).to_numpy()
+            return {int(t): bool(sig[int(t)]) for t in sel}
+        raise ValueError(kind)
+
+    def sw3_on(par, w):
+        """自身回撤开关必须逐日模拟(依赖自身净值),在窗口内滚动生成。"""
+        w0, w1 = wpos(w)
+        days = cal_pos[(cal_pos >= w0) & (cal_pos <= w1)]
+        on, cur = {}, True
+        eq, _, _ = base[w][1], None, None
+        pos = {int(d): k for k, d in enumerate(days)}
+        peak = -np.inf
+        for t in sel:
+            if int(t) not in pos:
+                continue
+            k = pos[int(t)]
+            peak = max(peak, float(np.max(eq[:k + 1])))
+            cur = (peak - float(eq[k])) / peak <= par
+            on[int(t)] = bool(cur)
+        return on
+
+    rows = []
+    for kind in ("SW1", "SW2", "SW3"):
+        cands = []
+        for par in GRID[kind]:
+            on = sw3_on(par, "train") if kind == "SW3" else switch_on(kind, par)
+            m, _, _ = run(gate_sel(sel, on), "train")
+            drop = (base["train"][0]["cagr"] - m["cagr"]) * 100
+            imp = (m["mdd"] - base["train"][0]["mdd"]) * 100
+            cands.append((par, drop, imp, m))
+            print(f"  {kind} par={par} 训练期 年化{m['cagr']:+7.2%}"
+                  f"(降{drop:+5.2f}pp) 回撤{m['mdd']:+7.2%}(改善{imp:+5.2f}pp)",
+                  flush=True)
+        good = [c for c in cands if c[1] <= 3.0]
+        if not good:
+            print(f"{kind} **训练期即失败**:没有任何参数满足年化下降 ≤3pp\n", flush=True)
+            rows.append({"switch": kind, "M2": False, "M3": False})
+            continue
+        par, drop, imp, mtr = max(good, key=lambda c: c[2])
+        print(f"{kind} M2 选中 par={par}(训练期回撤改善 {imp:+.2f}pp,年化降 {drop:+.2f}pp)",
+              flush=True)
+
+        on_h = sw3_on(par, "holdout") if kind == "SW3" else switch_on(kind, par)
+        mh, _, _ = run(gate_sel(sel, on_h), "holdout")
+        w0, w1 = wpos("holdout")
+        keys = [t for t in sel if w0 <= t <= w1]
+        noff = sum(1 for t in keys if not on_h.get(int(t), True))
+        rng = np.random.default_rng(SEED)
+        rc, rm = [], []
+        for _ in range(NSEED):
+            off = set(rng.choice(len(keys), size=noff, replace=False)) if noff else set()
+            ro = {int(t): (i not in off) for i, t in enumerate(keys)}
+            m2, _, _ = run(gate_sel(sel, ro), "holdout")
+            rc.append(m2["cagr"])
+            rm.append(m2["mdd"])
+        rc, rm = np.array(rc), np.array(rm)
+        a = (mh["mdd"] - base["holdout"][0]["mdd"]) * 100 >= 10.0
+        bb = (base["holdout"][0]["cagr"] - mh["cagr"]) * 100 <= 3.0
+        cc = (mh["cagr"] > np.percentile(rc, 50)) and (mh["mdd"] > np.percentile(rm, 25))
+        rows.append({"switch": kind, "par": par, "M2": True,
+                     "train_cagr": mtr["cagr"], "train_mdd": mtr["mdd"],
+                     "hold_cagr": mh["cagr"], "hold_mdd": mh["mdd"],
+                     "base_hold_cagr": base["holdout"][0]["cagr"],
+                     "base_hold_mdd": base["holdout"][0]["mdd"],
+                     "off_days": noff, "n_reb": len(keys),
+                     "rand_cagr_p50": float(np.percentile(rc, 50)),
+                     "rand_mdd_p25": float(np.percentile(rm, 25)),
+                     "M3a": bool(a), "M3b": bool(bb), "M3c": bool(cc),
+                     "M3": bool(a and bb and cc)})
+        print(f"{kind} 留出期 年化{mh['cagr']:+7.2%}(基线{base['holdout'][0]['cagr']:+7.2%})"
+              f" 回撤{mh['mdd']:+7.2%}"
+              f"(基线{base['holdout'][0]['mdd']:+7.2%}) 空仓{noff}/{len(keys)}\n"
+              f"     M3a 回撤改善≥10pp {'✓' if a else '✗'} | "
+              f"M3b 年化降≤3pp {'✓' if bb else '✗'} | "
+              f"M3c 优于随机择时(年化 vs p50 {np.percentile(rc,50):+.2%}, "
+              f"回撤 vs p25 {np.percentile(rm,25):+.2%}) {'✓' if cc else '✗'} "
+              f"→ M3 {'✓' if (a and bb and cc) else '✗'}\n", flush=True)
+
+    df = pd.DataFrame(rows)
+    m3 = df["M3"] if "M3" in df.columns else pd.Series([False] * len(df))
+    npass = int(m3.fillna(False).sum())
+    print(f"M3 留出期通过 {npass}/3:{', '.join(df.loc[m3.fillna(False), 'switch']) or '无'}")
+    df.to_csv(f"{OUT}/microcap_regime.csv", index=False)
+    print(f"落库 {OUT}/microcap_regime.csv")
+
+
+if __name__ == "__main__":
+    main()
