@@ -90,3 +90,145 @@ C4 食品饮料子样本(描述项,不参与判定):GF 口径只在申万一级=
 不对 2013 年之前的起点做外推;
 不基于本节结论做任何可交易性声明。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, OUT  # noqa: E402
+from codex_r10_replication import DATA  # noqa: E402
+from codex_routes_rerun import build_fund  # noqa: E402
+from fundamental_yoy import yoy_series  # noqa: E402
+from industry_neutral import CLS, build_industry  # noqa: E402
+
+NSEED, ALPHA = 500, 0.05 / 2
+# 广发表 4:证券简称 -> (代码, 加速起点, 市值最高日, 研报公布区间涨幅)
+GF_TABLE = [
+    ("颐海国际", None, "2017-03-14", "2020-09-02", 43.4667),
+    ("酒鬼酒", "000799", "2019-01-03", "2021-06-22", 16.4827),
+    ("山西汾酒", "600809", "2018-10-29", "2021-07-15", 15.7589),
+    ("百润股份", "002568", "2019-01-31", "2021-02-10", 14.5957),
+    ("澳优", None, "2016-07-07", "2019-07-03", 8.4048),
+    ("舍得酒业", "600702", "2020-09-25", "2021-07-21", 8.0665),
+    ("安井食品", "603345", "2019-03-13", "2021-02-09", 7.9740),
+    ("重庆啤酒", "600132", "2018-03-23", "2021-02-10", 7.0597),
+    ("贵州茅台", "600519", "2014-01-10", "2018-01-12", 6.9986),
+    ("伊利股份", "600887", "2008-10-27", "2010-11-30", 5.9351),
+    ("水井坊", "600779", "2015-09-30", "2018-06-26", 5.8667),
+    ("安琪酵母", "600298", "2014-06-20", "2018-06-07", 5.8453),
+    ("五粮液", "000858", "2014-01-08", "2018-01-15", 5.3407),
+    ("顺鑫农业", "000860", "2018-02-09", "2020-08-28", 4.8061),
+    ("古井贡酒", "000596", "2014-06-19", "2018-07-16", 4.7775),
+    ("泸州老窖", "000568", "2014-06-04", "2018-01-16", 3.8971),
+    ("老白干酒", "600559", "2014-07-10", "2015-06-24", 3.8119),
+    ("涪陵榨菜", "002507", "2016-03-16", "2018-07-31", 3.6662),
+    ("海天味业", "603288", "2018-02-07", "2020-09-02", 3.6260),
+    ("恒顺醋业", "600305", "2018-03-23", "2020-08-24", 3.3745),
+    ("中炬高新", "600872", "2018-03-28", "2020-09-02", 2.6242),
+    ("汤臣倍健", "300146", "2019-12-02", "2021-05-25", 1.8092),
+]
+
+
+def main():  # noqa: PLR0915
+    z = np.load(CACHE, allow_pickle=True)
+    idx = pd.DatetimeIndex(z["idx"])
+    codes = list(z["codes"])
+    cl = z["CL"]
+    nt, ns = len(idx), len(codes)
+    assert (nt, ns) == (3297, 5217), "锚点C1a"
+    y = yoy_series("300347").set_index(["报告年", "报告期"])["同比"]
+    assert abs(float(y.get((2017, "中报"), np.nan)) - 0.5307) < 0.005, "锚点C1a 泰格"
+    print(f"锚点C1a ✓ {nt}×{ns};泰格同比 ✓  (CLS={os.path.basename(CLS)})", flush=True)
+
+    t0 = time.time()
+    raw = np.full((nt, ns), np.nan, np.float32)
+    for j, c in enumerate(codes):
+        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        raw[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
+            lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
+    fm, abad = build_fund(codes, idx)
+    assert abad == 0, "锚点C1a TTM"
+    ind, names, nid = build_industry(codes, idx)
+    fb = nid.get("食品饮料", -99)
+    print(f"矩阵完成 ({time.time()-t0:.0f}s);食品饮料 id={fb}", flush=True)
+
+    pos = {c: j for j, c in enumerate(codes)}
+    ipos = pd.Index(idx)
+
+    def dpos(d, how="bfill"):
+        r = int(ipos.get_indexer([pd.Timestamp(d)], method=how)[0])
+        return r if r >= 0 else None
+
+    # ---- Part A:22 只代码验证 ----
+    print("\n=== Part A 广发表4 逐只验证(A1:相对误差<25%)===", flush=True)
+    ok_a, rows_a = [], []
+    for nm, code, d0, d1, rep in GF_TABLE:
+        if code is None:
+            print(f"  {nm:8s} —— 港股,不在本 A 股面板,跳过")
+            rows_a.append({"name": nm, "code": None, "status": "港股不在面板"})
+            continue
+        if code not in pos:
+            print(f"  {nm:8s} {code} —— 不在面板,跳过")
+            rows_a.append({"name": nm, "code": code, "status": "不在面板"})
+            continue
+        if pd.Timestamp(d0) < idx[0]:
+            print(f"  {nm:8s} {code} 加速起点 {d0} 早于面板起点 {idx[0].date()},跳过")
+            rows_a.append({"name": nm, "code": code, "status": "起点早于面板"})
+            continue
+        a, b = dpos(d0), dpos(d1, "ffill")
+        j = pos[code]
+        pa, pb = cl[a, j], cl[b, j]
+        got = float(pb / pa - 1.0) if np.isfinite(pa) and np.isfinite(pb) and pa > 0 else np.nan
+        rel = abs(got - rep) / abs(rep) if np.isfinite(got) else np.inf
+        good = rel < 0.25
+        ok_a.append((nm, code, a, b)) if good else None
+        rows_a.append({"name": nm, "code": code, "rep": rep, "got": got,
+                      "rel": rel, "A1": good, "status": "ok" if good else "误差超限"})
+        print(f"  {nm:8s} {code} 研报 {rep*100:+8.1f}% | 面板 "
+              f"{got*100:+8.1f}% | 相对误差 {rel:6.1%} {'✓' if good else '✗'}")
+    print(f"A1 通过 {len(ok_a)}/22(港股与超前起点已剔除)", flush=True)
+
+    # ---- Part B:起点当日三条件 ----
+    print("\n=== Part B 加速起点当日的研报三条件(实测)===", flush=True)
+    hit = {"dd30": 0, "pe20": 0, "yoy": 0, "all3": 0}
+    rows_b = []
+    for nm, code, a, _ in ok_a:
+        j = pos[code]
+        w = cl[max(0, a - 249):a + 1, j].astype(np.float64)
+        dd = float(cl[a, j] / np.nanmax(w) - 1.0) if np.isfinite(np.nanmax(w)) else np.nan
+        e = fm["eps_ttm"][a, j]
+        pe = float(raw[a, j] / e) if np.isfinite(e) and e > 0 else np.nan
+        ni, nip = fm["ni_ttm"][a, j], fm["ni_ttm"][max(0, a - 250), j]
+        yy = float(ni / abs(nip) - 1.0) if np.isfinite(ni) and np.isfinite(nip) and nip != 0 else np.nan
+        c1, c2, c3 = dd <= -0.30, (0 < pe <= 20), yy > 0
+        hit["dd30"] += int(bool(c1))
+        hit["pe20"] += int(bool(c2))
+        hit["yoy"] += int(bool(c3))
+        hit["all3"] += int(bool(c1 and c2 and c3))
+        rows_b.append({"name": nm, "code": code, "dd250": dd, "pe_ttm": pe,
+                      "ni_yoy_proxy": yy, "c_dd30": bool(c1), "c_pe20": bool(c2),
+                      "c_yoy": bool(c3)})
+        print(f"  {nm:8s} 回撤{dd:+7.1%} {'✓' if c1 else ' '} | "
+              f"PE {pe:7.1f} {'✓' if c2 else ' '} | 同比(代理){yy:+8.1%} "
+              f"{'✓' if c3 else ' '}")
+    n = max(len(ok_a), 1)
+    print(f"  命中率:回撤≤-30% {hit['dd30']}/{n}  PE≤20 {hit['pe20']}/{n}  "
+          f"同比>0 {hit['yoy']}/{n}  **三条同时 {hit['all3']}/{n}**", flush=True)
+    pd.DataFrame(rows_a).to_csv(f"{OUT}/davis_partA.csv", index=False)
+    pd.DataFrame(rows_b).to_csv(f"{OUT}/davis_partB.csv", index=False)
+    print(f"落库 {OUT}/davis_partA.csv, davis_partB.csv")
+    np.savez_compressed(f"{OUT}/davis_mats.npz", raw=raw, ind=ind)
+    print(f"中间矩阵缓存 {OUT}/davis_mats.npz")
+
+
+if __name__ == "__main__":
+    main()
