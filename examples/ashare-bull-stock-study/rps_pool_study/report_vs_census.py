@@ -79,3 +79,185 @@ H4 一句必须回答的话(描述,不设阈值)
 **不因为事实复现了就说研报能用来选股** —— 那是第一二九节已经判过的另一件事;
 **不因为事实没复现就说研报错了** —— 先查是不是口径差异,查不出再说。
 """
+
+from __future__ import annotations
+
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_replication import DATA  # noqa: E402
+from davis_double_click import GF_TABLE  # noqa: E402
+
+SP = os.environ.get("OXQ_RESEARCH_DIR", "/home/user/oxq-panel")
+CENSUS = ("/home/user/quant-research-dev/research/"
+          "bull-stock-census-2010-2025/data")
+OUT = SP
+
+
+def rd(name):
+    x = pd.read_csv(f"{CENSUS}/{name}.csv", dtype={"code": str})
+    x.columns = [c.lstrip("﻿") for c in x.columns]
+    x["code"] = x["code"].str.zfill(6)
+    return x
+
+
+def main():  # noqa: PLR0915
+    import glob
+
+    import pyarrow.parquet as pq
+    files = sorted(glob.glob(f"{DATA}/*.parquet"))
+    codes = [os.path.basename(f)[:-8] for f in files
+             if os.path.basename(f)[:-8] != "510300"]
+    cl, mv = {}, {}
+    for c in codes:
+        cols = pq.ParquetFile(f"{DATA}/{c}.parquet").schema.names
+        want = [w for w in ("close", "float_mv") if w in cols]
+        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=want)
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        cl[c] = pd.to_numeric(x["close"], errors="coerce").where(lambda s: s > 0)
+        mv[c] = pd.to_numeric(x["float_mv"], errors="coerce").where(lambda s: s > 0)
+    q = pd.DataFrame(cl).sort_index()
+    m = pd.DataFrame(mv).sort_index().reindex(index=q.index, columns=q.columns)
+    assert q.shape == (3297, 5232), f"锚点H1a {q.shape}"
+    print(f"锚点H1a ✓ 面板 {q.shape}", flush=True)
+
+    mm, ll, dd = rd("annual_gt100_main"), rd("annual_gt100_listing_year"), \
+        rd("annual_gt100_delisted")
+    kk = [set(zip(x.year, x.code, strict=True)) for x in (mm, ll, dd)]
+    inter = (kk[0] & kk[1]) | (kk[0] & kk[2]) | (kk[1] & kk[2])
+    tot = len(kk[0] | kk[1] | kk[2])
+    assert not inter and tot == 3420, "锚点H1b"
+    print(f"锚点H1b ✓ 三表两两交集 0,并集 {tot}", flush=True)
+
+    idx = q.index
+    ipos = pd.Index(idx)
+    npos = len(idx)
+
+    # ---------------- H2 广发表 4 对账 ----------------
+    my_ = rd("multi_year_5x_10x")
+    my_["trough_date"] = pd.to_datetime(my_["trough_date"])
+    my_["peak_date"] = pd.to_datetime(my_["peak_date"])
+    print("\n=== H2 广发表 4 vs 普查跨年倍数榜(对得上 = 区间重叠≥50% 且倍数比 ∈[0.5,2])===")
+    print(f"{'名称':<9}{'代码':<8}{'在10倍榜':>8}{'研报倍数':>9}{'普查倍数':>10}"
+          f"{'倍数比':>8}{'区间重叠':>9}  对得上")
+    rows2, nok, ntest = [], 0, 0
+    for nm, code, d0, d1, rep in GF_TABLE:
+        if code is None:
+            print(f"{nm:<9}{'—':<8}  港股,不在普查 A 股清单")
+            rows2.append({"name": nm, "code": None, "status": "港股"})
+            continue
+        if pd.Timestamp(d0) < pd.Timestamp("2010-01-01"):
+            print(f"{nm:<9}{code:<8}  加速起点 {d0} 早于普查起点 2010-01-01,剔除")
+            rows2.append({"name": nm, "code": code, "status": "起点早于普查"})
+            continue
+        ntest += 1
+        r = my_[my_.code == code]
+        if not len(r):
+            print(f"{nm:<9}{code:<8}{'不在榜':>8}")
+            rows2.append({"name": nm, "code": code, "status": "不在跨年榜"})
+            continue
+        r = r.iloc[0]
+        a0, a1 = pd.Timestamp(d0), pd.Timestamp(d1)
+        ov = (min(a1, r.peak_date) - max(a0, r.trough_date)).days
+        frac = max(ov, 0) / max((a1 - a0).days, 1)
+        ratio = float(r.max_multiple) / (rep + 1.0)
+        good = frac >= 0.50 and 0.5 <= ratio <= 2.0
+        nok += int(good)
+        print(f"{nm:<9}{code:<8}{'是' if r.is_10x else '否':>8}"
+              f"{rep+1:>9.2f}{float(r.max_multiple):>10.2f}{ratio:>8.2f}"
+              f"{frac:>9.0%}  {'✓' if good else '✗'}")
+        rows2.append({"name": nm, "code": code, "status": "ok",
+                      "is_10x": bool(r.is_10x), "研报倍数": rep + 1,
+                      "普查倍数": float(r.max_multiple), "倍数比": ratio,
+                      "区间重叠": frac, "对得上": good,
+                      "普查trough": r.trough_date.date(),
+                      "普查peak": r.peak_date.date()})
+    print(f"H2 对得上 {nok}/{ntest}(逐只已列,本条不设通过/不通过)", flush=True)
+
+    # ---------------- H3 安信三条 ----------------
+    iy = rd("intrayear_gt100")
+    iy["intra_trough_date"] = pd.to_datetime(iy["intra_trough_date"])
+    tri = iy[iy.intra_max_multiple >= 3.0].copy()
+    tri = tri[tri.code.isin(q.columns)]
+    tp = ipos.get_indexer(tri.intra_trough_date, method="ffill")
+    tri["tpos"] = tp
+    tri = tri[(tri.tpos >= 20) & (tri.tpos < npos)]
+    # 锚点 H1c:取数位置必须 <= trough 日
+    bad = int((idx[tri.tpos.to_numpy()] > tri.intra_trough_date).sum())
+    assert bad == 0, f"锚点H1c 前视 {bad} 条"
+    print(f"\n锚点H1c ✓ 取数位置逐条 <= 低点日({len(tri):,} 条)", flush=True)
+
+    cpos = {c: i for i, c in enumerate(q.columns)}
+    ja = tri.code.map(cpos).to_numpy()
+    ta = tri.tpos.to_numpy()
+    qa, ma = q.to_numpy(), m.to_numpy()
+    tri["mv_yi"] = ma[ta, ja] / 1e8
+    tri["r20"] = qa[ta, ja] / qa[ta - 20, ja] - 1.0
+
+    print(f"\n=== H3 安信三条事实陈述(样本:年内 ≥3 倍,{len(tri):,} 条)===")
+    sub = tri[tri.mv_yi.notna()]
+    pa = float(((sub.mv_yi >= 10) & (sub.mv_yi <= 50)).mean())
+    h3a = 0.53 <= pa <= 0.73
+    print(f"(a) 上涨前流通市值 10–50 亿占比 **{pa:.1%}**(研报 63%,判据 [53%,73%])"
+          f" {'✓ 复现' if h3a else '✗ 未复现'}   n={len(sub):,}")
+
+    from codex_routes_rerun import build_fund
+    fm, abad = build_fund(list(q.columns), idx)
+    assert abad == 0, "锚点H1a TTM"
+    ni = fm["ni_ttm"]
+    nip = np.roll(ni, 250, axis=0)
+    with np.errstate(all="ignore"):
+        yoy = ni / np.where(nip != 0, np.abs(nip), np.nan) - 1.0
+    yoy[:250] = np.nan
+    tri["yoy"] = yoy[ta, ja]
+    sb = tri[tri.yoy.notna()]
+    pb = float((sb.yoy > 3.0).mean())
+    h3b = pb < 0.15
+    print(f"(b) 净利同比(代理)>300% 占比 **{pb:.1%}**(研报「不足 15%」)"
+          f" {'✓ 复现' if h3b else '✗ 未复现'}   n={len(sb):,}")
+
+    sc = tri[tri.r20.notna()].copy()
+    bins = [-np.inf, -0.20, -0.10, -0.01, np.inf]
+    labs = ["≤−20%", "(−20%,−10%]", "(−10%,−1%]", "**>−1%**"]
+    sc["grp"] = pd.cut(sc.r20, bins, labels=labs)
+    g = sc.groupby("grp", observed=True).intra_max_return.agg(["mean", "median", "count"])
+    top = g["mean"].idxmax()
+    h3c = top == "**>−1%**"
+    print("(c) 按上涨前 20 日涨幅分组的最终涨幅(研报称 >−1% 组平均 427.74% 且最高):")
+    for k, r in g.iterrows():
+        print(f"      {str(k):<14} 平均 {r['mean']:>8.1%}  中位 {r['median']:>8.1%}"
+              f"  n={int(r['count']):>5,}")
+    print(f"    最高组 = {top}  {'✓ 复现' if h3c else '✗ 未复现'}")
+    print(f"\n**H3 复现 {sum([h3a,h3b,h3c])}/3**", flush=True)
+
+    # ---------------- H4 反过来问 ----------------
+    print("\n=== H4 把 P(市值|三倍股) 翻成 P(三倍股|市值)===")
+    yrs = sorted(tri.year.unique())
+    hit = tot_ = 0
+    for y in yrs:
+        sel = (idx.year == y)
+        if not sel.any():
+            continue
+        t = int(np.flatnonzero(sel)[0])
+        band = (ma[t] / 1e8 >= 10) & (ma[t] / 1e8 <= 50)
+        tot_ += int(band.sum())
+        cs = set(tri[(tri.year == y)].code)
+        hit += int(sum(band[cpos[c]] for c in cs if c in cpos))
+    print(f"  研报的方向 P(上涨前市值 10–50 亿 | 一年三倍股) = **{pa:.1%}**")
+    print(f"  选股要的方向 P(一年三倍股 | 年初市值 10–50 亿) = **{hit/max(tot_,1):.2%}**"
+          f"  ({hit:,} / {tot_:,} 股票-年)")
+
+    pd.DataFrame(rows2).to_csv(f"{OUT}/report_vs_census_gf.csv", index=False,
+                               encoding="utf-8-sig")
+    tri.to_csv(f"{OUT}/report_vs_census_ax.csv", index=False, encoding="utf-8-sig")
+    print(f"\n落库 {OUT}/report_vs_census_gf.csv, report_vs_census_ax.csv")
+
+
+if __name__ == "__main__":
+    main()
