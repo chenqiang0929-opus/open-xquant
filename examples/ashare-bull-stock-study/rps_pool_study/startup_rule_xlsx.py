@@ -20,8 +20,10 @@
     RPS250(1.03)、MA20持续度120日(1.03)、20日波动率(0.97)、
     流通市值亿(1.03)、换手加速的剩余变异(0.94,已作门槛故无信息)
 
-单元格高亮:`相对MA250` 与 `RPS60` 落在当月前 30% 的格子标绿;
-双高的行在 `双高` 列标深绿。
+行与格的标注(改用静态样式,不用条件格式 —— WPS 下条件格式的白字会看不见)
+    **双高的整行浅绿底**,`双高` 列显示 **★**;
+    `相对MA250_高30%` / `RPS60_高30%` 命中显示 **√** 并标绿;
+    未来 60 日实际启动(≥50%)的行,末两列标橙。
 
 **选股逻辑没有任何改动** —— 这些只是展示与标记。
 **不构成任何买入建议。**
@@ -31,8 +33,8 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
 import pandas as pd
-from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -61,6 +63,10 @@ def main():
         df[flag] = (r >= 0.70).where(df[col].notna())
     df["双高"] = df["相对MA250_高30%"].fillna(False) & df["RPS60_高30%"].fillna(False)
 
+    df["相对MA250_高30%"] = np.where(df["相对MA250_高30%"].fillna(False), "√", "")
+    df["RPS60_高30%"] = np.where(df["RPS60_高30%"].fillna(False), "√", "")
+    dh = df["双高"].to_numpy()
+    df["双高"] = np.where(dh, "★", "")
     order = [c for _, (cs, _, _) in GRP.items() for c in cs]
     miss = [c for c in order if c not in df.columns]
     assert not miss, f"缺列 {miss}"
@@ -68,6 +74,7 @@ def main():
 
     # 历史效力:双高 vs 其余(只用已有结果的行)
     dd = df[df["启动(>=50%)"].notna()].copy()
+    dd["双高"] = dd["双高"] == "★"
     dd["y"] = dd["启动(>=50%)"].astype(bool)
     b = dd.y.mean()
     hh = dd[dd["双高"]]
@@ -104,23 +111,30 @@ def main():
             ci += len(csx)
         n = len(df) + 2
         cols = {c: i + 1 for i, c in enumerate(df.columns)}
-        grn = PatternFill("solid", fgColor="FFC6EFCE")
-        dgrn = PatternFill("solid", fgColor="FF70AD47")
-        for c in ("相对MA250_高30%", "RPS60_高30%"):
-            lt = get_column_letter(cols[c])
-            ws.conditional_formatting.add(
-                f"{lt}3:{lt}{n}",
-                CellIsRule(operator="equal", formula=['TRUE'], fill=grn))
-        lt = get_column_letter(cols["双高"])
-        ws.conditional_formatting.add(
-            f"{lt}3:{lt}{n}",
-            CellIsRule(operator="equal", formula=['TRUE'], fill=dgrn,
-                       font=Font(bold=True, color="FFFFFFFF")))
-        lt = get_column_letter(cols["启动(>=50%)"])
-        ws.conditional_formatting.add(
-            f"{lt}3:{lt}{n}",
-            CellIsRule(operator="equal", formula=['TRUE'],
-                       fill=PatternFill("solid", fgColor="FFFFC000")))
+        row_g = PatternFill("solid", fgColor="FFE2EFDA")   # 双高整行 浅绿
+        star = PatternFill("solid", fgColor="FF70AD47")    # ★ 深绿
+        tick = PatternFill("solid", fgColor="FFC6EFCE")    # √ 浅绿
+        orng = PatternFill("solid", fgColor="FFFFC000")    # 启动 橙
+        ncol = len(df.columns)
+        up_v = df["启动(>=50%)"].to_numpy()
+        for i in range(len(df)):
+            r = i + 3
+            if dh[i]:
+                for c in range(1, ncol + 1):
+                    ws.cell(row=r, column=c).fill = row_g
+                cc = ws.cell(row=r, column=cols["双高"])
+                cc.fill = star
+                cc.font = Font(bold=True, color="FFFFFFFF")
+                cc.alignment = Alignment(horizontal="center")
+            for c in ("相对MA250_高30%", "RPS60_高30%"):
+                if df.iat[i, cols[c] - 1] == "√":
+                    cc = ws.cell(row=r, column=cols[c])
+                    cc.fill = tick
+                    cc.font = Font(bold=True, color="FF006100")
+                    cc.alignment = Alignment(horizontal="center")
+            if up_v[i] is True or up_v[i] == 1.0:
+                for c in ("未来60日最大涨幅", "启动(>=50%)"):
+                    ws.cell(row=r, column=cols[c]).fill = orng
         for c, i in cols.items():
             ws.column_dimensions[get_column_letter(i)].width = \
                 max(9, min(16, len(str(c)) * 1.6 + 3))
