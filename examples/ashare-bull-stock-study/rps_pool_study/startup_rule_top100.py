@@ -36,6 +36,14 @@
 按距低点排序取前 100 是 1.90。**同样的 100 只,差 0.33。**
 取前 50 反而回落到 1.49 —— **100 只是这个规则下比较合适的规模。**
 
+输出字段(应用户要求扩充)
+----------------------
+除选股用的两个条件外,另附 Codex X01 那套指标供人工判读,
+**它们只是展示字段,不参与选股**:
+RPS60 / RPS120 / RPS250(全市场横截面分位)、近120日站上MA20比例、
+20日波动率、相对MA250位置、120日收益率、
+周线 MA20/MA60 排列状态与已持续周数(第一三七/一三八节口径,只用已完成周)。
+
 **本节是名单交付,不设通过/不通过判据,不构成任何买入建议。**
 """
 
@@ -117,12 +125,55 @@ def main():  # noqa: PLR0915
     ok &= np.isfinite(cl)
     ind, _, nid = build_industry(list(cldf.columns), idx)
     id2n = {v: k for k, v in nid.items()} if isinstance(nid, dict) else {}
-    lo250 = pd.DataFrame(cl).rolling(250, min_periods=250).min().to_numpy()
+    dfc = pd.DataFrame(cl)
+    lo250 = dfc.rolling(250, min_periods=250).min().to_numpy()
+    ma250 = dfc.rolling(250, min_periods=250).mean().to_numpy()
+    ma20d = dfc.rolling(20, min_periods=20).mean().to_numpy()
     t20 = trn.rolling(20, min_periods=10).mean().to_numpy()
     t60 = trn.rolling(60, min_periods=30).mean().to_numpy()
     with np.errstate(all="ignore"):
         rec = cl / np.where(lo250 > 0, lo250, np.nan) - 1.0
         tacc = t20 / np.where(t60 > 0, t60, np.nan) - 1.0
+        c2ma = cl / np.where(ma250 > 0, ma250, np.nan) - 1.0
+        r60 = cl / np.roll(cl, 60, axis=0) - 1.0
+        r60[:60] = np.nan
+        r120 = cl / np.roll(cl, 120, axis=0) - 1.0
+        r120[:120] = np.nan
+        r250 = cl / np.roll(cl, 250, axis=0) - 1.0
+        r250[:250] = np.nan
+        lr = np.log(cl / np.roll(cl, 1, axis=0))
+        lr[0] = np.nan
+    ab120 = dfc.gt(pd.DataFrame(ma20d)).rolling(
+        120, min_periods=120).mean().to_numpy()
+    v20 = pd.DataFrame(lr).rolling(20, min_periods=20).std().to_numpy()
+    rps60 = pd.DataFrame(np.where(ok, r60, np.nan)).rank(
+        axis=1, pct=True).to_numpy() * 100
+    rps120 = pd.DataFrame(np.where(ok, r120, np.nan)).rank(
+        axis=1, pct=True).to_numpy() * 100
+    rps250 = pd.DataFrame(np.where(ok, r250, np.nan)).rank(
+        axis=1, pct=True).to_numpy() * 100
+    # 周线 MA20/MA60 排列与持续周数(只用已完成周,第一三七/一三八节口径)
+    wk = pd.Series(np.arange(nt), index=idx).groupby(
+        [idx.isocalendar().year, idx.isocalendar().week]).last()
+    wpos = np.sort(wk.to_numpy())
+    wdf = pd.DataFrame(cl[wpos])
+    wm20 = wdf.rolling(20, min_periods=20).mean().to_numpy()
+    wm60 = wdf.rolling(60, min_periods=60).mean().to_numpy()
+    bull_w = wm20 > wm60
+    fin_w = np.isfinite(wm20) & np.isfinite(wm60)
+    nw = len(wpos)
+    durw = np.zeros((nw, ns), np.int32)
+    for i in range(1, nw):
+        same = fin_w[i] & fin_w[i - 1] & (bull_w[i] == bull_w[i - 1])
+        durw[i] = np.where(same, durw[i - 1] + 1, 1)
+    durw = np.where(fin_w, durw, 0)
+    src = np.searchsorted(wpos, np.arange(nt), side="right") - 1
+    vs = src >= 0
+    assert int((wpos[src[vs]] > np.arange(nt)[vs]).sum()) == 0, "周线映射前视"
+    wstate = np.zeros((nt, ns), bool)
+    wdur = np.zeros((nt, ns), np.int32)
+    wfin = np.zeros((nt, ns), bool)
+    wstate[vs], wdur[vs], wfin[vs] = bull_w[src[vs]], durw[src[vs]], fin_w[src[vs]]
     fmax = pd.DataFrame(cl[::-1]).rolling(HOR, min_periods=1).max().to_numpy()[::-1]
     fwd = np.full_like(cl, np.nan)
     fwd[:-1] = fmax[1:]
@@ -160,12 +211,29 @@ def main():  # noqa: PLR0915
                          "距一年低点涨幅": round(float(rec[t, j]), 4),
                          "换手加速": round(float(tacc[t, j]), 4),
                          "流通市值亿": round(float(mv[t, j]), 1),
+                         "RPS60": round(float(rps60[t, j]), 1)
+                         if np.isfinite(rps60[t, j]) else None,
+                         "RPS120": round(float(rps120[t, j]), 1)
+                         if np.isfinite(rps120[t, j]) else None,
+                         "RPS250": round(float(rps250[t, j]), 1)
+                         if np.isfinite(rps250[t, j]) else None,
+                         "MA20持续度120日": round(float(ab120[t, j]), 3)
+                         if np.isfinite(ab120[t, j]) else None,
+                         "20日波动率": round(float(v20[t, j]), 4)
+                         if np.isfinite(v20[t, j]) else None,
+                         "相对MA250": round(float(c2ma[t, j]), 4)
+                         if np.isfinite(c2ma[t, j]) else None,
+                         "120日收益率": round(float(r120[t, j]), 4)
+                         if np.isfinite(r120[t, j]) else None,
+                         "周线排列": ("多头" if wstate[t, j] else "空头")
+                         if wfin[t, j] else "",
+                         "周线已持续周": int(wdur[t, j]) if wfin[t, j] else None,
                          "未来60日最大涨幅": round(float(up[t, j]), 4)
                          if fut and np.isfinite(up[t, j]) else None,
                          "启动(>=50%)": bool(up[t, j] >= THR)
                          if fut and np.isfinite(up[t, j]) else None})
     df = pd.DataFrame(rows)
-    p = f"{OUT}/startup_rule_top100_2019_2026.csv"
+    p = f"{OUT}/startup_rule_top100_full_2019_2026.csv"
     df.to_csv(p, index=False, encoding="utf-8-sig")
     done = df[df["启动(>=50%)"].notna()]
     print(f"\n清单 {len(df):,} 行,{df.代码.nunique():,} 只,"
