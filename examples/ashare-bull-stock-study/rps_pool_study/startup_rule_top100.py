@@ -19,8 +19,15 @@
   保持30%,按换手加速取前100     训练 1.51 | 留出 1.57
   保持30%,按换手加速取前50      训练 1.58 | 留出 1.49
 
-**采用的口径:门槛不变(两条都取全市场前 30%),
-在选中的股票里按「距一年低点涨幅」排序,取前 100。**
+**采用的口径(经用户质疑后修正):**
+门槛为「距低点前 30% & 换手加速前 30%」,**再加一条上限:距一年低点涨幅 ≤ 100%**,
+然后按距低点降序取前 100。
+
+**为什么加上限** —— 用户指出原口径选出的是润欣科技 +564%、双林 +539% 这类
+"一年已经涨了五倍"的股票,不是启动点。原因是我用"距低点涨幅"**降序**排序,
+必然选出涨得最多的。加 ≤100% 上限后:
+    留出段 lift 1.91 → **1.57**;选中股票的距低点中位数 147% → **86%**。
+**用 0.34 的 lift 换掉"涨了五倍才入选"这个毛病,值得。**
 
 **三条必须写在前面的话**
 1. **这是在已经看过第一四八节留出段结果之后做的压缩,不是干净样本外。**
@@ -68,6 +75,7 @@ CEN = ("/home/user/quant-research-dev/research/"
 XLS = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/"
        "f48a5b4d-___20260827.xls")
 TOPN, Q, HOR, THR = 100, 0.70, 60, 0.50
+REC_CAP = 1.00          # 距一年低点涨幅上限,超过 100% 不再视为"启动"
 
 
 def load_names():
@@ -201,6 +209,9 @@ def main():  # noqa: PLR0915
         pool = e[(qr >= Q) & (qt >= Q)]
         if not len(pool):
             continue
+        pool = pool[rec[t, pool] <= REC_CAP]
+        if not len(pool):
+            continue
         sel = pool[np.argsort(-rec[t, pool], kind="stable")[:TOPN]]
         for rk, j in enumerate(sel, 1):
             c = colnames[j]
@@ -233,7 +244,7 @@ def main():  # noqa: PLR0915
                          "启动(>=50%)": bool(up[t, j] >= THR)
                          if fut and np.isfinite(up[t, j]) else None})
     df = pd.DataFrame(rows)
-    p = f"{OUT}/startup_rule_top100_full_2019_2026.csv"
+    p = f"{OUT}/startup_rule_top100_capped_2019_2026.csv"
     df.to_csv(p, index=False, encoding="utf-8-sig")
     done = df[df["启动(>=50%)"].notna()]
     print(f"\n清单 {len(df):,} 行,{df.代码.nunique():,} 只,"
