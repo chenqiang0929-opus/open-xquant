@@ -89,7 +89,7 @@ def main():  # noqa: PLR0915
           & ~al("is_suspended", True).astype(bool).to_numpy()
           & (al("listed_days", 0).to_numpy() >= 250)
           & (al("volume", 0).to_numpy() > 0))
-    cl = cldf.where(cldf > 0).to_numpy(np.float64)
+    cl = cldf.where(cldf > 0).ffill().to_numpy(np.float64)
     ok &= np.isfinite(cl)
     dfc = pd.DataFrame(cl)
     lo250 = dfc.rolling(250, min_periods=250).min().to_numpy()

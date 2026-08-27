@@ -121,7 +121,7 @@ def main():  # noqa: PLR0915
           & ~al("is_suspended", True).astype(bool).to_numpy()
           & (al("listed_days", 0).to_numpy() >= 250)
           & (al("volume", 0).to_numpy() > 0))
-    cl = cldf.where(cldf > 0).to_numpy(np.float64)
+    cl = cldf.where(cldf > 0).ffill().to_numpy(np.float64)
     ok &= np.isfinite(cl)
     ind, _, nid = build_industry(list(cldf.columns), idx)
     id2n = {v: k for k, v in nid.items()} if isinstance(nid, dict) else {}
