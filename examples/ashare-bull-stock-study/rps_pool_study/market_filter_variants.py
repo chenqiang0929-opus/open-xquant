@@ -77,3 +77,302 @@ E4 描述(不参与判定):各档的开启占比、开关次数、成交笔数�
 **不往 quant-research-dev / etf-netflow-dev 推任何东西**;不作任何可交易性声明。
 **若 E2/E3 全不过,如实写「换均线也没做到」。**
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))
+from codex_r10_neutral import NBR, SEED  # noqa: E402
+from codex_r10_replication import DATA  # noqa: E402
+from consolidation_screener import (  # noqa: E402
+    THR_ATR,
+    THR_DEPTH,
+    THR_SHRINK,
+    load_panel,
+)
+from industry_neutral import build_industry  # noqa: E402
+from platform_pivot import HOLD_MAX, MAXPOS, STOP_CAP, vec_screen  # noqa: E402
+
+OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
+NSEED, COST, ALPHA = 500, 0.002, 0.05 / 3
+MAS = (20, 60, 200)
+TRAIN, HOLD = ("2019-01-01", "2022-12-31"), ("2023-01-01", "2026-04-30")
+Y0 = 2016
+
+
+def ann(nav, nd):
+    return float(nav ** (250.0 / nd) - 1.0)
+
+
+def mdd(eq):
+    pk = np.maximum.accumulate(eq)
+    return float(np.max((pk - eq) / pk))
+
+
+def sim(cand, stops, mkt, nrep, ta, tb, cl):
+    """mkt 形状 (nrep, nt);cand/stops: {day: (nrep, k)}。空槽记 0 收益。"""
+    pj = np.full((nrep, MAXPOS), -1, np.int64)
+    pe = np.zeros((nrep, MAXPOS), np.int64)
+    ppx = np.zeros((nrep, MAXPOS))
+    psl = np.zeros((nrep, MAXPOS))
+    nd = tb - ta + 1
+    ret = np.zeros((nrep, nd))
+    cst = np.zeros((nrep, nd))
+    nstop = np.zeros(nrep, np.int64)
+    ntr = np.zeros(nrep, np.int64)
+    nclr = np.zeros(nrep, np.int64)
+    hold = np.zeros((nrep, nd))
+    log = []
+    for i, t in enumerate(range(ta, tb + 1)):
+        m = pj >= 0
+        z = np.where(m, pj, 0)
+        if m.any():
+            ret[:, i] = np.nan_to_num(
+                np.where(m, cl[t, z] / cl[t - 1, z] - 1.0, 0.0)).sum(axis=1) / MAXPOS
+        hold[:, i] = m.sum(axis=1)
+        off = ~mkt[:, t]
+        ex = m & off[:, None]
+        nclr += ex.sum(axis=1)
+        s_ = m & ~ex & (cl[t, z] <= psl)
+        nstop += s_.sum(axis=1)
+        ex |= s_ | (m & ((t - pe) >= HOLD_MAX))
+        if nrep == 1:
+            for s in np.flatnonzero(ex[0]):
+                log.append((int(pj[0, s]), int(pe[0, s]), t, float(ppx[0, s]),
+                            float(cl[t, int(pj[0, s])])))
+        pj = np.where(ex, -1, pj)
+        c = cand.get(t)
+        if c is None:
+            continue
+        sp = stops[t]
+        for r in range(nrep):
+            if off[r]:
+                continue
+            free = np.flatnonzero(pj[r] < 0)
+            if not len(free):
+                continue
+            k, row = 0, c[r] if c.shape[0] > 1 else c[0]
+            srow = sp[r] if sp.shape[0] > 1 else sp[0]
+            for slot in free:
+                placed = False
+                while k < row.shape[0]:
+                    j = int(row[k])
+                    kk = k
+                    k += 1
+                    if j < 0 or j in pj[r]:
+                        continue
+                    pj[r, slot] = j
+                    pe[r, slot] = t
+                    ppx[r, slot] = cl[t, j]
+                    psl[r, slot] = srow[kk]
+                    ntr[r] += 1
+                    cst[r, i] += COST / MAXPOS
+                    placed = True
+                    break
+                if not placed:
+                    break
+    return ret, cst, nstop, ntr, nclr, hold, log
+
+
+def main():  # noqa: PLR0915
+    t0 = time.time()
+    cl_df, frames, strong, ma100 = load_panel(DATA)
+    if "510300" in cl_df.columns:
+        cl_df = cl_df.drop(columns=["510300"])
+        strong = strong[:, [i for i, c in enumerate(ma100.columns) if c != "510300"]]
+    idx, codes = cl_df.index, list(cl_df.columns)
+    nt, ns = cl_df.shape
+    assert (nt, ns) == (3297, 5232), f"锚点E1a {cl_df.shape}"
+    ts_a, adj_a, dep, shr, cnv, hi, lo = vec_screen(
+        cl_df.to_numpy(float), frames, strong, ma100, idx, codes)
+    del frames
+    d2 = {k: {} for k in ("float_mv", "is_st", "is_suspended", "listed_days",
+                          "volume")}
+    for c in codes:
+        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=list(d2))
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        for k in d2:
+            d2[k][c] = x[k]
+
+    def al(k, f=np.nan):
+        return pd.DataFrame(d2[k]).sort_index().reindex(
+            index=idx, columns=codes).fillna(f).to_numpy()
+    cl = cl_df.where(cl_df > 0).ffill().to_numpy(np.float64)
+    mv = al("float_mv") / 1e8
+    ok = (~al("is_st", True).astype(bool) & ~al("is_suspended", True).astype(bool)
+          & (al("listed_days", 0) >= 250) & (al("volume", 0) > 0) & np.isfinite(cl))
+    fin = np.isfinite(cl)
+    fs = np.argmax(fin, axis=0)
+    gapn = int(sum((~fin[fs[j]:, j]).sum() for j in range(ns) if fin[:, j].any()))
+    ind, _, _ = build_industry(codes, idx)
+    vol20 = pd.DataFrame(cl).pct_change(1).rolling(20, min_periods=20).std().to_numpy()
+    with np.errstate(all="ignore"):
+        rr = cl[1:] / cl[:-1] - 1.0
+    msk = ok[1:] & ok[:-1] & np.isfinite(rr)
+    dd = np.zeros(nt)
+    dd[1:] = np.where(msk.sum(1) > 0,
+                      np.nan_to_num(rr * msk).sum(1) / np.maximum(msk.sum(1), 1), 0.0)
+    nav = np.cumprod(1 + dd)
+    del rr, msk
+    hit3 = (shr < THR_SHRINK) & (cnv < THR_ATR) & (dep <= THR_DEPTH) & (adj_a >= 0)
+    up_prev = np.full((nt, ns), np.nan, np.float64)
+    lo_prev = np.full((nt, ns), np.nan, np.float64)
+    same = np.zeros((nt, ns), bool)
+    same[1:] = ts_a[1:] == ts_a[:-1]
+    up_prev[1:] = np.where(same[1:], hi[:-1], np.nan)
+    lo_prev[1:] = np.where(same[1:], lo[:-1], np.nan)
+    brk = hit3 & ok & np.isfinite(up_prev) & (cl > up_prev) & np.isfinite(lo_prev) \
+        & np.isfinite(vol20) & np.isfinite(mv)
+    filt = {}
+    for n_ in MAS:
+        mm = pd.Series(nav).rolling(n_, min_periods=n_).mean().to_numpy()
+        filt[f"MA{n_}"] = ~(np.isfinite(mm) & (nav < mm))
+    filt["无过滤"] = np.ones(nt, bool)
+    # ---- E1(d) 无前视 ----
+    rs = np.random.default_rng(11)
+    craw = cl_df.to_numpy(float)
+    bp = np.argwhere(brk)
+    for t, j in bp[rs.choice(len(bp), 2000, replace=False)]:
+        a0 = int(ts_a[t, j])
+        assert cl[t, j] > np.nanmax(craw[a0:t, j]), "E1d 上沿"
+        assert abs(np.nanmin(craw[a0:t, j]) - lo_prev[t, j]) < 1e-9, "E1d 下沿"
+    for n_ in MAS:
+        mm = pd.Series(nav).rolling(n_, min_periods=n_).mean().to_numpy()
+        for _ in range(300):
+            t = int(rs.integers(n_ + 1, nt))
+            assert abs(np.mean(nav[t - n_ + 1:t + 1]) - mm[t]) < 1e-9, f"E1d MA{n_}"
+    del craw
+    print(f"E1a ✓ {cl_df.shape};E1b ffill 空洞 {gapn} {'✓' if gapn == 0 else '✗'};"
+          f"E1d 无前视 2,000 买点 + 3×300 均线点 ✓  ({time.time()-t0:.0f}s)")
+    print("  开启天数占比:" + "  ".join(
+        f"{k} {v.mean():.1%}" for k, v in filt.items()), flush=True)
+    if gapn:
+        print("**E1b 不过 → 本节作废**")
+        return
+
+    rng = np.random.default_rng(SEED)
+    viol = [0]
+
+    def subs(day, js):
+        e = np.flatnonzero(ok[day] & np.isfinite(mv[day]) & (ind[day] >= 0))
+        o = e[np.argsort(mv[day, e], kind="stable")]
+        rk = np.full(ns, -1, np.int32)
+        rk[o] = np.arange(len(o), dtype=np.int32)
+        out = np.full((NSEED, len(js)), -1, np.int64)
+        for k, j in enumerate(js):
+            p0, i0 = rk[j], ind[day, j]
+            if p0 < 0 or i0 < 0:
+                continue
+            c = o[max(0, p0 - NBR):min(len(o) - 1, p0 + NBR) + 1]
+            c = c[ind[day, c] == i0]
+            if len(c) < 2:
+                c = o[ind[day, o] == i0]
+            if len(c) < 2:
+                continue
+            pk = c[rng.integers(0, len(c), NSEED)]
+            viol[0] += int((ind[day, pk] != i0).sum())
+            out[:, k] = pk
+        return out
+
+    jy = codes.index("600066")
+    ty = int(np.searchsorted(idx, pd.Timestamp("2024-01-08")))
+    res, w = [], 104
+    for lo_d, hi_d, tag, judge in ((TRAIN[0], TRAIN[1], "训练段(只报数)", False),
+                                   (HOLD[0], HOLD[1], "留出段(判据在这里)", True)):
+        ta = int(np.searchsorted(idx, pd.Timestamp(lo_d)))
+        tb = int(np.searchsorted(idx, pd.Timestamp(hi_d), side="right")) - 1
+        cand, stops, cand_c, stops_c = {}, {}, {}, {}
+        for t in range(ta, tb + 1):
+            e = np.flatnonzero(brk[t])
+            if not len(e):
+                continue
+            e = e[np.argsort(cnv[t, e], kind="stable")]
+            sp = np.maximum(lo_prev[t, e], cl[t, e] * (1 - STOP_CAP))
+            cand[t] = e.reshape(1, -1).astype(np.int64)
+            stops[t] = sp.reshape(1, -1)
+            pct = 1 - sp / cl[t, e]
+            sb = subs(t, e)
+            v_ = sb >= 0
+            cand_c[t] = sb
+            stops_c[t] = np.where(v_, cl[t, np.where(v_, sb, 0)] * (1 - pct[None, :]),
+                                  0.0)
+        nd = tb - ta
+        print(f"\n{'='*w}\n{tag}  ({idx[ta].date()} → {idx[tb].date()})\n{'='*w}")
+        print(f"{'档':<10}{'开启占比':>9}{'开关次数':>9}{'成交':>7}{'年化':>9}"
+              f"{'成本后':>9}{'回撤':>8}{'止损':>6}{'清仓':>6}"
+              f"{'│随机择时中位':>13}{'超额pp':>9}{'p':>8}"
+              f"{'│同市值行业':>11}{'超额pp':>9}{'p':>8}")
+        for nm, mk in filt.items():
+            m1 = mk[None, :].copy()
+            r1, c1, ns1, nt1, nc1, h1, log = sim(cand, stops, m1, 1, ta, tb, cl)
+            g = ann(float(np.prod(1 + r1[0])), nd)
+            gc = ann(float(np.prod(1 + r1[0] - c1[0])), nd)
+            sw = int(np.abs(np.diff(mk[ta:tb + 1].astype(int))).sum())
+            row = {"段": tag, "档": nm, "开启占比": float(mk[ta:tb + 1].mean()),
+                   "开关次数": sw, "成交": int(nt1[0]), "年化": g, "成本后": gc,
+                   "回撤": mdd(np.cumprod(1 + r1[0])), "止损": int(ns1[0]),
+                   "清仓": int(nc1[0]), "平均持仓": float(h1[0].mean())}
+            if nm == "无过滤":
+                print(f"{nm:<10}{mk[ta:tb+1].mean():>9.1%}{sw:>9}{int(nt1[0]):>7}"
+                      f"{g:>9.2%}{gc:>9.2%}{row['回撤']:>8.1%}{int(ns1[0]):>6}"
+                      f"{int(nc1[0]):>6}{'—(不判定)':>13}")
+                res.append(row)
+                continue
+            # (甲) 随机择时:实际开关序列做循环平移
+            # 在**分段内部**做循环平移:开启占比精确不变、开关次数至多差 1
+            seg = mk[ta:tb + 1]
+            sh = rng.integers(1, len(seg), NSEED)
+            mrot = np.repeat(mk[None, :], NSEED, 0)
+            mrot[:, ta:tb + 1] = np.stack([np.roll(seg, int(k)) for k in sh])
+            assert abs(mrot[:, ta:tb + 1].mean(1) - seg.mean()).max() < 0.005, \
+                "E1f 平移后开启占比漂移过大"
+            r2, *_ = sim(cand, stops, mrot, NSEED, ta, tb, cl)
+            cs1 = np.array([ann(float(np.prod(1 + r2[k])), nd) for k in range(NSEED)])
+            e1_, p1_ = g - float(np.median(cs1)), float((cs1 >= g).mean())
+            # (乙) 同市值同行业
+            r3, *_ = sim(cand_c, stops_c, np.repeat(m1, NSEED, 0), NSEED, ta, tb, cl)
+            cs2 = np.array([ann(float(np.prod(1 + r3[k])), nd) for k in range(NSEED)])
+            e2_, p2_ = g - float(np.median(cs2)), float((cs2 >= g).mean())
+            row.update({"随机择时中位": float(np.median(cs1)), "E2超额pp": e1_ * 100,
+                        "E2p": p1_, "同市值行业中位": float(np.median(cs2)),
+                        "E3超额pp": e2_ * 100, "E3p": p2_})
+            print(f"{nm:<10}{mk[ta:tb+1].mean():>9.1%}{sw:>9}{int(nt1[0]):>7}"
+                  f"{g:>9.2%}{gc:>9.2%}{row['回撤']:>8.1%}{int(ns1[0]):>6}"
+                  f"{int(nc1[0]):>6}{np.median(cs1):>13.2%}{e1_*100:>9.2f}{p1_:>8.4f}"
+                  f"{np.median(cs2):>11.2%}{e2_*100:>9.2f}{p2_:>8.4f}")
+            if judge:
+                a1 = e1_ >= 0.03 and p1_ < ALPHA
+                a2 = e2_ >= 0.03 and p2_ < ALPHA
+                print(f"           **E2 择时 {'通过' if a1 else '不通过'}"
+                      f"(需 ≥+3.00pp 且 p<{ALPHA:.4f});"
+                      f"E3 选股 {'通过' if a2 else '不通过'}**")
+                row["E2判定"] = "通过" if a1 else "不通过"
+                row["E3判定"] = "通过" if a2 else "不通过"
+            res.append(row)
+            if judge:
+                got = any(j == jy and e == ty for j, e, *_ in log)
+                print(f"           (描述,不参与判定)宇通 2024-01-08 买点:"
+                      f"{'买到了' if got else '仍未买到'}"
+                      f";该日过滤 {'开' if mk[ty] else '关'}")
+        print(f"  锚点E1c 行业恒等式违例 {viol[0]} "
+              f"{'✓' if viol[0] == 0 else '✗'}  ({time.time()-t0:.0f}s)", flush=True)
+    df = pd.DataFrame(res)
+    ma200h = df[(df["档"] == "MA200") & (df["段"].str.contains("留出"))]["年化"]
+    ok_e = bool(len(ma200h)) and abs(float(ma200h.iloc[0]) - 0.1583) <= 0.0030
+    print(f"\n锚点E1e MA200 复现第一五五节:{float(ma200h.iloc[0]):+.2%} vs +15.83% "
+          f"{'✓' if ok_e else '✗ 本节作废'}")
+    df.to_csv(f"{OUT}/market_filter_variants.csv", index=False, encoding="utf-8-sig")
+    print(f"落库 {OUT}/market_filter_variants.csv  ({time.time()-t0:.0f}s)")
+
+
+if __name__ == "__main__":
+    main()
