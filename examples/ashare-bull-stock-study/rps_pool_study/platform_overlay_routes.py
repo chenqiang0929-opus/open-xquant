@@ -76,3 +76,195 @@ N4 描述(不参与判定):各档的调仓期数、平均持仓只数、回撤�
 **不往 quant-research-dev / etf-netflow-dev 推任何东西**;不作任何可交易性声明。
 **若 N2/N3 不过,如实写「叠加上去也没做到」。**
 """
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+
+import numpy as np
+import pandas as pd
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from codex_r10_neutral import CACHE, NBR, SEED, run_window_fast  # noqa: E402
+from codex_r10_replication import DATA, TOP_N, WEIGHT, metrics  # noqa: E402
+from codex_routes_rerun import build_fund, route_scores  # noqa: E402
+from factor_sweep_pv import draw_fast  # noqa: E402
+
+OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
+PSTATE = f"{OUT}/platform_state.npz"
+NSEED, ALPHA = 500, 0.05 / 4
+WINS = {"train": ("2014-01-02", "2021-12-31"),
+        "holdout": ("2022-01-04", "2026-08-03")}
+JUDGE, DESC = ("R08", "R09"), ("R06", "R11")
+RUNGS = (("M0 基线", 0), ("M1 +平台状态", 1), ("M2 +调仓日大盘过滤", 2))
+ANCHOR = {"R08": 0.0998, "R09": 0.0663}
+
+
+def main():  # noqa: PLR0915
+    t0 = time.time()
+    z = np.load(CACHE, allow_pickle=True)
+    idx = pd.DatetimeIndex(z["idx"])
+    codes = list(z["codes"])
+    op, cl, susp, lu, ld, ok = z["OP"], z["CL"], z["SUSP"], z["LU"], z["LD"], z["OK"]
+    logcap, tmean = z["LOGCAP"], z["TMEAN"]
+    nt, ns = len(idx), len(codes)
+    assert (nt, ns) == (3297, 5217), f"锚点N1a {(nt, ns)}"
+    p = np.load(PSTATE, allow_pickle=True)
+    pcodes = list(p["codes"])
+    assert len(pd.DatetimeIndex(p["dates"])) == nt, "平台缓存日期数对不上"
+    assert (pd.DatetimeIndex(p["dates"]) == idx).all(), "平台缓存日期不一致"
+    pos = {c: j for j, c in enumerate(pcodes)}
+    col = np.array([pos.get(c, -1) for c in codes])
+    hit3 = np.zeros((nt, ns), bool)
+    g = col >= 0
+    hit3[:, g] = p["hit3"][:, col[g]]
+    mkt_on = p["mkt_on"]
+    print(f"锚点N1a ✓ {nt}×{ns};平台状态映射上 {int(g.sum()):,}/{ns:,} 只"
+          f"(缺 {int((~g).sum())} 只按无平台处理);大盘开启 {mkt_on.mean():.1%}",
+          flush=True)
+
+    raw = np.full((nt, ns), np.nan, np.float32)
+    for j, c in enumerate(codes):
+        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
+        if getattr(x.index, "tz", None) is not None:
+            x.index = x.index.tz_localize(None)
+        raw[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
+            lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
+    fm, abad = build_fund(codes, idx)
+    assert abad == 0, "TTM 恒等式不过"
+    b = pd.read_parquet(f"{DATA}/510300.parquet", columns=["close"])
+    b.index = pd.to_datetime(b.index).tz_localize(None)
+    cal = pd.DatetimeIndex(b.index.unique()).sort_values()
+    cal = cal[(cal >= "2014-01-01") & (cal <= "2026-08-20")]
+    cal_pos = pd.Index(idx).get_indexer(cal)
+    reb = cal_pos[::20]
+    ipos = pd.Index(idx)
+    print(f"预取完成 ({time.time()-t0:.0f}s)", flush=True)
+
+    def wpos(w):
+        d0, d1 = WINS[w]
+        return (int(ipos.get_indexer([pd.Timestamp(d0)], method="bfill")[0]),
+                int(ipos.get_indexer([pd.Timestamp(d1)], method="ffill")[0]))
+
+    viol, rows, w_ = 0, [], 104
+    for name in (*JUDGE, *DESC):
+        judged = name in JUDGE
+        print(f"\n{'='*w_}\n{name}{'(主判据)' if judged else '(只报数,不判定)'}"
+              f"\n{'='*w_}")
+        print(f"{'档':<22}{'段':<9}{'调仓':>6}{'均持仓':>8}{'年化':>9}{'回撤':>9}"
+              f"{'夏普':>7}{'总收益':>9}{'│对照中位':>10}{'超额pp':>9}{'p':>8}")
+        base_cagr = {}
+        for rname, rung in RUNGS:
+            sel, elig, srk, nsel = {}, {}, {}, []
+            for t in reb:
+                t = int(t)
+                base = ok[t] & np.isfinite(logcap[t]) & np.isfinite(tmean[t])
+                if name == "R11":                      # 与原脚本一致:剔除微盘 10%
+                    base = base & (logcap[t] > np.nanpercentile(logcap[t][base], 10))
+                if rung >= 1:
+                    base = base & hit3[t]
+                e = np.flatnonzero(base)
+                if len(e) < TOP_N * 3:
+                    continue
+                if name == "R11":                      # 复合打分,逐字抄原脚本
+                    v = np.nanmean(np.vstack([
+                        pd.Series(route_scores("R11_value", t, e, fm, cl, raw,
+                                               logcap, tmean, "raw")
+                                  ).rank(pct=True).to_numpy(),
+                        pd.Series(route_scores("R11_qual", t, e, fm, cl, raw,
+                                               logcap, tmean, "raw")
+                                  ).rank(pct=True).to_numpy(),
+                        pd.Series(route_scores("R06", t, e, fm, cl, raw, logcap,
+                                               tmean, "raw")
+                                  ).rank(pct=True).to_numpy(),
+                        pd.Series((pd.Series(-logcap[t, e]).rank(pct=True)
+                                   + pd.Series(-tmean[t, e]).rank(pct=True)) / 2
+                                  ).rank(pct=True).to_numpy()]), axis=0)
+                else:
+                    v = route_scores(name, t, e, fm, cl, raw, logcap, tmean, "raw")
+                gg = np.isfinite(v)
+                if gg.sum() < TOP_N:
+                    continue
+                e2 = e[gg]
+                top = e2[np.argsort(-v[gg], kind="stable")[:TOP_N]]
+                if rung >= 2 and not mkt_on[t]:
+                    sel[t] = (np.zeros(0, np.int64), np.zeros(0))
+                    nsel.append(0)
+                    continue
+                sel[t] = (top, np.full(TOP_N, WEIGHT))
+                nsel.append(len(top))
+                order = e[np.argsort(logcap[t, e], kind="stable")]
+                rk = {int(c): i for i, c in enumerate(order)}
+                elig[t] = order
+                srk[t] = np.array([rk[int(c)] for c in top])
+            for w in ("train", "holdout"):
+                w0, w1 = wpos(w)
+                nre = sum(1 for t in sel if w0 <= t <= w1)
+                eq, dd, _, _ = run_window_fast(op, cl, susp, lu, ld, sel,
+                                               cal_pos, w0, w1)
+                m = metrics(eq, dd, idx)
+                r = {"路线": name, "档": rname, "段": w, "调仓": nre,
+                     "均持仓": float(np.mean(nsel)) if nsel else 0.0,
+                     "年化": m["cagr"], "回撤": m["mdd"], "夏普": m["sharpe"],
+                     "总收益": m["total"]}
+                if rung == 0 and w == "holdout":
+                    base_cagr[name] = m["cagr"]
+                need_ctrl = judged and w == "holdout"
+                if need_ctrl:
+                    cg = []
+                    for sd in range(NSEED):
+                        rng = np.random.default_rng(SEED + sd)
+                        cs = {}
+                        for t in sel:
+                            if t not in elig:
+                                cs[t] = sel[t]
+                                continue
+                            o, rk = elig[t], srk[t]
+                            ps = draw_fast(rng, rk, len(o))
+                            viol += int(np.sum(np.abs(ps - rk) > NBR))
+                            cs[t] = (o[ps], np.full(TOP_N, WEIGHT))
+                        e3, d3, _, _ = run_window_fast(op, cl, susp, lu, ld, cs,
+                                                       cal_pos, w0, w1)
+                        cg.append(metrics(e3, d3, idx)["cagr"])
+                    a = np.array(cg)
+                    pv = (1 + int(np.sum(a >= m["cagr"]))) / (NSEED + 1)
+                    r |= {"对照中位": float(np.median(a)),
+                          "超额pp": (m["cagr"] - float(np.median(a))) * 100, "p": pv}
+                    print(f"{rname:<20}{w:<9}{nre:>6}{r['均持仓']:>8.1f}"
+                          f"{m['cagr']:>9.2%}{m['mdd']:>9.2%}{m['sharpe']:>7.2f}"
+                          f"{m['total']:>9.2f}{np.median(a):>10.2%}"
+                          f"{r['超额pp']:>9.2f}{pv:>8.4f}")
+                    if rung >= 1:
+                        n2 = r["超额pp"] >= 3.0 and pv < ALPHA
+                        n3 = m["cagr"] >= base_cagr[name] + 0.03
+                        print(f"{'':<20}  **N2 对照 {'✓' if n2 else '✗'}"
+                              f"(需≥+3.00pp 且 p<{ALPHA:.4f});"
+                              f"N3 比 M0({base_cagr[name]:+.2%})高 ≥3.00pp "
+                              f"{'✓' if n3 else '✗'} → "
+                              f"{'**更好**' if (n2 and n3) else '**没做到**'}")
+                        r |= {"N2": "通过" if n2 else "不通过",
+                              "N3": "通过" if n3 else "不通过"}
+                else:
+                    print(f"{rname:<20}{w:<9}{nre:>6}{r['均持仓']:>8.1f}"
+                          f"{m['cagr']:>9.2%}{m['mdd']:>9.2%}{m['sharpe']:>7.2f}"
+                          f"{m['total']:>9.2f}{'—':>10}")
+                rows.append(r)
+                if rung == 0 and w == "holdout" and judged:
+                    d = abs(m["cagr"] - ANCHOR[name])
+                    print(f"{'':<20}  锚点N1b 复现第一一九–一二二节 "
+                          f"{ANCHOR[name]:+.2%}:差 {d*100:.2f}pp "
+                          f"{'✓' if d <= 0.003 else '✗ 本节作废'}")
+                    if d > 0.003:
+                        return
+            print("", flush=True)
+    print(f"锚点N1c 市值邻域违例 {viol} {'✓' if viol == 0 else '✗'}")
+    pd.DataFrame(rows).to_csv(f"{OUT}/platform_overlay_routes.csv", index=False,
+                              encoding="utf-8-sig")
+    print(f"落库 {OUT}/platform_overlay_routes.csv  ({time.time()-t0:.0f}s)")
+
+
+if __name__ == "__main__":
+    main()
