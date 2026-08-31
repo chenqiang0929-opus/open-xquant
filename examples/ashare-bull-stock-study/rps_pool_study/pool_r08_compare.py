@@ -66,6 +66,7 @@ import pandas as pd
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
+import codex_routes_rerun as _crr  # noqa: E402
 from codex_r10_neutral import CACHE  # noqa: E402
 from codex_routes_rerun import build_fund, route_scores  # noqa: E402
 
@@ -133,6 +134,11 @@ def main():  # noqa: PLR0915
     zraw = np.full((nt, len(zc)), np.nan, np.float32)
     zcl[:, gb] = cl[:, zback[gb]]
     zraw[:, gb] = raw[:, zback[gb]]
+    # 【修正】build_fund 用的是 codex_routes_rerun 的模块级 DATA(= 旧面板),
+    # 不认 OXQ_PANEL_DIR。旧面板止于 2026-08-03,而中报在 8 月中旬才披露 ——
+    # 实测抽样 494 只里 **334 只(67.6%)** 两张面板的末行 eps 不同
+    # (000001:旧 0.67 一季报 vs 新 1.24 中报)。不改就是拿一季报算 R08/R09。
+    _crr.DATA = DATA
     fm, abad = build_fund(zc, idx)
     assert abad == 0, "锚点E1b TTM 恒等式不过"
     print(f"锚点E1b ✓ TTM 违例 0 ({time.time()-t0:.0f}s)", flush=True)
