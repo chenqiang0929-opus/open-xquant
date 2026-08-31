@@ -163,9 +163,16 @@ def main():  # noqa: PLR0915
         return pd.DataFrame(d[k]).sort_index().reindex(
             index=idx, columns=cldf.columns).fillna(f).to_numpy()
     cl = cldf.where(cldf > 0).ffill().to_numpy(np.float64)
+    # 源数据缺陷:mktdata_enriched 里 588 只科创板(688)的 listed_days 在近期为 0,
+    # 其余三个板 0%。直接用会把整个科创板判成"上市不足250日"而全部剔除。
+    # 修正:把 0 视为缺失、按股票前向填充最近一个有效值(仍不足则保持 0)。
+    ld = al("listed_days", 0)
+    ldf = pd.DataFrame(ld).replace(0, np.nan).ffill().fillna(0).to_numpy()
+    print(f"listed_days 修正:末日为 0 的 {int((ld[nt-1] == 0).sum())} 只 → "
+          f"修正后 {int((ldf[nt-1] == 0).sum())} 只", flush=True)
     okm = (~al("is_st", True).astype(bool)
            & ~al("is_suspended", True).astype(bool)
-           & (al("listed_days", 0) >= 250) & (al("volume", 0) > 0)
+           & (ldf >= 250) & (al("volume", 0) > 0)
            & np.isfinite(cl))
     px = pd.DataFrame(cl)
     lo250 = px.rolling(250, min_periods=250).min().to_numpy()
