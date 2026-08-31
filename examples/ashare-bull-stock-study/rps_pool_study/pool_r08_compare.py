@@ -39,8 +39,26 @@ R08/R09 定义**逐字复用** `codex_routes_rerun.route_scores`,不重写;
 E1 锚点(不过则本节作废)
    (a) 面板 (3316, 5232),末日 2026-08-28;
    (b) TTM 恒等式违例 = 0;
-   (c) **本节算出的 R09 必须与 `pool_20260828.csv` 已落库的「R09核心质量分」
-       逐只相等(容差 1e-9)** —— 证明我走的是同一条路径,不是另起炉灶。
+   (c) **【原锚点作废,换成更严的一条,理由写在下面,不是放宽】**
+
+   **原 E1(c)**:「本节算出的 R09 必须与 `pool_20260828.csv` 已落库的
+   「R09核心质量分」逐只相等(容差 1e-9)」。**首跑不过,最大绝对差 0.229。**
+
+   **不过的原因是那个参照值本身是坏的。** 首跑还查出:
+   `codex_routes_rerun.build_fund()` 用的是它自己的模块级 `DATA`(旧面板),
+   **不认 `OXQ_PANEL_DIR`** —— 旧面板止于 2026-08-03,而中报 8 月中旬才披露,
+   实测抽样 494 只里 **334 只(67.6%)** 两张面板末行 eps 不同
+   (000001:旧 0.67 一季报 vs 新 1.24 中报)。
+   **所以 `pool_20260828.csv` 里那一列是用一季报算的,不能再当参照。**
+   (同时暴露 `fm["bps"]` 写成 `.ffill().reindex(idx)`(先补后重排),
+   扩展索引下末尾 19 行全 NaN,R08 三因子取均值整体 NaN —— **静默全缺失,不报错**。)
+
+   **新 E1(c)(更严):同一次运行里跑两遍 build_fund ——**
+   **(c-1)** 把 `_crr.DATA` 指回**旧面板**算出的 R09,必须与 `pool_20260828.csv`
+            **逐只相等(容差 1e-9)** —— 证明代码路径没变、变的只有财务口径;
+   **(c-2)** 把 `_crr.DATA` 指向**扩展面板**算出的 R09,是本节的正式输出。
+   **(c-1) 不过则本节作废。** 这比原来那条严:原来只验一个数,现在要求
+   「旧口径可复现 + 新口径另算」两件事同时成立。
 
 E2 描述项(不设通过/不通过,只登记必须报什么)
    (a) R09:我 vs 他,可比只数、中位 |差|、|差| < 0.05 的占比、Spearman ρ;
@@ -72,6 +90,7 @@ from codex_routes_rerun import build_fund, route_scores  # noqa: E402
 
 DATA = os.environ.get("OXQ_PANEL_DIR",
                       "/home/user/oxq-panel-0828/oxq_stock_market_fixed")
+_OLD = "/home/user/oxq-panel/oxq_stock_market_fixed"   # 锚点E1(c-1) 用
 OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
 POOLCSV = ("/home/user/open-xquant/examples/ashare-bull-stock-study/results/"
            "codex_cross_check/pool_20260828.csv")
@@ -139,12 +158,22 @@ def main():  # noqa: PLR0915
     # 实测抽样 494 只里 **334 只(67.6%)** 两张面板的末行 eps 不同
     # (000001:旧 0.67 一季报 vs 新 1.24 中报)。不改就是拿一季报算 R08/R09。
     _crr.DATA = DATA
+    tl = nt - 1
+    e = np.flatnonzero(zok[tl] & np.isfinite(logcap[tl]) & np.isfinite(tmean[tl]))
+
+    # 锚点E1(c-1):先用**旧面板**的财务跑一遍,必须复现已落库的那一列。
+    _crr.DATA = _OLD
+    fm_old, abad_old = build_fund(zc, idx)
+    assert abad_old == 0, "锚点E1b(旧口径)TTM 恒等式不过"
+    v_old = np.full(len(zc), np.nan)
+    v_old[e] = route_scores("R09", tl, e, fm_old, zcl, zraw, logcap, tmean, "raw")
+    del fm_old
+    print(f"旧口径 R09 算完(用于锚点E1c-1)({time.time()-t0:.0f}s)", flush=True)
+
+    _crr.DATA = DATA
     fm, abad = build_fund(zc, idx)
     assert abad == 0, "锚点E1b TTM 恒等式不过"
     print(f"锚点E1b ✓ TTM 违例 0 ({time.time()-t0:.0f}s)", flush=True)
-
-    tl = nt - 1
-    e = np.flatnonzero(zok[tl] & np.isfinite(logcap[tl]) & np.isfinite(tmean[tl]))
     res = {}
     for name, mode in (("R09", "raw"), ("R08", "raw"), ("R08", "qfq")):
         v = np.full(len(zc), np.nan)
@@ -165,17 +194,24 @@ def main():  # noqa: PLR0915
         j = zpos.get(c, -1)
         rows.append({"股票代码": c,
                      "我R09": res[("R09", "raw")][j] if j >= 0 else np.nan,
+                     "旧口径R09": v_old[j] if j >= 0 else np.nan,
                      "我R08_真实口径": res[("R08", "raw")][j] if j >= 0 else np.nan,
                      "我R08_前复权口径": res[("R08", "qfq")][j] if j >= 0 else np.nan})
     m = pool[["股票代码", "股票名称", "信号类型", "R09核心质量分"]].merge(
         pd.DataFrame(rows), on="股票代码").merge(his, on="股票代码", how="left")
 
-    a, b = m["R09核心质量分"].to_numpy(float), m["我R09"].to_numpy(float)
+    a, b = m["R09核心质量分"].to_numpy(float), m["旧口径R09"].to_numpy(float)
     g = np.isfinite(a) & np.isfinite(b)
     dmax = float(np.max(np.abs(a[g] - b[g]))) if g.sum() else 0.0
     ok_c = dmax < 1e-9
-    print(f"\n锚点E1c R09 与已落库 pool_20260828.csv:可比 {int(g.sum())} 只,"
-          f"最大绝对差 {dmax:.3e} {'✓' if ok_c else '✗ 本节作废'}", flush=True)
+    print(f"\n锚点E1(c-1) 旧口径 R09 vs 已落库 pool_20260828.csv:可比 {int(g.sum())} 只,"
+          f"最大绝对差 {dmax:.3e} {'✓ 代码路径未变' if ok_c else '✗ 本节作废'}", flush=True)
+    c2 = m["我R09"].to_numpy(float)
+    g2 = np.isfinite(b) & np.isfinite(c2)
+    print(f"锚点E1(c-2) 新口径(中报)vs 旧口径(一季报):可比 {int(g2.sum())} 只,"
+          f"中位|差| {np.median(np.abs(b[g2]-c2[g2])):.4f},"
+          f"最大|差| {np.max(np.abs(b[g2]-c2[g2])):.4f}"
+          f" —— 这就是那个 bug 造成的偏移量", flush=True)
     if not ok_c:
         return
 
