@@ -1,4 +1,4 @@
-"""§164 用扩展到 2026-08-28 的面板,按 §163 已对齐的口径出当日模板清单。
+"""§165 统一改用 RPS50 分档(承用户指令),用扩展到 2026-08-28 的面板,按 §163 已对齐的口径出当日模板清单。
 
 **口径与 §163 逐字相同,只换三处:面板目录、锚点形状、输出区间。**
 面板 = /home/user/oxq-panel-0828(2013-01-04 → 2026-08-28,含 19 个新交易日),
@@ -76,13 +76,14 @@ from platform_pivot import vec_screen  # noqa: E402
 
 OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
 PSTATE = f"{OUT}/platform_state.npz"
+CODEX50 = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/949ad4ba-____20260831_Claude_____RPS50.xlsx")
 XL = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/"
       "0abc3d92-X01_____R09_________________v0.4____.xlsx")
 MIN_XS = 100
 COLS = ["样本类型", "观察日期", "股票代码", "股票名称", "收盘价", "统一信号",
         "信号类型", "信号理由", "首次触发日期", "连续确认天数", "触发状态",
         "平台信号", "周线多头排列", "案例展示分层_质量", "案例辅助标签_周线五态",
-        "距一年低点涨幅", "近120日收益", "MA20持续度", "RPS60", "RPS250",
+        "距一年低点涨幅", "近120日收益", "MA20持续度", "RPS50", "RPS60", "RPS250",
         "距一年高点价格差", "平台深度", "平台缩量比", "平台收敛比", "R09核心质量分"]
 
 
@@ -186,6 +187,7 @@ def main():  # noqa: PLR0915
         r120 = px.pct_change(120).to_numpy()
         r60 = px.pct_change(60).to_numpy()
         r250 = px.pct_change(250).to_numpy()
+        r50 = px.pct_change(50).to_numpy()
         ret5 = px.pct_change(5).to_numpy()
     del lo250, hi250, ma20
 
@@ -204,8 +206,8 @@ def main():  # noqa: PLR0915
                                    method="average").to_numpy() * 100.0
         out[n < MIN_XS] = np.nan
         return out
-    rps60, rps250 = rps_codex(r60), rps_codex(r250)
-    del r60, r250
+    rps50, rps60, rps250 = rps_codex(r50), rps_codex(r60), rps_codex(r250)
+    del r60, r250, r50
     print(f"RPS(Codex 口径,池 {int(inpool.sum()):,} 只)完成 "
           f"({time.time()-t0:.0f}s)", flush=True)
 
@@ -245,7 +247,11 @@ def main():  # noqa: PLR0915
            & np.isfinite(lo_prev))
     print(f"平台状态重算完成:三条全中 {int((hit3 & okm).sum()):,} 点、"
           f"突破买点 {int(brk.sum()):,} 个 ({time.time()-t0:.0f}s)", flush=True)
-    tt = tier(rec, r120, mfr, rps60)
+    # 【口径变更】X01 分档改用 RPS50(用户指令,与 Codex 的
+    # rule_version=claude_rps50_weekly_v1.0 对齐);RPS60 仍照常输出供交叉核对。
+    # **平台强势日仍用 RPS60** —— 宇通 42天/2023-10-17 与第一五五节全部验证
+    # 都建立在 RPS60 尺子上,换掉即作废,故未一并更改,单独标出待定。
+    tt = tier(rec, r120, mfr, rps50)
     uni = np.isin(tt, ("标准确认", "强确认"))
     psig = np.where(brk, "平台突破（研究）", np.where(hit3, "平台观察", "无平台信号"))
 
@@ -325,7 +331,7 @@ def main():  # noqa: PLR0915
                     "反弹≥40%" if rec[t, j] >= .40 else "",
                     "120日收益≥10%" if r120[t, j] >= .10 else "",
                     "MA20持续度≥55%" if mfr[t, j] >= .55 else "",
-                    f"RPS60={rps60[t, j]:.1f}" if np.isfinite(rps60[t, j]) else "",
+                    f"RPS50={rps50[t, j]:.1f}" if np.isfinite(rps50[t, j]) else "",
                 ) if x),
                 "首次触发日期": ft, "连续确认天数": r,
                 "触发状态": ("新触发" if r == 1 else "持续" if r > 1 else "未触发"),
@@ -333,12 +339,17 @@ def main():  # noqa: PLR0915
                 "案例展示分层_质量": qtier(np.array([q]))[0],
                 "案例辅助标签_周线五态": w5[t, j],
                 "距一年低点涨幅": rec[t, j], "近120日收益": r120[t, j],
-                "MA20持续度": mfr[t, j], "RPS60": rps60[t, j], "RPS250": rps250[t, j],
+                "MA20持续度": mfr[t, j], "RPS50": rps50[t, j], "RPS60": rps60[t, j],
+                "RPS250": rps250[t, j],
                 "距一年高点价格差": gap[t, j], "平台深度": dep[t, j],
                 "平台缩量比": shr[t, j], "平台收敛比": cnv[t, j],
                 "R09核心质量分": q}
 
-    # ---- 锚点 B/C/D:272 行案例 ----
+    # ---- 锚点 ----
+    # 【变更说明】原「信号类型 276/276」是在 **RPS60** 尺子下对 Codex v0.4 案例工作簿量的;
+    # 本节分档改 RPS50 后该锚点必然不再成立,**不是退步**。
+    # 平台与周线字段未变,仍对 v0.4 案例复核;信号类型改为与 Codex 2026-08-28
+    # 的 662 只 RPS50 版结果逐只比对。
     ca = pd.read_excel(XL, sheet_name="案例摘要", header=3).dropna(how="all")
     ca["股票代码"] = ca["股票代码"].astype(str).str.split(".").str[0].str.zfill(6)
     ca["观察日期"] = pd.to_datetime(ca["观察日期"])
@@ -348,35 +359,49 @@ def main():  # noqa: PLR0915
         if j is None or t >= nt or idx[t] != r["观察日期"]:
             continue
         ck.append({"代码": r["股票代码"], "日期": r["观察日期"].date(),
-                   "他_信号类型": r["信号类型"], "我_信号类型": tt[t, j],
                    "他_平台信号": r["平台信号"], "我_平台信号": psig[t, j],
-                   "他_周线": r["周线结构"], "我_周线": w5[t, j],
-                   "他_质量分": r["R09核心质量分"], "我_质量分": float(qscore(t)[j])})
+                   "他_周线": r["周线结构"], "我_周线": w5[t, j]})
     ck = pd.DataFrame(ck)
     w = 92
-    print(f"\n{'='*w}\n锚点:{len(ck)} 行案例(修正后)\n{'='*w}")
-    rates = {}
-    for k, thr, before in (("信号类型", 0.95, 1.000), ("平台信号", 0.95, 0.996),
-                           ("周线", None, 0.824)):
+    print(f"\n{'='*w}\n锚点一:v0.4 案例 {len(ck)} 行(平台与周线字段未变)\n{'='*w}")
+    for k, thr in (("平台信号", 0.95), ("周线", 0.95)):
         m = ck[f"他_{k}"].astype(str) == ck[f"我_{k}"].astype(str)
-        rates[k] = float(m.mean())
-        tag = (f"门槛 {thr:.0%} {'✓' if m.mean() >= thr else '✗'}" if thr
-               else f"修正前 {before:.1%} → {'✓ 有提升' if m.mean() > before else '✗ 未提升'}")
-        print(f"  {k:<8} {int(m.sum()):>4}/{len(ck)} = {m.mean():>6.1%}   {tag}")
-        if k == "周线" and m.mean() < 1:
-            print("    仍不一致:")
-            print("    " + ck[~m][["代码", "日期", "他_周线", "我_周线"]].head(10)
-                  .to_string(index=False).replace("\n", "\n    "))
-    a, b = ck["他_质量分"].to_numpy(float), ck["我_质量分"].to_numpy(float)
-    gq = np.isfinite(a) & np.isfinite(b)
-    print(f"  R09质量分(回函已确认案例侧非正式口径,不设锚点):可比 {int(gq.sum())}、"
-          f"相关 {pd.Series(a[gq]).corr(pd.Series(b[gq])):.4f}、"
-          f"中位|差| {np.median(np.abs(a[gq]-b[gq])):.4f}")
+        print(f"  {k:<8}{int(m.sum()):>4}/{len(ck)} = {m.mean():>6.1%}  "
+              f"{'✓' if m.mean() >= thr else '✗'}")
     ck.to_csv(f"{OUT}/template_20260828_anchor.csv", index=False,
               encoding="utf-8-sig")
-    if rates["信号类型"] < 0.95 or rates["平台信号"] < 0.95:
-        print("\n**锚点 B/C 不过 → 不出 2022 清单**")
-        return
+    try:
+        cx = pd.read_excel(CODEX50, sheet_name="全部清单", header=1,
+                           dtype={"股票代码": str})
+        cx = cx[cx["股票代码"].notna()].copy()
+        cx["股票代码"] = cx["股票代码"].astype(str).str.split(".").str[0].str.zfill(6)
+        cmp_ = []
+        for _, r in cx.iterrows():
+            j = pos.get(r["股票代码"])
+            if j is None:
+                continue
+            cmp_.append({"代码": r["股票代码"], "他": r["信号类型"],
+                         "我": tt[nt - 1, j], "他RPS50": r.get("RPS50"),
+                         "我RPS50": rps50[nt - 1, j],
+                         "我合格": bool(okm[nt - 1, j])})
+        cd = pd.DataFrame(cmp_)
+        sg = cd[cd["他"].isin(["强确认", "标准确认", "观察级"])]
+        m = (sg["他"] == sg["我"])
+        print(f"\n{'='*w}\n锚点二:与 Codex 2026-08-28 RPS50 版逐只比对"
+              f"(他池 {len(cd)} 只)\n{'='*w}")
+        print(f"  他有信号 {len(sg)} 只,信号类型完全一致 {int(m.sum())} = {m.mean():.1%}")
+        print(pd.crosstab(sg["他"], sg["我"]).to_string())
+        a5 = pd.to_numeric(sg["他RPS50"], errors="coerce").to_numpy()
+        b5 = sg["我RPS50"].to_numpy(float)
+        g5 = np.isfinite(a5) & np.isfinite(b5)
+        if g5.sum():
+            print(f"  RPS50 数值:可比 {int(g5.sum())};中位|差| "
+                  f"{np.median(np.abs(a5[g5]-b5[g5])):.3f};"
+                  f"|差|<3 占 {(np.abs(a5[g5]-b5[g5]) < 3).mean():.1%}")
+        cd.to_csv(f"{OUT}/template_20260828_vs_codex.csv", index=False,
+                  encoding="utf-8-sig")
+    except Exception as ex:                                    # noqa: BLE001
+        print(f"\n锚点二跳过:{ex}")
 
     tl = nt - 1
     assert str(idx[tl].date()) == "2026-08-28", f"末日 {idx[tl].date()}"
