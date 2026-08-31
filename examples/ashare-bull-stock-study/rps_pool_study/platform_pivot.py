@@ -125,6 +125,11 @@ from industry_neutral import build_industry  # noqa: E402
 
 OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
 MAXPOS, HOLD_MAX, STOP_CAP, NSEED, COST = 10, 120, 0.15, 500, 0.002
+# 强势日尺子开关。**默认 60,即第一五五节的原样** —— 不设环境变量时本文件逐字可复现。
+# OXQ_STRONG_N=50 时改用 RPS50 >= 90(与 Codex 的 claude_rps50_weekly_v1.0 对齐)。
+# 之所以做成开关而不是直接改掉:第一五五节的全部数字都挂在 RPS60 上,
+# 直接改会让那一节静默失去可复现性。
+STRONG_N = int(os.environ.get("OXQ_STRONG_N", "60"))
 MA_MKT = 200
 TRAIN, HOLD = ("2019-01-01", "2022-12-31"), ("2023-01-01", "2026-04-30")
 
@@ -278,6 +283,26 @@ def mdd(eq):
 def main():  # noqa: PLR0915
     t0 = time.time()
     cl_df, frames, strong, ma100 = load_panel(DATA)
+    if STRONG_N != 60:
+        # 换尺子。**必须在剔除 510300 之前算** —— RPS 是 axis=1 的横截面分位,
+        # 少一列会让每一只的分位都变(实测差 358 点)。
+        # fill_method 显式写成 'pad',与 load_panel 里 pct_change 的默认值一致。
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            clw = cl_df.where(cl_df > 0)
+            rp = clw.pct_change(STRONG_N, fill_method="pad").rank(axis=1, pct=True) * 100
+            # B1(e-3) 恒等断言:同一条代码路径在 N=60 下必须逐点复现 load_panel 的
+            # 强势日矩阵。过了才说明「只有尺子变了」,实现本身没动。
+            r60 = clw.pct_change(60, fill_method="pad").rank(axis=1, pct=True) * 100
+        assert np.array_equal((r60 > 90).to_numpy(), strong), (
+            f"锚点B1(e-3) 不过:自算 RPS60 强势日 {int((r60 > 90).to_numpy().sum())} "
+            f"vs load_panel {int(strong.sum())} —— 换尺子的实现有问题,本次作废")
+        print(f"锚点B1(e-3) ✓ 同一路径在 N=60 下逐点复现 load_panel "
+              f"({int(strong.sum()):,} 点)", flush=True)
+        strong = (rp >= 90).to_numpy()      # Codex 口径是 >= 90,不是 > 90
+        print(f"【口径变更】强势日改用 RPS{STRONG_N} >= 90:"
+              f"{int(strong.sum()):,} 点(RPS60>90 的原口径见第一五五节)", flush=True)
     if "510300" in cl_df.columns:
         cl_df = cl_df.drop(columns=["510300"])
         strong = strong[:, [i for i, c in enumerate(ma100.columns) if c != "510300"]] \
@@ -341,7 +366,13 @@ def main():  # noqa: PLR0915
     print(f"           (参考:2023-2024 全年共 {len(full)} 天,"
           f"最后 {full[-1].date() if len(full) else '—'})", flush=True)
     if not okyt:
-        return
+        if STRONG_N == 60:
+            return
+        # 换尺子后这三个数**必然**不再成立 —— 那是尺子换了,不是实现坏了。
+        # 此时锚点降为描述项,由调用方(platform_rps50.py)另设的 B1(e-3) 负责证明
+        # 「只有尺子变了」:同一份代码在 OXQ_STRONG_N=60 下必须仍然复现 42 天。
+        print(f"           上面三个数是 RPS60 尺子下的锚点;当前尺子 RPS{STRONG_N},"
+              f"**不成立是预期内的,不作废**,改由 B1(e-3) 证明实现未变。", flush=True)
 
     # ---- 组合用的价格与合格池(用户规则5:ffill 参与,绝不剔除)----
     d2 = {k: {} for k in ("float_mv", "is_st", "is_suspended", "listed_days",

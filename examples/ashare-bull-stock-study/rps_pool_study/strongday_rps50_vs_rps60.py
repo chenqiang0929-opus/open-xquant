@@ -21,7 +21,11 @@ Codex 交来的 `weekly_signals/weekly_engine.py` 里 `platform_state()` 用的�
 A. 面板 (3316, 5232);
 B. 末日 = 2026-08-28;
 C. RPS60 腿在 662 池内的「平台观察」必须复现 `pool_20260828.csv` 里的 **19 只**,
-   且 RPS60 腿的宇通 600066 锚点必须复现 **42 天 / 首次 2023-10-17 / 最后 2024-01-09**
+   且 RPS60 腿的宇通 600066 锚点必须复现 **窗口 [2023-10-17, 2024-01-09] 内 42 天**。
+   **【更正】** 第一版我把它数成了「2023-2024 全年 42 天」,量出 55 天并报成
+   「锚点不过、本行作废」—— **那是我量错了对象,不是锚点不过。**
+   第八七/一五五节记的一直是**窗口内**的天数(`platform_pivot.py:B1(e-2)` 就是这么写的),
+   全年 55 天正是那段代码里 `full` 那个参考数。已改回窗口口径。
    —— 复现不了说明我这次的调用与出表时的调用不是同一条路径,结论作废。
 D. 自算的 `RPS60 > 90` 强势日矩阵必须与 `load_panel` 返回的**逐点相等** ——
    这是为了保证两条腿唯一的差别是窗口长度(50 vs 60),不是缺失处理。
@@ -158,17 +162,23 @@ def main():
     # 换尺子后这三个数变成什么,是「要不要统一到 RPS50」的决定性依据。
     if "600066" in pos:
         j = pos["600066"]
-        a = int(np.searchsorted(idx, pd.Timestamp("2023-01-01")))
-        b = int(np.searchsorted(idx, pd.Timestamp("2024-12-31")))
+        # 【更正】第八七/一五五节记录的「42 天」是**窗口 [2023-10-17, 2024-01-09] 之内**
+        # 的三条全中天数,不是 2023-2024 全年的天数。我第一次写这段时数的是全年
+        # (RPS60 腿得 55 天),那不是锚点不过,是**我量错了对象**。
+        # 这里按 platform_pivot.py:B1(e-2) 的原样,窗口内与全年两个数都印。
+        def cnt(hit3, lo, hi):
+            a = int(np.searchsorted(idx, pd.Timestamp(lo)))
+            b = int(np.searchsorted(idx, pd.Timestamp(hi), side="right"))
+            return np.flatnonzero(hit3[a:b, j] & okm[a:b, j]) + a
         for tag, (hit3, _, _, _) in res.items():
-            d = np.flatnonzero(hit3[a:b, j] & okm[a:b, j]) + a
-            rows.append({"尺子": tag + " / 宇通600066锚点",
-                         "全市场三条全中": len(d), "池内平台观察": "", "池内平台突破": "",
-                         "池内清单": (f"三条全中 {len(d)} 天;首次 {idx[d[0]].date()};"
-                                      f"最后 {idx[d[-1]].date()}") if len(d)
-                                     else "区间内无三条全中"})
-            print(f"  [{tag}] 宇通 600066(2023-01→2024-12):三条全中 {len(d)} 天"
-                  + (f";首次 {idx[d[0]].date()};最后 {idx[d[-1]].date()}" if len(d) else ""))
+            w = cnt(hit3, "2023-10-17", "2024-01-09")
+            f_ = cnt(hit3, "2023-01-01", "2024-12-31")
+            txt = (f"窗口[2023-10-17,2024-01-09]内三条全中 {len(w)} 天"
+                   + (f";首次 {idx[w[0]].date()};最后 {idx[w[-1]].date()}" if len(w) else "")
+                   + f"(参考:2023-2024 全年 {len(f_)} 天)")
+            rows.append({"尺子": tag + " / 宇通600066锚点", "全市场三条全中": len(w),
+                         "池内平台观察": "", "池内平台突破": "", "池内清单": txt})
+            print(f"  [{tag}] 宇通 600066:{txt}")
     pd.DataFrame(rows).to_csv(f"{OUT}/strongday_rps50_vs_rps60.csv", index=False,
                               encoding="utf-8-sig")
     d = pd.DataFrame(det)
