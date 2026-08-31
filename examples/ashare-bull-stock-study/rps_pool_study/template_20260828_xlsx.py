@@ -104,6 +104,15 @@ def sheet(wb, name, df, note=None):
     return ws
 
 
+def _codex_agree():
+    try:
+        v = pd.read_csv(f"{OUT}/template_20260828_vs_codex.csv")
+        v = v[v["他"].isin(["强确认", "标准确认", "观察级"])]
+        return int((v["他"] == v["我"]).sum())
+    except OSError:
+        return -1
+
+
 def main():
     a = pd.read_csv(f"{OUT}/template_20260828.csv", dtype={"股票代码": str})
     a["股票代码"] = a["股票代码"].str.zfill(6)
@@ -214,6 +223,8 @@ def main():
     cm = {c: i for i, c in enumerate(k.columns, 1)}
     for rr in range(2, len(k) + 2):
         for f in ("信号类型", "平台信号", "周线"):
+            if f"他_{f}" not in cm or f"我_{f}" not in cm:
+                continue
             i1, i2 = cm.get(f"他_{f}"), cm.get(f"我_{f}")
             if not (i1 and i2):
                 continue
@@ -222,6 +233,30 @@ def main():
                 ws3.cell(rr, i).fill = PatternFill(
                     "solid", fgColor="C6EFCE" if same else "FFC7CE")
     ws3.freeze_panes = "C2"
+
+    try:
+        vc = pd.read_csv(f"{OUT}/template_20260828_vs_codex.csv",
+                         dtype={"代码": str})
+        vc["代码"] = vc["代码"].str.zfill(6)
+        ws5 = wb.create_sheet("与Codex逐只")
+        ws5.append(list(vc.columns))
+        for c in range(1, len(vc.columns) + 1):
+            ws5.cell(1, c).fill = NAVY
+            ws5.cell(1, c).font = HF
+            ws5.column_dimensions[get_column_letter(c)].width = 14
+        for _, r in vc.iterrows():
+            ws5.append([None if (isinstance(v, float) and not np.isfinite(v)) else v
+                        for v in r.tolist()])
+        ci = {c: i for i, c in enumerate(vc.columns, 1)}
+        for rr in range(2, len(vc) + 2):
+            a_, b_ = ws5.cell(rr, ci["他"]).value, ws5.cell(rr, ci["我"]).value
+            if a_ in ("强确认", "标准确认", "观察级"):
+                f = "C6EFCE" if str(a_) == str(b_) else "FFC7CE"
+                for i in (ci["他"], ci["我"]):
+                    ws5.cell(rr, i).fill = PatternFill("solid", fgColor=f)
+        ws5.freeze_panes = "B2"
+    except OSError:
+        pass
 
     chk = pd.DataFrame([
         {"检查项": "总行数", "值": len(a)},
@@ -242,8 +277,8 @@ def main():
                    & (a["平台信号"] == "平台突破（研究）")).sum())},
         {"检查项": "周线多头排列为真", "值": int(a["周线多头排列"].sum())},
         {"检查项": "锚点行数", "值": len(k)},
-        {"检查项": "锚点·信号类型一致",
-         "值": int((k["他_信号类型"] == k["我_信号类型"]).sum())},
+        {"检查项": "锚点二·与Codex信号类型一致(其有信号 86 只)",
+         "值": _codex_agree()},
         {"检查项": "锚点·平台信号一致",
          "值": int((k["他_平台信号"] == k["我_平台信号"]).sum())},
         {"检查项": "锚点·周线五态一致",
