@@ -76,6 +76,7 @@ from platform_pivot import vec_screen  # noqa: E402
 
 OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
 PSTATE = f"{OUT}/platform_state.npz"
+POOL = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/b8437f45-___20260831.xls")
 CODEX50 = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/949ad4ba-____20260831_Claude_____RPS50.xlsx")
 XL = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/"
       "0abc3d92-X01_____R09_________________v0.4____.xlsx")
@@ -414,6 +415,46 @@ def main():  # noqa: PLR0915
         ["观察日期", "信号类型", "RPS60"], ascending=[True, True, False])
     out.to_csv(f"{OUT}/template_20260828.csv", index=False,
                encoding="utf-8-sig")
+
+    # ---- 次新股池全量输出(含无信号与数据不足,对齐 Codex 的 662 行格式)----
+    pl = pd.read_csv(POOL, sep="\t", encoding="gbk", dtype=str)
+    pl = pl.rename(columns={pl.columns[0]: "代码"})
+    pl["代码"] = (pl["代码"].astype(str).str.replace('="', "", regex=False)
+                  .str.replace('"', "", regex=False).str.strip().str.zfill(6))
+    pl = pl[pl["代码"].str.fullmatch(r"\d{6}")].drop_duplicates("代码")
+    prows, miss = [], []
+    for c in pl["代码"]:
+        j = pos.get(c)
+        if j is None:
+            miss.append((c, "面板无此股"))
+            continue
+        r = row("池内观察", tl, int(j))
+        why = []
+        if not okm[tl, j]:
+            why.append("不合格(ST/停牌/上市不足250日/无成交)")
+        for nm_, v in (("距一年低点涨幅", rec[tl, j]), ("近120日收益", r120[tl, j]),
+                       ("MA20持续度", mfr[tl, j]), ("RPS50", rps50[tl, j])):
+            if not np.isfinite(v):
+                why.append(f"{nm_}缺失")
+        r["数据状态"] = "正常" if not why else "数据不足:" + "、".join(why)
+        if why:
+            r["统一信号"] = None
+            r["信号类型"] = "数据不足"
+        prows.append(r)
+    for c, w_ in miss:
+        prows.append({**{k: None for k in COLS}, "样本类型": "池内观察",
+                      "观察日期": idx[tl].date(), "股票代码": c,
+                      "信号类型": "数据不足", "数据状态": f"数据不足:{w_}"})
+    po = pd.DataFrame(prows)[[*COLS, "数据状态"]]
+    po.to_csv(f"{OUT}/pool_20260828.csv", index=False, encoding="utf-8-sig")
+    print(f"\n{'='*w}\n次新股池全量({len(pl)} 只)\n{'='*w}")
+    print("  " + po["信号类型"].value_counts().to_string().replace("\n", "\n  "))
+    ok_ = po[po["信号类型"] != "数据不足"]
+    print(f"  可评估 {len(ok_)} 只;统一信号=1 共 "
+          f"{int(pd.to_numeric(ok_['统一信号'], errors='coerce').sum())} 只")
+    print("  平台信号:")
+    print("    " + ok_["平台信号"].value_counts().to_string().replace("\n", "\n    "))
+    print(f"  落库 {OUT}/pool_20260828.csv")
     print(f"\n{'='*w}\n2026-08-28 当日清单\n{'='*w}")
     print(f"  总行数 {len(out):,};涉及 {out['股票代码'].nunique():,} 只")
     for c in ("信号类型", "平台信号", "案例展示分层_质量",
