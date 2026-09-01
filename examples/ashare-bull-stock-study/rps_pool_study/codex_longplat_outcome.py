@@ -108,8 +108,15 @@ from panel_cache import cached  # noqa: E402
 DATA = os.environ.get("OXQ_PANEL_DIR",
                       "/home/user/oxq-panel-0828/oxq_stock_market_fixed")
 OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
-EV = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/"
-      "999d097e-long_platform_breakouts.csv")
+# 事件源可切换:OXQ_EV 指向 Codex 的事件 CSV。默认 v2;v3 见下。
+EV = os.environ.get("OXQ_EV", "/root/.claude/uploads/"
+                    "e2d9b05a-8247-5772-8b9d-397e7f62f9fd/"
+                    "999d097e-long_platform_breakouts.csv")
+TAG = os.environ.get("OXQ_EV_TAG", "v2")
+# 锚点样本随版本走:v3 增加了寒武纪 688256(它正是量比上限从 1.20 放到 1.25 的依据)。
+ANCHOR = {"v2": (("601318", "2017-04-26", 1.00559), ("688347", "2025-07-24", 1.02800)),
+          "v3": (("601318", "2017-04-26", 1.00559), ("688256", "2023-02-07", 1.00991),
+                 ("688347", "2025-07-24", 1.02800))}
 HOLD = (5, 20, 60, 120, 250)
 NSEED, JUDGE_H, JUDGE_RPS = 200, 60, 80
 
@@ -184,8 +191,7 @@ def main():  # noqa: PLR0915
 
     # ---- 锚点 H1b:两个样本的比值 ----
     ok_b, det = True, []
-    for code, dt, exp in (("601318", "2017-04-26", 1.00559),
-                          ("688347", "2025-07-24", 1.02800)):
+    for code, dt, exp in ANCHOR[TAG]:
         row = e[(e["code"] == code) & (e["breakout_date"] == dt)]
         if not len(row):
             det.append(f"{code}/{dt} 不在可用事件里")
@@ -270,7 +276,11 @@ def main():  # noqa: PLR0915
 
     rows = []
     rp = e["breakout_rps50"].to_numpy()
+    # H3 登记的是「四个分层」;这里多加 ≥70/≥75 两层是**加描述、不改判定**
+    # —— Codex v3 把建议标准档从 ≥80 改成了 ≥75,不列出来无法回答他。
+    # **H2 的判定档仍是 JUDGE_RPS=80,一个字不动。**
     layers = [("无门槛", np.ones(len(e), bool)), ("RPS50≥50", rp >= 50),
+              ("RPS50≥70", rp >= 70), ("RPS50≥75", rp >= 75),
               ("RPS50≥80", rp >= 80), ("RPS50≥90", rp >= 90)]
     w = 100
     print(f"\n{'='*w}\nH3 分层 × 持有期\n{'='*w}")
@@ -294,9 +304,9 @@ def main():  # noqa: PLR0915
         print(f"  年化超额 {r['年化超额pp']:+.2f}pp(≥+3.00 {'✓' if c1 else '✗'});"
               f"单尾 p {r['p']:.4f}(<0.05 {'✓' if c2 else '✗'})"
               f" → **{'通过' if c1 and c2 else '不通过'}**")
-    pd.DataFrame(rows).to_csv(f"{OUT}/codex_longplat_outcome.csv", index=False,
+    pd.DataFrame(rows).to_csv(f"{OUT}/codex_longplat_outcome_{TAG}.csv", index=False,
                               encoding="utf-8-sig")
-    e.drop(columns=["j"]).to_csv(f"{OUT}/codex_longplat_events.csv", index=False,
+    e.drop(columns=["j"]).to_csv(f"{OUT}/codex_longplat_events_{TAG}.csv", index=False,
                                  encoding="utf-8-sig")
     print(f"\n落库 {OUT}/codex_longplat_outcome.csv ({time.time()-t0:.0f}s)")
 
