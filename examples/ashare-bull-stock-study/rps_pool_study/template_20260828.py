@@ -73,6 +73,7 @@ from codex_r10_replication import DATA as _D  # noqa: E402
 DATA = os.environ.get("OXQ_PANEL_DIR", _D)
 import codex_routes_rerun as _crr  # noqa: E402
 from codex_routes_rerun import build_fund, route_scores  # noqa: E402
+from panel_cache import cached  # noqa: E402
 from platform_pivot import vec_screen  # noqa: E402
 
 OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
@@ -149,34 +150,41 @@ def main():  # noqa: PLR0915
     t0 = time.time()
     codes = [os.path.basename(f)[:-8] for f in sorted(glob.glob(f"{DATA}/*.parquet"))
              if os.path.basename(f)[:-8] != "510300"]
-    cols = ["close", "volume", "is_st", "is_suspended", "listed_days"]
-    d = {c: {} for c in cols}
-    for c in codes:
-        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=cols)
-        if getattr(x.index, "tz", None) is not None:
-            x.index = x.index.tz_localize(None)
-        for k in cols:
-            d[k][c] = x[k]
-    cldf = pd.DataFrame(d["close"]).sort_index()
-    idx = cldf.index
-    nt, ns = cldf.shape
-    assert (nt, ns) == (3316, 5232), f"锚点A {cldf.shape}"
 
-    def al(k, f=np.nan):
-        return pd.DataFrame(d[k]).sort_index().reindex(
-            index=idx, columns=cldf.columns).fillna(f).to_numpy()
-    cl = cldf.where(cldf > 0).ffill().to_numpy(np.float64)
-    # 源数据缺陷:mktdata_enriched 里 588 只科创板(688)的 listed_days 在近期为 0,
-    # 其余三个板 0%。直接用会把整个科创板判成"上市不足250日"而全部剔除。
-    # 修正:把 0 视为缺失、按股票前向填充最近一个有效值(仍不足则保持 0)。
-    ld = al("listed_days", 0)
-    ldf = pd.DataFrame(ld).replace(0, np.nan).ffill().fillna(0).to_numpy()
-    print(f"listed_days 修正:末日为 0 的 {int((ld[nt-1] == 0).sum())} 只 → "
-          f"修正后 {int((ldf[nt-1] == 0).sum())} 只", flush=True)
-    okm = (~al("is_st", True).astype(bool)
-           & ~al("is_suspended", True).astype(bool)
-           & (ldf >= 250) & (al("volume", 0) > 0)
-           & np.isfinite(cl))
+    def _build_panel():
+        cols = ["close", "volume", "is_st", "is_suspended", "listed_days"]
+        d = {c: {} for c in cols}
+        for c in codes:
+            x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=cols)
+            if getattr(x.index, "tz", None) is not None:
+                x.index = x.index.tz_localize(None)
+            for k in cols:
+                d[k][c] = x[k]
+        cldf_ = pd.DataFrame(d["close"]).sort_index()
+        idx_ = cldf_.index
+
+        def al_(k, f=np.nan):
+            return pd.DataFrame(d[k]).sort_index().reindex(
+                index=idx_, columns=cldf_.columns).fillna(f).to_numpy()
+        cl_ = cldf_.where(cldf_ > 0).ffill().to_numpy(np.float64)
+        # 源数据缺陷:mktdata_enriched 里 588 只科创板(688)的 listed_days 在近期为 0,
+        # 其余三个板 0%。直接用会把整个科创板判成"上市不足250日"而全部剔除。
+        # 修正:把 0 视为缺失、按股票前向填充最近一个有效值(仍不足则保持 0)。
+        ld_ = al_("listed_days", 0)
+        ldf_ = pd.DataFrame(ld_).replace(0, np.nan).ffill().fillna(0).to_numpy()
+        print(f"listed_days 修正:末日为 0 的 {int((ld_[-1] == 0).sum())} 只 → "
+              f"修正后 {int((ldf_[-1] == 0).sum())} 只", flush=True)
+        okm_ = (~al_("is_st", True).astype(bool)
+                & ~al_("is_suspended", True).astype(bool)
+                & (ldf_ >= 250) & (al_("volume", 0) > 0)
+                & np.isfinite(cl_))
+        return {"idx": idx_.values.astype("datetime64[ns]"), "cl": cl_, "okm": okm_,
+                "vol": al_("volume", np.nan)}
+    _p = cached("panel", DATA, _build_panel)
+    idx = pd.DatetimeIndex(_p["idx"])
+    cl, okm = _p["cl"], _p["okm"]
+    nt, ns = cl.shape
+    assert (nt, ns) == (3316, 5232), f"锚点A {(nt, ns)}"
     px = pd.DataFrame(cl)
     lo250 = px.rolling(250, min_periods=250).min().to_numpy()
     hi250 = px.rolling(250, min_periods=250).max().to_numpy()
@@ -226,17 +234,25 @@ def main():  # noqa: PLR0915
         THR_SHRINK,
         load_panel,
     )
-    pcl, pframes, pstrong, pma100 = load_panel(DATA)
-    if "510300" in pcl.columns:
-        keep = [i for i, c in enumerate(pma100.columns) if c != "510300"]
-        pcl = pcl.drop(columns=["510300"])
-        pstrong = pstrong[:, keep]
-    assert list(pcl.columns) == codes, "平台面板列顺序与主面板不一致"
-    assert (pcl.index == idx).all(), "平台面板日期与主面板不一致"
-    ts_a, adj_a, pdep, pshr, pcnv, phi, plo = vec_screen(
-        pcl.to_numpy(float), pframes, pstrong, pma100, idx, codes)
-    del pframes
-    dep, shr, cnv = pdep, pshr, pcnv
+    def _build_plat():
+        pcl, pframes, pstrong, pma100 = load_panel(DATA)
+        if "510300" in pcl.columns:
+            keep = [i for i, c in enumerate(pma100.columns) if c != "510300"]
+            pcl = pcl.drop(columns=["510300"])
+            pstrong = pstrong[:, keep]
+        assert list(pcl.columns) == codes, "平台面板列顺序与主面板不一致"
+        assert (pcl.index == idx).all(), "平台面板日期与主面板不一致"
+        a, b, c_, d_, e_, f_, g_ = vec_screen(
+            pcl.to_numpy(float), pframes, pstrong, pma100, idx, codes)
+        del pframes
+        # dtype 必须原样带走:phi/plo 是 float64——第一五五节的真 bug 就是
+        # float32 在「打平」处把等于误判成突破,虚增留出段约 4pp。
+        return {"ts_a": a, "adj_a": b, "dep": c_, "shr": d_, "cnv": e_,
+                "phi": f_, "plo": g_}
+    _q = cached("platform", DATA, _build_plat, extra="rps60")
+    ts_a, adj_a = _q["ts_a"], _q["adj_a"]
+    dep, shr, cnv, phi, plo = _q["dep"], _q["shr"], _q["cnv"], _q["phi"], _q["plo"]
+    assert phi.dtype == np.float64 and plo.dtype == np.float64, "平台上下沿必须 float64"
     hit3 = ((shr < THR_SHRINK) & (cnv < THR_ATR) & (dep <= THR_DEPTH)
             & (adj_a >= 0))
     up_prev = np.full((nt, ns), np.nan, np.float64)
@@ -287,20 +303,28 @@ def main():  # noqa: PLR0915
     gb = zback >= 0
     zok[:, gb] = okm[:, zback[gb]]          # 全程用扩展面板重算,不用缓存的 OK
     print(f"OK 改为按扩展面板重算:末日合格 {int(zok[nt-1].sum()):,} 只", flush=True)
-    raw = np.full((nt, len(zc)), np.nan, np.float32)
-    for j, c in enumerate(zc):
-        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
-        if getattr(x.index, "tz", None) is not None:
-            x.index = x.index.tz_localize(None)
-        raw[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
-            lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
-    # 【修正】build_fund 用的是 codex_routes_rerun 的模块级 DATA(= 旧面板),
-    # 不认 OXQ_PANEL_DIR。旧面板止于 2026-08-03,而中报在 8 月中旬才披露 ——
-    # 实测抽样 494 只里 **334 只(67.6%)** 两张面板的末行 eps 不同
-    # (000001:旧 0.67 一季报 vs 新 1.24 中报)。不改就是拿一季报算 R08/R09。
-    _crr.DATA = DATA
-    fm, abad = build_fund(zc, idx)
-    assert abad == 0, "TTM 恒等式不过"
+    def _build_fund():
+        raw_ = np.full((nt, len(zc)), np.nan, np.float32)
+        for j, c in enumerate(zc):
+            x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
+            if getattr(x.index, "tz", None) is not None:
+                x.index = x.index.tz_localize(None)
+            raw_[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
+                lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
+        # 【修正】build_fund 用的是 codex_routes_rerun 的模块级 DATA(= 旧面板),
+        # 不认 OXQ_PANEL_DIR。旧面板止于 2026-08-03,而中报在 8 月中旬才披露 ——
+        # 实测抽样 494 只里 **334 只(67.6%)** 两张面板的末行 eps 不同
+        # (000001:旧 0.67 一季报 vs 新 1.24 中报)。不改就是拿一季报算 R08/R09。
+        _crr.DATA = DATA
+        fm_, abad_ = build_fund(zc, idx)
+        assert abad_ == 0, "TTM 恒等式不过"
+        out = {"raw": raw_, "_abad": np.array([abad_])}
+        out.update({f"fm_{k}": v for k, v in fm_.items()})
+        return out
+    _f = cached("fund", DATA, _build_fund)
+    raw = _f["raw"]
+    fm = {k[3:]: v for k, v in _f.items() if k.startswith("fm_")}
+    assert int(_f["_abad"][0]) == 0, "TTM 恒等式不过(缓存)"
     zpos = {c: j for j, c in enumerate(zc)}
     zmap = np.array([zpos.get(c, -1) for c in codes])
     gm = zmap >= 0
