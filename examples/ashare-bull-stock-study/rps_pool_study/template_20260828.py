@@ -77,6 +77,9 @@ from panel_cache import cached  # noqa: E402
 from platform_pivot import vec_screen  # noqa: E402
 
 OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
+# 平台「强势日」的尺子。第一六八节按用户指令统一到 RPS50,故默认 50。
+# 设 OXQ_STRONG_N=60 可退回原口径(第一五五节的全部数字挂在 RPS60 上)。
+STRONG_N = int(os.environ.get("OXQ_STRONG_N", "50"))
 PSTATE = f"{OUT}/platform_state.npz"
 POOL = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/b8437f45-___20260831.xls")
 CODEX50 = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/949ad4ba-____20260831_Claude_____RPS50.xlsx")
@@ -87,7 +90,8 @@ COLS = ["样本类型", "观察日期", "股票代码", "股票名称", "收盘�
         "信号类型", "信号理由", "首次触发日期", "连续确认天数", "触发状态",
         "平台信号", "周线多头排列", "案例展示分层_质量", "案例辅助标签_周线五态",
         "距一年低点涨幅", "近120日收益", "MA20持续度", "RPS50", "RPS60", "RPS250",
-        "距一年高点价格差", "平台深度", "平台缩量比", "平台收敛比", "R09核心质量分"]
+        "距一年高点价格差", "平台调整天数", "平台深度", "平台缩量比",
+        "平台收敛比", "R09核心质量分"]
 
 
 def weekly_wfri(cl, idx):
@@ -236,6 +240,26 @@ def main():  # noqa: PLR0915
     )
     def _build_plat():
         pcl, pframes, pstrong, pma100 = load_panel(DATA)
+        if STRONG_N != 60:
+            # 第一六八节:平台「强势日」按用户指令统一到 RPS50 >= 90。
+            # **必须在剔除 510300 之前算** —— RPS 是 axis=1 的横截面分位,
+            # 少一列会让每一只的分位都变(实测差 358 点)。
+            # fill_method 显式写 'pad',与 load_panel 里 pct_change 的默认值一致。
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                clw = pcl.where(pcl > 0)
+                rp = (clw.pct_change(STRONG_N, fill_method="pad")
+                      .rank(axis=1, pct=True) * 100)
+                r60 = clw.pct_change(60, fill_method="pad").rank(axis=1, pct=True) * 100
+            # 恒等断言:同一条路径在 N=60 下必须逐点复现 load_panel,
+            # 过了才说明「只有尺子变了、实现没动」(第一六八节 C1(e-3) 同款)。
+            assert np.array_equal((r60 > 90).to_numpy(), pstrong), (
+                f"强势日恒等断言不过:自算 RPS60 {int((r60 > 90).to_numpy().sum())} "
+                f"vs load_panel {int(pstrong.sum())}")
+            pstrong = (rp >= 90).to_numpy()      # Codex 口径是 >= 90,不是 > 90
+            print(f"【口径变更】平台强势日 RPS{STRONG_N} >= 90:"
+                  f"{int(pstrong.sum()):,} 点(恒等断言已过)", flush=True)
         if "510300" in pcl.columns:
             keep = [i for i, c in enumerate(pma100.columns) if c != "510300"]
             pcl = pcl.drop(columns=["510300"])
@@ -249,7 +273,7 @@ def main():  # noqa: PLR0915
         # float32 在「打平」处把等于误判成突破,虚增留出段约 4pp。
         return {"ts_a": a, "adj_a": b, "dep": c_, "shr": d_, "cnv": e_,
                 "phi": f_, "plo": g_}
-    _q = cached("platform", DATA, _build_plat, extra="rps60")
+    _q = cached("platform", DATA, _build_plat, extra=f"rps{STRONG_N}")
     ts_a, adj_a = _q["ts_a"], _q["adj_a"]
     dep, shr, cnv, phi, plo = _q["dep"], _q["shr"], _q["cnv"], _q["phi"], _q["plo"]
     assert phi.dtype == np.float64 and plo.dtype == np.float64, "平台上下沿必须 float64"
@@ -267,8 +291,9 @@ def main():  # noqa: PLR0915
           f"突破买点 {int(brk.sum()):,} 个 ({time.time()-t0:.0f}s)", flush=True)
     # 【口径变更】X01 分档改用 RPS50(用户指令,与 Codex 的
     # rule_version=claude_rps50_weekly_v1.0 对齐);RPS60 仍照常输出供交叉核对。
-    # **平台强势日仍用 RPS60** —— 宇通 42天/2023-10-17 与第一五五节全部验证
-    # 都建立在 RPS60 尺子上,换掉即作废,故未一并更改,单独标出待定。
+    # **平台强势日也已统一到 RPS50**(第一六八节):重跑第一五五节全套后
+    # 留出段年化 +15.83%→+13.02%、超额 −2.46pp→−5.27pp、p 0.656→0.810,
+    # 主判据仍不通过 —— 但 RPS60 下本来就不通过,结论未变。
     tt = tier(rec, r120, mfr, rps50)
     uni = np.isin(tt, ("标准确认", "强确认"))
     psig = np.where(brk, "平台突破（研究）", np.where(hit3, "平台观察", "无平台信号"))
@@ -372,7 +397,11 @@ def main():  # noqa: PLR0915
                 "距一年低点涨幅": rec[t, j], "近120日收益": r120[t, j],
                 "MA20持续度": mfr[t, j], "RPS50": rps50[t, j], "RPS60": rps60[t, j],
                 "RPS250": rps250[t, j],
-                "距一年高点价格差": gap[t, j], "平台深度": dep[t, j],
+                "距一年高点价格差": gap[t, j],
+                # 平台调整天数 = 当日距最近强势日的交易日数;-1 表示无平台
+                "平台调整天数": (int(adj_a[t, j]) if adj_a[t, j] >= 0
+                             else np.nan),
+                "平台深度": dep[t, j],
                 "平台缩量比": shr[t, j], "平台收敛比": cnv[t, j],
                 "R09核心质量分": q}
 
