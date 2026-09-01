@@ -465,6 +465,33 @@ def main():  # noqa: PLR0915
 
     tl = nt - 1
     assert str(idx[tl].date()) == "2026-08-28", f"末日 {idx[tl].date()}"
+    # ---- 单只全历史模式(OXQ_STOCK_HISTORY=688347 [OXQ_HIST_END=2026-06-30])----
+    # 复用同一个 row(),所有字段逐字与当日清单同源,只是把「取末日一行」换成
+    # 「取这只股票的每一个交易日」。qscore(t) 对每个 t 要算一次全市场 R09 横截面,
+    # 所以这一路比出当日清单慢,但仍建立在缓存之上。
+    hcode = os.environ.get("OXQ_STOCK_HISTORY", "").strip()
+    if hcode:
+        assert hcode in codes, f"面板里没有 {hcode}"
+        jh = codes.index(hcode)
+        hend = os.environ.get("OXQ_HIST_END", str(idx[tl].date()))
+        te = int(np.searchsorted(idx.values, np.datetime64(hend), side="right")) - 1
+        assert te >= 0, f"{hend} 早于面板起点"
+        good = np.isfinite(cl[:te + 1, jh]) & (cl[:te + 1, jh] > 0)
+        fin = np.flatnonzero(good)
+        assert len(fin), f"{hcode} 在 {hend} 之前没有有效收盘"
+        t0h = int(fin[0])
+        print(f"\n单只全历史:{hcode} {nmap.get(hcode, '')} "
+              f"{idx[t0h].date()} -> {idx[te].date()},"
+              f"共 {te - t0h + 1} 个交易日", flush=True)
+        hrows = [row("历史观察", t, jh) for t in range(t0h, te + 1)]
+        hd = pd.DataFrame(hrows)[COLS]
+        hp = f"{OUT}/stock_history_{hcode}.csv"
+        hd.to_csv(hp, index=False, encoding="utf-8-sig")
+        for cname in ("信号类型", "平台信号", "触发状态"):
+            vc = hd[cname].value_counts()
+            print(f"  {cname}: " + "、".join(f"{k} {v}" for k, v in vc.items()),
+                  flush=True)
+        print(f"  落库 {hp}", flush=True)
     e = np.flatnonzero(okm[tl] & (np.isin(tt[tl], ("观察级", "标准确认", "强确认"))
                                   | (psig[tl] != "无平台信号")))
     rows = [row("当日观察", tl, int(j)) for j in e]
