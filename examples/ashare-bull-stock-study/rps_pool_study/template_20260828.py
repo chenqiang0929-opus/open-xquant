@@ -480,6 +480,11 @@ def main():  # noqa: PLR0915
         fin = np.flatnonzero(good)
         assert len(fin), f"{hcode} 在 {hend} 之前没有有效收盘"
         t0h = int(fin[0])
+        hstart = os.environ.get("OXQ_HIST_START", "").strip()
+        if hstart:      # 只是缩小输出区间,不改任何字段的计算(仍用全历史算指标)
+            ts_ = int(np.searchsorted(idx.values, np.datetime64(hstart), side="left"))
+            t0h = max(t0h, ts_)
+            assert t0h <= te, f"起始日 {hstart} 晚于截止日 {hend}"
         print(f"\n单只全历史:{hcode} {nmap.get(hcode, '')} "
               f"{idx[t0h].date()} -> {idx[te].date()},"
               f"共 {te - t0h + 1} 个交易日", flush=True)
