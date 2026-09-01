@@ -161,8 +161,12 @@ def build_fund(codes, idx):
             fm[k][:, j] = df[k].to_numpy(np.float32)
         fm["roe_lvl"][:, j] = df["roe_lvl"].to_numpy(np.float32)
         fm["roe_chg"][:, j] = df["roe_chg"].to_numpy(np.float32)
+        # 【修正】原写法是 .ffill().reindex(idx) —— 先补后重排,若 idx 比文件索引长
+        # (扩展面板),多出来的日期一律是 NaN,整条 R08 会静默变成全缺失。
+        # 同函数其他字段走的是 line 158 的 .reindex(idx).ffill()(先重排后补)。
+        # 索引相同时两者恒等,所以本改动对第一一七节是 no-op。
         fm["bps"][:, j] = pd.to_numeric(x["book_value_per_share"], errors="coerce"
-                                       ).ffill().reindex(idx).to_numpy(np.float32)
+                                        ).reindex(idx).ffill().to_numpy(np.float32)
         if (j + 1) % 1500 == 0:
             print(f"  财务 {j+1}/{ns} ({time.time()-t0:.0f}s)", flush=True)
     print(f"财务面板完成 ({time.time()-t0:.0f}s);TTM 恒等式:{anchor_n} 个年报点,"
