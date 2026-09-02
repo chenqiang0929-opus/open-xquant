@@ -73,9 +73,13 @@ from codex_r10_replication import DATA as _D  # noqa: E402
 DATA = os.environ.get("OXQ_PANEL_DIR", _D)
 import codex_routes_rerun as _crr  # noqa: E402
 from codex_routes_rerun import build_fund, route_scores  # noqa: E402
+from panel_cache import cached  # noqa: E402
 from platform_pivot import vec_screen  # noqa: E402
 
 OUT = os.environ.get("OXQ_OUT_DIR", "/home/user/oxq-panel")
+# 平台「强势日」的尺子。第一六八节按用户指令统一到 RPS50,故默认 50。
+# 设 OXQ_STRONG_N=60 可退回原口径(第一五五节的全部数字挂在 RPS60 上)。
+STRONG_N = int(os.environ.get("OXQ_STRONG_N", "50"))
 PSTATE = f"{OUT}/platform_state.npz"
 POOL = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/b8437f45-___20260831.xls")
 CODEX50 = ("/root/.claude/uploads/e2d9b05a-8247-5772-8b9d-397e7f62f9fd/949ad4ba-____20260831_Claude_____RPS50.xlsx")
@@ -86,7 +90,8 @@ COLS = ["样本类型", "观察日期", "股票代码", "股票名称", "收盘�
         "信号类型", "信号理由", "首次触发日期", "连续确认天数", "触发状态",
         "平台信号", "周线多头排列", "案例展示分层_质量", "案例辅助标签_周线五态",
         "距一年低点涨幅", "近120日收益", "MA20持续度", "RPS50", "RPS60", "RPS250",
-        "距一年高点价格差", "平台深度", "平台缩量比", "平台收敛比", "R09核心质量分"]
+        "距一年高点价格差", "平台调整天数", "平台深度", "平台缩量比",
+        "平台收敛比", "R09核心质量分"]
 
 
 def weekly_wfri(cl, idx):
@@ -149,34 +154,41 @@ def main():  # noqa: PLR0915
     t0 = time.time()
     codes = [os.path.basename(f)[:-8] for f in sorted(glob.glob(f"{DATA}/*.parquet"))
              if os.path.basename(f)[:-8] != "510300"]
-    cols = ["close", "volume", "is_st", "is_suspended", "listed_days"]
-    d = {c: {} for c in cols}
-    for c in codes:
-        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=cols)
-        if getattr(x.index, "tz", None) is not None:
-            x.index = x.index.tz_localize(None)
-        for k in cols:
-            d[k][c] = x[k]
-    cldf = pd.DataFrame(d["close"]).sort_index()
-    idx = cldf.index
-    nt, ns = cldf.shape
-    assert (nt, ns) == (3316, 5232), f"锚点A {cldf.shape}"
 
-    def al(k, f=np.nan):
-        return pd.DataFrame(d[k]).sort_index().reindex(
-            index=idx, columns=cldf.columns).fillna(f).to_numpy()
-    cl = cldf.where(cldf > 0).ffill().to_numpy(np.float64)
-    # 源数据缺陷:mktdata_enriched 里 588 只科创板(688)的 listed_days 在近期为 0,
-    # 其余三个板 0%。直接用会把整个科创板判成"上市不足250日"而全部剔除。
-    # 修正:把 0 视为缺失、按股票前向填充最近一个有效值(仍不足则保持 0)。
-    ld = al("listed_days", 0)
-    ldf = pd.DataFrame(ld).replace(0, np.nan).ffill().fillna(0).to_numpy()
-    print(f"listed_days 修正:末日为 0 的 {int((ld[nt-1] == 0).sum())} 只 → "
-          f"修正后 {int((ldf[nt-1] == 0).sum())} 只", flush=True)
-    okm = (~al("is_st", True).astype(bool)
-           & ~al("is_suspended", True).astype(bool)
-           & (ldf >= 250) & (al("volume", 0) > 0)
-           & np.isfinite(cl))
+    def _build_panel():
+        cols = ["close", "volume", "is_st", "is_suspended", "listed_days"]
+        d = {c: {} for c in cols}
+        for c in codes:
+            x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=cols)
+            if getattr(x.index, "tz", None) is not None:
+                x.index = x.index.tz_localize(None)
+            for k in cols:
+                d[k][c] = x[k]
+        cldf_ = pd.DataFrame(d["close"]).sort_index()
+        idx_ = cldf_.index
+
+        def al_(k, f=np.nan):
+            return pd.DataFrame(d[k]).sort_index().reindex(
+                index=idx_, columns=cldf_.columns).fillna(f).to_numpy()
+        cl_ = cldf_.where(cldf_ > 0).ffill().to_numpy(np.float64)
+        # 源数据缺陷:mktdata_enriched 里 588 只科创板(688)的 listed_days 在近期为 0,
+        # 其余三个板 0%。直接用会把整个科创板判成"上市不足250日"而全部剔除。
+        # 修正:把 0 视为缺失、按股票前向填充最近一个有效值(仍不足则保持 0)。
+        ld_ = al_("listed_days", 0)
+        ldf_ = pd.DataFrame(ld_).replace(0, np.nan).ffill().fillna(0).to_numpy()
+        print(f"listed_days 修正:末日为 0 的 {int((ld_[-1] == 0).sum())} 只 → "
+              f"修正后 {int((ldf_[-1] == 0).sum())} 只", flush=True)
+        okm_ = (~al_("is_st", True).astype(bool)
+                & ~al_("is_suspended", True).astype(bool)
+                & (ldf_ >= 250) & (al_("volume", 0) > 0)
+                & np.isfinite(cl_))
+        return {"idx": idx_.values.astype("datetime64[ns]"), "cl": cl_, "okm": okm_,
+                "vol": al_("volume", np.nan)}
+    _p = cached("panel", DATA, _build_panel)
+    idx = pd.DatetimeIndex(_p["idx"])
+    cl, okm = _p["cl"], _p["okm"]
+    nt, ns = cl.shape
+    assert (nt, ns) == (3316, 5232), f"锚点A {(nt, ns)}"
     px = pd.DataFrame(cl)
     lo250 = px.rolling(250, min_periods=250).min().to_numpy()
     hi250 = px.rolling(250, min_periods=250).max().to_numpy()
@@ -226,17 +238,45 @@ def main():  # noqa: PLR0915
         THR_SHRINK,
         load_panel,
     )
-    pcl, pframes, pstrong, pma100 = load_panel(DATA)
-    if "510300" in pcl.columns:
-        keep = [i for i, c in enumerate(pma100.columns) if c != "510300"]
-        pcl = pcl.drop(columns=["510300"])
-        pstrong = pstrong[:, keep]
-    assert list(pcl.columns) == codes, "平台面板列顺序与主面板不一致"
-    assert (pcl.index == idx).all(), "平台面板日期与主面板不一致"
-    ts_a, adj_a, pdep, pshr, pcnv, phi, plo = vec_screen(
-        pcl.to_numpy(float), pframes, pstrong, pma100, idx, codes)
-    del pframes
-    dep, shr, cnv = pdep, pshr, pcnv
+    def _build_plat():
+        pcl, pframes, pstrong, pma100 = load_panel(DATA)
+        if STRONG_N != 60:
+            # 第一六八节:平台「强势日」按用户指令统一到 RPS50 >= 90。
+            # **必须在剔除 510300 之前算** —— RPS 是 axis=1 的横截面分位,
+            # 少一列会让每一只的分位都变(实测差 358 点)。
+            # fill_method 显式写 'pad',与 load_panel 里 pct_change 的默认值一致。
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", FutureWarning)
+                clw = pcl.where(pcl > 0)
+                rp = (clw.pct_change(STRONG_N, fill_method="pad")
+                      .rank(axis=1, pct=True) * 100)
+                r60 = clw.pct_change(60, fill_method="pad").rank(axis=1, pct=True) * 100
+            # 恒等断言:同一条路径在 N=60 下必须逐点复现 load_panel,
+            # 过了才说明「只有尺子变了、实现没动」(第一六八节 C1(e-3) 同款)。
+            assert np.array_equal((r60 > 90).to_numpy(), pstrong), (
+                f"强势日恒等断言不过:自算 RPS60 {int((r60 > 90).to_numpy().sum())} "
+                f"vs load_panel {int(pstrong.sum())}")
+            pstrong = (rp >= 90).to_numpy()      # Codex 口径是 >= 90,不是 > 90
+            print(f"【口径变更】平台强势日 RPS{STRONG_N} >= 90:"
+                  f"{int(pstrong.sum()):,} 点(恒等断言已过)", flush=True)
+        if "510300" in pcl.columns:
+            keep = [i for i, c in enumerate(pma100.columns) if c != "510300"]
+            pcl = pcl.drop(columns=["510300"])
+            pstrong = pstrong[:, keep]
+        assert list(pcl.columns) == codes, "平台面板列顺序与主面板不一致"
+        assert (pcl.index == idx).all(), "平台面板日期与主面板不一致"
+        a, b, c_, d_, e_, f_, g_ = vec_screen(
+            pcl.to_numpy(float), pframes, pstrong, pma100, idx, codes)
+        del pframes
+        # dtype 必须原样带走:phi/plo 是 float64——第一五五节的真 bug 就是
+        # float32 在「打平」处把等于误判成突破,虚增留出段约 4pp。
+        return {"ts_a": a, "adj_a": b, "dep": c_, "shr": d_, "cnv": e_,
+                "phi": f_, "plo": g_}
+    _q = cached("platform", DATA, _build_plat, extra=f"rps{STRONG_N}")
+    ts_a, adj_a = _q["ts_a"], _q["adj_a"]
+    dep, shr, cnv, phi, plo = _q["dep"], _q["shr"], _q["cnv"], _q["phi"], _q["plo"]
+    assert phi.dtype == np.float64 and plo.dtype == np.float64, "平台上下沿必须 float64"
     hit3 = ((shr < THR_SHRINK) & (cnv < THR_ATR) & (dep <= THR_DEPTH)
             & (adj_a >= 0))
     up_prev = np.full((nt, ns), np.nan, np.float64)
@@ -251,8 +291,9 @@ def main():  # noqa: PLR0915
           f"突破买点 {int(brk.sum()):,} 个 ({time.time()-t0:.0f}s)", flush=True)
     # 【口径变更】X01 分档改用 RPS50(用户指令,与 Codex 的
     # rule_version=claude_rps50_weekly_v1.0 对齐);RPS60 仍照常输出供交叉核对。
-    # **平台强势日仍用 RPS60** —— 宇通 42天/2023-10-17 与第一五五节全部验证
-    # 都建立在 RPS60 尺子上,换掉即作废,故未一并更改,单独标出待定。
+    # **平台强势日也已统一到 RPS50**(第一六八节):重跑第一五五节全套后
+    # 留出段年化 +15.83%→+13.02%、超额 −2.46pp→−5.27pp、p 0.656→0.810,
+    # 主判据仍不通过 —— 但 RPS60 下本来就不通过,结论未变。
     tt = tier(rec, r120, mfr, rps50)
     uni = np.isin(tt, ("标准确认", "强确认"))
     psig = np.where(brk, "平台突破（研究）", np.where(hit3, "平台观察", "无平台信号"))
@@ -287,20 +328,28 @@ def main():  # noqa: PLR0915
     gb = zback >= 0
     zok[:, gb] = okm[:, zback[gb]]          # 全程用扩展面板重算,不用缓存的 OK
     print(f"OK 改为按扩展面板重算:末日合格 {int(zok[nt-1].sum()):,} 只", flush=True)
-    raw = np.full((nt, len(zc)), np.nan, np.float32)
-    for j, c in enumerate(zc):
-        x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
-        if getattr(x.index, "tz", None) is not None:
-            x.index = x.index.tz_localize(None)
-        raw[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
-            lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
-    # 【修正】build_fund 用的是 codex_routes_rerun 的模块级 DATA(= 旧面板),
-    # 不认 OXQ_PANEL_DIR。旧面板止于 2026-08-03,而中报在 8 月中旬才披露 ——
-    # 实测抽样 494 只里 **334 只(67.6%)** 两张面板的末行 eps 不同
-    # (000001:旧 0.67 一季报 vs 新 1.24 中报)。不改就是拿一季报算 R08/R09。
-    _crr.DATA = DATA
-    fm, abad = build_fund(zc, idx)
-    assert abad == 0, "TTM 恒等式不过"
+    def _build_fund():
+        raw_ = np.full((nt, len(zc)), np.nan, np.float32)
+        for j, c in enumerate(zc):
+            x = pd.read_parquet(f"{DATA}/{c}.parquet", columns=["raw_close"])
+            if getattr(x.index, "tz", None) is not None:
+                x.index = x.index.tz_localize(None)
+            raw_[:, j] = pd.to_numeric(x["raw_close"], errors="coerce").where(
+                lambda s: s > 0).ffill().reindex(idx).to_numpy(np.float32)
+        # 【修正】build_fund 用的是 codex_routes_rerun 的模块级 DATA(= 旧面板),
+        # 不认 OXQ_PANEL_DIR。旧面板止于 2026-08-03,而中报在 8 月中旬才披露 ——
+        # 实测抽样 494 只里 **334 只(67.6%)** 两张面板的末行 eps 不同
+        # (000001:旧 0.67 一季报 vs 新 1.24 中报)。不改就是拿一季报算 R08/R09。
+        _crr.DATA = DATA
+        fm_, abad_ = build_fund(zc, idx)
+        assert abad_ == 0, "TTM 恒等式不过"
+        out = {"raw": raw_, "_abad": np.array([abad_])}
+        out.update({f"fm_{k}": v for k, v in fm_.items()})
+        return out
+    _f = cached("fund", DATA, _build_fund)
+    raw = _f["raw"]
+    fm = {k[3:]: v for k, v in _f.items() if k.startswith("fm_")}
+    assert int(_f["_abad"][0]) == 0, "TTM 恒等式不过(缓存)"
     zpos = {c: j for j, c in enumerate(zc)}
     zmap = np.array([zpos.get(c, -1) for c in codes])
     gm = zmap >= 0
@@ -348,7 +397,11 @@ def main():  # noqa: PLR0915
                 "距一年低点涨幅": rec[t, j], "近120日收益": r120[t, j],
                 "MA20持续度": mfr[t, j], "RPS50": rps50[t, j], "RPS60": rps60[t, j],
                 "RPS250": rps250[t, j],
-                "距一年高点价格差": gap[t, j], "平台深度": dep[t, j],
+                "距一年高点价格差": gap[t, j],
+                # 平台调整天数 = 当日距最近强势日的交易日数;-1 表示无平台
+                "平台调整天数": (int(adj_a[t, j]) if adj_a[t, j] >= 0
+                             else np.nan),
+                "平台深度": dep[t, j],
                 "平台缩量比": shr[t, j], "平台收敛比": cnv[t, j],
                 "R09核心质量分": q}
 
@@ -412,6 +465,38 @@ def main():  # noqa: PLR0915
 
     tl = nt - 1
     assert str(idx[tl].date()) == "2026-08-28", f"末日 {idx[tl].date()}"
+    # ---- 单只全历史模式(OXQ_STOCK_HISTORY=688347 [OXQ_HIST_END=2026-06-30])----
+    # 复用同一个 row(),所有字段逐字与当日清单同源,只是把「取末日一行」换成
+    # 「取这只股票的每一个交易日」。qscore(t) 对每个 t 要算一次全市场 R09 横截面,
+    # 所以这一路比出当日清单慢,但仍建立在缓存之上。
+    hcode = os.environ.get("OXQ_STOCK_HISTORY", "").strip()
+    if hcode:
+        assert hcode in codes, f"面板里没有 {hcode}"
+        jh = codes.index(hcode)
+        hend = os.environ.get("OXQ_HIST_END", str(idx[tl].date()))
+        te = int(np.searchsorted(idx.values, np.datetime64(hend), side="right")) - 1
+        assert te >= 0, f"{hend} 早于面板起点"
+        good = np.isfinite(cl[:te + 1, jh]) & (cl[:te + 1, jh] > 0)
+        fin = np.flatnonzero(good)
+        assert len(fin), f"{hcode} 在 {hend} 之前没有有效收盘"
+        t0h = int(fin[0])
+        hstart = os.environ.get("OXQ_HIST_START", "").strip()
+        if hstart:      # 只是缩小输出区间,不改任何字段的计算(仍用全历史算指标)
+            ts_ = int(np.searchsorted(idx.values, np.datetime64(hstart), side="left"))
+            t0h = max(t0h, ts_)
+            assert t0h <= te, f"起始日 {hstart} 晚于截止日 {hend}"
+        print(f"\n单只全历史:{hcode} {nmap.get(hcode, '')} "
+              f"{idx[t0h].date()} -> {idx[te].date()},"
+              f"共 {te - t0h + 1} 个交易日", flush=True)
+        hrows = [row("历史观察", t, jh) for t in range(t0h, te + 1)]
+        hd = pd.DataFrame(hrows)[COLS]
+        hp = f"{OUT}/stock_history_{hcode}.csv"
+        hd.to_csv(hp, index=False, encoding="utf-8-sig")
+        for cname in ("信号类型", "平台信号", "触发状态"):
+            vc = hd[cname].value_counts()
+            print(f"  {cname}: " + "、".join(f"{k} {v}" for k, v in vc.items()),
+                  flush=True)
+        print(f"  落库 {hp}", flush=True)
     e = np.flatnonzero(okm[tl] & (np.isin(tt[tl], ("观察级", "标准确认", "强确认"))
                                   | (psig[tl] != "无平台信号")))
     rows = [row("当日观察", tl, int(j)) for j in e]
