@@ -1,5 +1,24 @@
 """第一七四节 事前登记:长期平台突破加一条「回踩确认」,超额能不能回来(结果未跑)。
 
+【第一七五节补充登记 —— 时间样本外】
+--------------------------------
+第一七四节首跑的弱点是**把 2013-2026 全部数据一起用了**,而本项目自第一五二节起的
+标准一直是「训练段只报数,留出段判据在那里」。R08/R09 之所以站得住,正是过了这一关。
+所以 +2.86pp 那个数含金量低于表面。本次按时间切开重判,**判据门槛一个字不改**:
+
+  **训练段 2013-07 → 2021-12:只报数,不判。**
+  **留出段 2022-01-01 → 2026-08-28:判据在这里。**
+
+J2 主判据(留出段、60 日持有、纯结构不加 RPS 门槛):
+  **通过 ⟺ 四个 (N,k) 组合中至少一个的年化超额 ≥ +3.00pp 且单尾 p < 0.05。**
+  四个组合全部报告;**若只有一个过,按 Bonferroni 用 α = 0.05/4 = 0.0125 复判**,
+  两个结论都写。
+
+**切分点是按项目惯例定的(与第一五二/一五五/一六八节的留出段起点一致),
+不是看过结果后挑的。** 若留出段不过而全样本过,**以留出段为准**,
+并在正文写明「+2.86pp 是全样本挖出来的」。
+
+
 起因
 ----
 第一七三节把 Codex 的长期平台突破(v2 34,737 / v3 36,297 事件)做了收益后验:
@@ -210,9 +229,14 @@ def main():  # noqa: PLR0915
             viol += int(np.any(np.abs(rk[out[:, k]] - p_) > NBR))
         return out, viol
 
+    # 时间切分:训练段只报数,留出段判据(第一七五节补充登记)
+    split = int(np.searchsorted(idx.values, np.datetime64("2022-01-01")))
+    segs = (("训练段13-21", tt < split), ("留出段22-26", tt >= split))
     rows, w = [], 104
     print(f"\n{'='*w}\nI2/I3 回踩确认(纯结构,不加 RPS 门槛)\n{'='*w}")
-    print(f"{'确认':<12}{'确认率':>8}{'事件':>9}{'持有':>5}{'事件收益':>10}"
+    print(f"时间切分点 {idx[split].date()};训练段 {int((tt < split).sum()):,} 事件、"
+          f"留出段 {int((tt >= split).sum()):,} 事件")
+    print(f"{'段':<12}{'确认':<12}{'事件':>8}{'持有':>5}{'事件收益':>10}"
           f"{'对照中位':>10}{'超额pp':>9}{'年化超额pp':>12}{'p':>8}")
     for n, k in COMBOS:
         # 确认:突破后 n 日内最低收盘 ≥ 上沿×(1−k)
@@ -228,8 +252,9 @@ def main():  # noqa: PLR0915
         cs, viol = controls(np.where(good, ct, -1))
         if n == COMBOS[0][0] and k == COMBOS[0][1]:
             print(f"  锚点I1c 抽样违例 {viol} 个 {'✓' if viol == 0 else '✗'}")
-        for h in HOLD:
-            m = good & (cs[0] >= 0)
+        for segname, segm in segs:
+          for h in HOLD:
+            m = good & (cs[0] >= 0) & segm
             p0 = cl[np.clip(ct, 0, nt - 1), jj]
             p1 = cl[np.clip(ct + h, 0, nt - 1), jj]
             with np.errstate(all="ignore"):
@@ -246,12 +271,12 @@ def main():  # noqa: PLR0915
                     cm[s] = np.nanmean(cp1 / np.where(cp0 > 0, cp0, np.nan) - 1.0)
             med = float(np.nanmedian(cm))
             pv = float((np.sum(cm >= a) + 1) / (NSEED + 1))
-            rec = {"确认": f"N={n} k={k:.0%}", "确认率": cr, "n": int(m.sum()),
-                   "持有": h, "事件收益": a, "对照中位": med,
+            rec = {"段": segname, "确认": f"N={n} k={k:.0%}", "确认率": cr,
+                   "n": int(m.sum()), "持有": h, "事件收益": a, "对照中位": med,
                    "超额pp": (a - med) * 100,
                    "年化超额pp": (ann(a, h) - ann(med, h)) * 100, "p": pv}
             rows.append(rec)
-            print(f"{rec['确认']:<12}{cr:>7.1%}{rec['n']:>9,}{h:>5}"
+            print(f"{segname:<12}{rec['确认']:<12}{rec['n']:>8,}{h:>5}"
                   f"{a:>+10.2%}{med:>+10.2%}{rec['超额pp']:>+9.2f}"
                   f"{rec['年化超额pp']:>+12.2f}{pv:>8.4f}")
         # I3(b) 未通过确认的那批
@@ -272,8 +297,8 @@ def main():  # noqa: PLR0915
         print(f"    I3(c) 三只目标股(描述,不作判据):{' '.join(tg)}")
 
     d = pd.DataFrame(rows)
-    j = d[d["持有"] == JUDGE_H]
-    print(f"\n{'='*w}\nI2 主判据({JUDGE_H} 日持有,四个组合)\n{'='*w}")
+    j = d[(d["持有"] == JUDGE_H) & (d["段"] == "留出段22-26")]
+    print(f"\n{'='*w}\nJ2 主判据(**留出段 2022-2026**、{JUDGE_H} 日持有,四个组合)\n{'='*w}")
     npass = 0
     for _, r in j.iterrows():
         c1, c2 = r["年化超额pp"] >= 3.00, r["p"] < 0.05
@@ -281,7 +306,7 @@ def main():  # noqa: PLR0915
         print(f"  {r['确认']:<12} 年化超额 {r['年化超额pp']:+7.2f}pp "
               f"(≥+3.00 {'✓' if c1 else '✗'});p {r['p']:.4f} "
               f"(<0.05 {'✓' if c2 else '✗'}) → {'通过' if c1 and c2 else '不通过'}")
-    print(f"\n  **I2:四个组合中通过 {npass} 个 → "
+    print(f"\n  **J2(留出段):四个组合中通过 {npass} 个 → "
           f"{'通过' if npass else '不通过'}**")
     if npass:
         print("  **Bonferroni 复判(α = 0.05/4 = 0.0125,4 选 1 的 best-of-N):**")
@@ -289,7 +314,7 @@ def main():  # noqa: PLR0915
             if r["年化超额pp"] >= 3.00:
                 print(f"    {r['确认']:<12} p {r['p']:.4f} "
                       f"{'仍通过' if r['p'] < 0.0125 else '**不通过**'}")
-    d.to_csv(f"{OUT}/longplat_pullback.csv", index=False, encoding="utf-8-sig")
+    d.to_csv(f"{OUT}/longplat_pullback_oos.csv", index=False, encoding="utf-8-sig")
     print(f"\n落库 {OUT}/longplat_pullback.csv ({time.time()-t0:.0f}s)")
 
 
